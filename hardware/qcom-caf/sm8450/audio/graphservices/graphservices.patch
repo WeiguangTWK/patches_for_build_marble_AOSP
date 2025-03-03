@@ -1,0 +1,74 @@
+diff --git a/acdb/Android.mk b/acdb/Android.mk
+index 24472fa..b23e7f1 100644
+--- a/acdb/Android.mk
++++ b/acdb/Android.mk
+@@ -32,7 +32,7 @@ LOCAL_SRC_FILES := \
+     src/acdb_heap.c\
+     src/acdb_context_mgr.c
+ 
+-LOCAL_MODULE := libar-acdb
++LOCAL_MODULE := libar-acdb_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+@@ -119,7 +119,7 @@ LOCAL_SRC_FILES := \
+ 
+ LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/diag/include
+ 
+-LOCAL_MODULE := libats
++LOCAL_MODULE := libats_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/ar_osal/Android.mk b/ar_osal/Android.mk
+index 6219e11..b337430 100644
+--- a/ar_osal/Android.mk
++++ b/ar_osal/Android.mk
+@@ -61,7 +61,7 @@ endif
+ 
+ LOCAL_SHARED_LIBRARIES := liblog
+ 
+-LOCAL_MODULE := liblx-osal
++LOCAL_MODULE := liblx-osal_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/ar_util/Android.mk b/ar_util/Android.mk
+index 5a0f49e..beb666a 100644
+--- a/ar_util/Android.mk
++++ b/ar_util/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE := liblx-ar_util
++LOCAL_MODULE := liblx-ar_util_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/gpr/Android.mk b/gpr/Android.mk
+index 3bc92e0..2b7edd4 100644
+--- a/gpr/Android.mk
++++ b/gpr/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE := libar-gpr
++LOCAL_MODULE := libar-gpr_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/gsl/Android.mk b/gsl/Android.mk
+index 4e3b70c..0752c21 100644
+--- a/gsl/Android.mk
++++ b/gsl/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE := libar-gsl
++LOCAL_MODULE := libar-gsl_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true

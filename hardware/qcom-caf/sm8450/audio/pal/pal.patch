@@ -1,0 +1,44 @@
+diff --git a/Android.mk b/Android.mk
+index 6bf3e1a..af185f3 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -26,7 +26,7 @@ include $(BUILD_HEADER_LIBRARY)
+ 
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE        := libar-pal
++LOCAL_MODULE        := libar-pal_c
+ LOCAL_MODULE_OWNER  := qti
+ LOCAL_MODULE_TAGS   := optional
+ LOCAL_VENDOR_MODULE := true
+diff --git a/plugins/codecs/Android.mk b/plugins/codecs/Android.mk
+index b93a1c3..7ff2039 100644
+--- a/plugins/codecs/Android.mk
++++ b/plugins/codecs/Android.mk
+@@ -25,7 +25,7 @@ LOCAL_HEADER_LIBRARIES := \
+     libarosal_headers
+ 
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE := lib_bt_bundle
++LOCAL_MODULE := lib_bt_bundle_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_VENDOR_MODULE := true
+ include $(BUILD_SHARED_LIBRARY)
+@@ -53,7 +53,7 @@ LOCAL_HEADER_LIBRARIES := \
+     libarosal_headers
+ 
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE := lib_bt_aptx
++LOCAL_MODULE := lib_bt_aptx_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_VENDOR_MODULE := true
+ include $(BUILD_SHARED_LIBRARY)
+@@ -81,7 +81,7 @@ LOCAL_HEADER_LIBRARIES := \
+     libarosal_headers
+ 
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE := lib_bt_ble
++LOCAL_MODULE := lib_bt_ble_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_VENDOR_MODULE := true
+ include $(BUILD_SHARED_LIBRARY)
