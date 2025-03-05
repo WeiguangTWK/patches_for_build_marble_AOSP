@@ -13,3 +13,4 @@ what these patches done to make it work:
 3. Switch from EXT4 to EROFS
 4. \[for Chinese Users] Change NTP server
 5. \[for Chinese Users] Change captive portal detection URL
+6. \[for Chinese Users] Change default search engine of builtin browser
