@@ -1,0 +1,17 @@
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index d3f7a4e..9c80847 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -179,9 +179,9 @@
+     <!-- No activity found to open the given url error -->
+     <string name="error_no_activity_found">No app can handle this link</string>
+ 
+-    <string name="default_search_engine" translatable="false">https://google.com/search?ie=UTF-8&amp;source=android-browser&amp;q={searchTerms}</string>
+-    <string name="default_home_page" translatable="false">https://google.com</string>
+-    <string name="default_suggestion_provider" translatable="false">GOOGLE</string>
++    <string name="default_search_engine" translatable="false">https://www.bing.com/search?ie=UTF-8&amp;source=android-browser&amp;q={searchTerms}</string>
++    <string name="default_home_page" translatable="false">https://www.bing.com</string>
++    <string name="default_suggestion_provider" translatable="false">BING</string>
+ 
+     <!-- Auth dialog: title -->
+     <string name="auth_dialog_title">Authentication Required</string>
