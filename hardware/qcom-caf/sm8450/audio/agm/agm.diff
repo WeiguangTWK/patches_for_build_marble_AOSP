@@ -1,0 +1,26 @@
+diff --git a/ipc/HwBinders/agm_ipc_service/Android.mk b/ipc/HwBinders/agm_ipc_service/Android.mk
+index 5047ce1..a3aa4fd 100644
+--- a/ipc/HwBinders/agm_ipc_service/Android.mk
++++ b/ipc/HwBinders/agm_ipc_service/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE        := vendor.qti.hardware.AGMIPC@1.0-impl
++LOCAL_MODULE        := vendor.qti.hardware.AGMIPC@1.0-impl_c
+ LOCAL_MODULE_OWNER  := qti
+ LOCAL_VENDOR_MODULE := true
+ 
+diff --git a/service/Android.mk b/service/Android.mk
+index d404e8b..18840cd 100644
+--- a/service/Android.mk
++++ b/service/Android.mk
+@@ -9,7 +9,7 @@ include $(BUILD_HEADER_LIBRARY)
+ # Build libagm
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE        := libagm
++LOCAL_MODULE        := libagm_c
+ LOCAL_MODULE_OWNER  := qti
+ LOCAL_MODULE_TAGS   := optional
+ LOCAL_VENDOR_MODULE := true
