@@ -14,3 +14,4 @@ what these patches done to make it work:
 4. \[for Chinese Users] Change NTP server
 5. \[for Chinese Users] Change captive portal detection URL
 6. \[for Chinese Users] Change default search engine of builtin browser
+7. AVB & DM-verity Enabled
