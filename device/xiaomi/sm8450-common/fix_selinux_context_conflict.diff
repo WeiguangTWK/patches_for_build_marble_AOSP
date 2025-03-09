@@ -1,8 +1,0 @@
-diff --git a/sepolicy/vendor/service_contexts b/sepolicy/vendor/service_contexts
-index 2e7eb73..6b236f9 100644
---- a/sepolicy/vendor/service_contexts
-+++ b/sepolicy/vendor/service_contexts
-@@ -1,2 +1,2 @@
- # NFC
--vendor.nxp.nxpnfc_aidl.INxpNfc/default    u:object_r:hal_nfc_service:s0
-+# vendor.nxp.nxpnfc_aidl.INxpNfc/default    u:object_r:hal_nfc_service:s0

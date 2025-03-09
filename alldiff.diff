@@ -1,0 +1,1069 @@
+
+project build/release/
+diff --git a/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto b/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
+index 46d856b6..d7299023 100644
+--- a/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
++++ b/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
+@@ -1,5 +1,5 @@
+ name: "RELEASE_PLATFORM_SECURITY_PATCH"
+ value: {
+-  string_value: "2025-02-05"
++  string_value: "2025-03-01"
+ }
+ 
+
+project device/xiaomi/sm8450-common/
+diff --git a/BoardConfigCommon.mk b/BoardConfigCommon.mk
+index 086cf9a..ad2292e 100644
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -182,12 +182,12 @@ BOARD_SUPER_PARTITION_GROUPS := qti_dynamic_partitions
+ BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := odm product system system_ext vendor vendor_dlkm
+ BOARD_QTI_DYNAMIC_PARTITIONS_SIZE := 9122611200 # 0x21FC00000 # BOARD_SUPER_PARTITION_SIZE - overhead (4MiB)
+ 
+-BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_SYSTEM_EXTIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := ext4
++BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_SYSTEM_EXTIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := erofs
+ 
+ TARGET_COPY_OUT_ODM := odm
+ TARGET_COPY_OUT_PRODUCT := product
+@@ -266,7 +266,7 @@ DEVICE_FRAMEWORK_MANIFEST_FILE += $(COMMON_PATH)/vintf/framework_manifest.xml
+ 
+ # Verified Boot
+ BOARD_AVB_ENABLE := true
+-BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 3
++BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 0
+ BOARD_AVB_RECOVERY_KEY_PATH := external/avb/test/data/testkey_rsa2048.pem
+ BOARD_AVB_RECOVERY_ALGORITHM := SHA256_RSA2048
+ BOARD_AVB_RECOVERY_ROLLBACK_INDEX := $(PLATFORM_SECURITY_PATCH_TIMESTAMP)
+diff --git a/rootdir/etc/fstab.qcom b/rootdir/etc/fstab.qcom
+index 87fc04b..2d4b7d8 100644
+--- a/rootdir/etc/fstab.qcom
++++ b/rootdir/etc/fstab.qcom
+@@ -36,11 +36,19 @@
+ 
+ #<src>                                                 <mnt_point>            <type>  <mnt_flags and options>                            <fs_mgr_flags>
+ system                                                  /system                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
++system                                                  /system                erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
+ system_ext                                              /system_ext            ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system_ext                                              /system_ext            erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ product                                                 /product               ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++product                                                 /product               erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ vendor                                                  /vendor                ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor                                                  /vendor                erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ vendor_dlkm                                             /vendor_dlkm           ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor_dlkm                                             /vendor_dlkm           erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ odm                                                     /odm                   ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++odm                                                     /odm                   erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
++mi_ext                                                  /mi_ext                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
++mi_ext                                                  /mi_ext                erofs   ro                                                   wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
+ /dev/block/by-name/metadata                             /metadata              ext4    noatime,nosuid,nodev,discard                         wait,check,formattable,first_stage_mount
+ /dev/block/bootdevice/by-name/persist                   /mnt/vendor/persist    ext4    noatime,nosuid,nodev,barrier=1                       wait,check
+ /dev/block/bootdevice/by-name/userdata                  /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt    latemount,wait,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
+diff --git a/rootdir/etc/recovery.fstab b/rootdir/etc/recovery.fstab
+index 5f3818c..6f478b6 100644
+--- a/rootdir/etc/recovery.fstab
++++ b/rootdir/etc/recovery.fstab
+@@ -26,15 +26,21 @@
+ # IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #device         mount point      fstype        [device2] [length=]
+-system                                                  /system                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system                                                  /system                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
++system                                                  /system                erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
+ system_ext                                              /system_ext            ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system_ext                                              /system_ext            erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ product                                                 /product               ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++product                                                 /product               erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ vendor                                                  /vendor                ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor                                                  /vendor                erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
++vendor_dlkm                                             /vendor_dlkm           ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor_dlkm                                             /vendor_dlkm           erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ odm                                                     /odm                   ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+-/dev/block/bootdevice/by-name/metadata                  /metadata              ext4    noatime,nosuid,nodev,discard                         wait,check,formattable,wrappedkey,first_stage_mount
+-/dev/block/bootdevice/by-name/userdata                  /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier    latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
+-/devices/platform/soc/8804000.sdhci/mmc_host*           /storage/sdcard1       vfat    nosuid,nodev                                         wait,voldmanaged=sdcard1:auto,encryptable=footer
+-/devices/platform/soc/*.ssusb/*.dwc3/xhci-hcd.*.auto*   /storage/usbotg        vfat    nosuid,nodev                                         wait,voldmanaged=usbotg:auto
+-/dev/block/mmcblk0p1                       /sdcard         vfat    nosuid,nodev                                               wait
+-/dev/block/bootdevice/by-name/boot         /boot           emmc    defaults                                                   defaults
+-/dev/block/bootdevice/by-name/misc         /misc           emmc    defaults                                                   defaults
++odm                                                     /odm                   erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
++mi_ext                                                  /mi_ext                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
++mi_ext                                                  /mi_ext                erofs   ro                                                   wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
++/dev/block/by-name/metadata                             /metadata              ext4    noatime,nosuid,nodev,discard                         wait,check,formattable,first_stage_mount
++/dev/block/bootdevice/by-name/rescue                    /cache                 ext4    noatime,nosuid,nodev,barrier=1                       wait
++/dev/block/bootdevice/by-name/userdata                  /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt,gc_merge    latemount,wait,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
++/dev/block/bootdevice/by-name/misc                      /misc                  emmc    defaults                                             defaults
+
+project external/dng_sdk/
+diff --git a/source/dng_lossless_jpeg.cpp b/source/dng_lossless_jpeg.cpp
+index 9d0d01a..0cb9944 100644
+--- a/source/dng_lossless_jpeg.cpp
++++ b/source/dng_lossless_jpeg.cpp
+@@ -1616,6 +1616,10 @@ inline int32 dng_lossless_decoder::get_bit ()
+ inline int32 dng_lossless_decoder::HuffDecode (HuffmanTable *htbl)
+ 	{
+ 	
++	if (htbl == nullptr) {
++		ThrowBadFormat ();
++	}
++	
+     // If the huffman code is less than 8 bits, we can use the fast
+     // table lookup to get its value.  It's more than 8 bits about
+     // 3-4% of the time.
+
+project frameworks/base/
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index b87ba58441af..fa35b64f613b 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -2666,7 +2666,7 @@
+          Items must be in the form: "ntp://<host>[:port]"
+          This is not a registered IANA URI scheme. -->
+     <string-array translatable="false" name="config_ntpServers">
+-        <item>ntp://time.android.com</item>
++        <item>ntp://ntp.aliyun.com</item>
+     </string-array>
+     <!-- SNTP client config: Timeout to wait for an NTP server response in milliseconds. -->
+     <integer name="config_ntpTimeout">5000</integer>
+diff --git a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java
+index b20117d78230..6a929cd26eaf 100644
+--- a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java
++++ b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java
+@@ -19,6 +19,7 @@ package com.android.packageinstaller;
+ import static android.Manifest.permission;
+ import static android.content.pm.PackageManager.GET_PERMISSIONS;
+ import static android.content.pm.PackageManager.MATCH_ARCHIVED_PACKAGES;
++import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+ 
+ import android.app.Activity;
+ import android.app.DialogFragment;
+@@ -29,6 +30,7 @@ import android.content.pm.InstallSourceInfo;
+ import android.content.pm.PackageInstaller;
+ import android.content.pm.PackageManager;
+ import android.os.Bundle;
++import android.widget.Button;
+ import android.os.Process;
+ import android.text.TextUtils;
+ import android.util.Log;
+@@ -53,6 +55,8 @@ public class UnarchiveActivity extends Activity {
+ 
+     @Override
+     public void onCreate(Bundle icicle) {
++        getWindow().addSystemFlags(SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS);
++
+         super.onCreate(null);
+ 
+         int callingUid = getLaunchedFromUid();
+diff --git a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java
+index 42dd382b98bc..f2ebfc8e03f0 100644
+--- a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java
++++ b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java
+@@ -21,10 +21,13 @@ import android.app.Dialog;
+ import android.app.DialogFragment;
+ import android.content.DialogInterface;
+ import android.os.Bundle;
++import android.widget.Button;
+ 
+ public class UnarchiveFragment extends DialogFragment implements
+         DialogInterface.OnClickListener {
+ 
++    private Dialog mDialog;
++    private Button mRestoreButton;
+     @Override
+     public Dialog onCreateDialog(Bundle savedInstanceState) {
+         String appTitle = getArguments().getString(UnarchiveActivity.APP_TITLE);
+@@ -40,7 +43,32 @@ public class UnarchiveFragment extends DialogFragment implements
+         dialogBuilder.setPositiveButton(R.string.restore, this);
+         dialogBuilder.setNegativeButton(android.R.string.cancel, this);
+ 
+-        return dialogBuilder.create();
++        mDialog = dialogBuilder.create();
++        return mDialog;
++    }
++
++    @Override
++    public void onStart() {
++        super.onStart();
++        if (mDialog != null) {
++            mRestoreButton = ((AlertDialog) mDialog).getButton(DialogInterface.BUTTON_POSITIVE);
++        }
++    }
++
++    @Override
++    public void onPause() {
++        super.onPause();
++        if (mRestoreButton != null) {
++            mRestoreButton.setEnabled(false);
++        }
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        if (mRestoreButton != null) {
++            mRestoreButton.setEnabled(true);
++        }
+     }
+ 
+     @Override
+diff --git a/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java b/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java
+index 170cb4546d0c..46b3be8a1ddf 100644
+--- a/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java
++++ b/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java
+@@ -49,17 +49,16 @@ import android.os.UserManager;
+ import android.util.Log;
+ import androidx.annotation.NonNull;
+ import androidx.annotation.StringRes;
++
++import com.android.packageinstaller.common.EventResultPersister;
++import com.android.packageinstaller.common.UninstallEventReceiver;
+ import com.android.packageinstaller.handheld.ErrorDialogFragment;
+ import com.android.packageinstaller.handheld.UninstallAlertDialogFragment;
+ import com.android.packageinstaller.television.ErrorFragment;
+ import com.android.packageinstaller.television.UninstallAlertFragment;
+ import com.android.packageinstaller.television.UninstallAppProgress;
+-import com.android.packageinstaller.common.EventResultPersister;
+-import com.android.packageinstaller.common.UninstallEventReceiver;
+ import com.android.packageinstaller.v2.ui.UninstallLaunch;
+ 
+-import java.util.List;
+-
+ /*
+  * This activity presents UI to uninstall an application. Usually launched with intent
+  * Intent.ACTION_UNINSTALL_PKG_COMMAND and attribute
+@@ -181,12 +180,15 @@ public class UninstallerActivity extends Activity {
+         if (mDialogInfo.user == null) {
+             mDialogInfo.user = Process.myUserHandle();
+         } else {
+-            List<UserHandle> profiles = userManager.getUserProfiles();
+-            if (!profiles.contains(mDialogInfo.user)) {
+-                Log.e(TAG, "User " + Process.myUserHandle() + " can't request uninstall "
+-                        + "for user " + mDialogInfo.user);
+-                showUserIsNotAllowed();
+-                return;
++            if (!mDialogInfo.user.equals(Process.myUserHandle())) {
++                final boolean isCurrentUserProfileOwner = Process.myUserHandle().equals(
++                        userManager.getProfileParent(mDialogInfo.user));
++                if (!isCurrentUserProfileOwner) {
++                    Log.e(TAG, "User " + Process.myUserHandle() + " can't request uninstall "
++                            + "for user " + mDialogInfo.user);
++                    showUserIsNotAllowed();
++                    return;
++                }
+             }
+         }
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java
+index c997ac5ad9df..8093ce829f3d 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java
+@@ -20,7 +20,6 @@ import static android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG;
+ 
+ import static com.android.systemui.Flags.fetchBookmarksXmlKeyboardShortcuts;
+-import static com.android.systemui.Flags.validateKeyboardShortcutHelperIconUri;
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+@@ -428,9 +427,7 @@ public final class KeyboardShortcutListSearch {
+                 mKeySearchResultMap.put(SHORTCUT_SPECIFICAPP_INDEX, false);
+             } else {
+                 mCurrentAppPackageName = result.get(0).getPackageName();
+-                if (validateKeyboardShortcutHelperIconUri()) {
+-                    KeyboardShortcuts.sanitiseShortcuts(result);
+-                }
++                KeyboardShortcuts.sanitiseShortcuts(result);
+                 mSpecificAppGroup.addAll(
+                         reMapToKeyboardShortcutMultiMappingGroup(result));
+                 mKeySearchResultMap.put(SHORTCUT_SPECIFICAPP_INDEX, true);
+@@ -446,9 +443,7 @@ public final class KeyboardShortcutListSearch {
+         // Add specific Ime shortcuts
+         if (result != null) {
+             if (!result.isEmpty()) {
+-                if (validateKeyboardShortcutHelperIconUri()) {
+-                    KeyboardShortcuts.sanitiseShortcuts(result);
+-                }
++                KeyboardShortcuts.sanitiseShortcuts(result);
+                 mInputGroup.addAll(
+                         reMapToKeyboardShortcutMultiMappingGroup(result));
+             }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java
+index 766c391b14d8..2ed168aa82e8 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java
+@@ -21,7 +21,6 @@ import static android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG;
+ 
+ import static com.android.systemui.Flags.fetchBookmarksXmlKeyboardShortcuts;
+-import static com.android.systemui.Flags.validateKeyboardShortcutHelperIconUri;
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+@@ -412,10 +411,7 @@ public final class KeyboardShortcuts {
+         mReceivedAppShortcutGroups =
+                 result == null ? Collections.emptyList() : result;
+ 
+-        if (validateKeyboardShortcutHelperIconUri()) {
+-            sanitiseShortcuts(mReceivedAppShortcutGroups);
+-        }
+-
++        sanitiseShortcuts(mReceivedAppShortcutGroups);
+         maybeMergeAndShowKeyboardShortcuts();
+     }
+ 
+@@ -423,10 +419,7 @@ public final class KeyboardShortcuts {
+         mReceivedImeShortcutGroups =
+                 result == null ? Collections.emptyList() : result;
+ 
+-        if (validateKeyboardShortcutHelperIconUri()) {
+-            sanitiseShortcuts(mReceivedImeShortcutGroups);
+-        }
+-
++        sanitiseShortcuts(mReceivedImeShortcutGroups);
+         maybeMergeAndShowKeyboardShortcuts();
+     }
+ 
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java
+index 63e56eeb730f..8045a13ff9be 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java
+@@ -26,7 +26,6 @@ import static org.mockito.Mockito.when;
+ 
+ import android.graphics.drawable.Icon;
+ import android.os.Handler;
+-import android.platform.test.annotations.EnableFlags;
+ import android.view.KeyboardShortcutGroup;
+ import android.view.KeyboardShortcutInfo;
+ import android.view.WindowManager;
+@@ -34,7 +33,6 @@ import android.view.WindowManager;
+ import androidx.test.filters.SmallTest;
+ import androidx.test.runner.AndroidJUnit4;
+ 
+-import com.android.systemui.Flags;
+ import com.android.systemui.SysuiTestCase;
+ 
+ import com.google.android.material.bottomsheet.BottomSheetDialog;
+@@ -95,7 +93,6 @@ public class KeyboardShortcutListSearchTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestAppKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+ 
+@@ -114,7 +111,6 @@ public class KeyboardShortcutListSearchTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestImeKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+ 
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java
+index 105cf168995c..20ecaf75c625 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java
+@@ -31,7 +31,6 @@ import android.annotation.Nullable;
+ import android.app.Dialog;
+ import android.graphics.drawable.Icon;
+ import android.os.Handler;
+-import android.platform.test.annotations.EnableFlags;
+ import android.view.KeyboardShortcutGroup;
+ import android.view.KeyboardShortcutInfo;
+ import android.view.WindowManager;
+@@ -39,7 +38,6 @@ import android.view.WindowManager;
+ import androidx.test.filters.SmallTest;
+ import androidx.test.runner.AndroidJUnit4;
+ 
+-import com.android.systemui.Flags;
+ import com.android.systemui.SysuiTestCase;
+ 
+ import org.junit.Before;
+@@ -131,7 +129,6 @@ public class KeyboardShortcutsTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestAppKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+         KeyboardShortcuts.toggle(mContext, DEVICE_ID);
+@@ -143,7 +140,6 @@ public class KeyboardShortcutsTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestImeKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+         KeyboardShortcuts.toggle(mContext, DEVICE_ID);
+diff --git a/services/core/java/com/android/server/accounts/AccountManagerService.java b/services/core/java/com/android/server/accounts/AccountManagerService.java
+index 0ca3b56486e3..2c3a25949dc6 100644
+--- a/services/core/java/com/android/server/accounts/AccountManagerService.java
++++ b/services/core/java/com/android/server/accounts/AccountManagerService.java
+@@ -3174,6 +3174,12 @@ public class AccountManagerService
+                                         "the type and name should not be empty");
+                                 return;
+                             }
++                            if (!type.equals(mAccountType)) {
++                                onError(AccountManager.ERROR_CODE_INVALID_RESPONSE,
++                                        "incorrect account type");
++                                return;
++                            }
++
+                             Account resultAccount = new Account(name, type);
+                             if (!customTokens) {
+                                 saveAuthTokenToDatabase(
+diff --git a/telecomm/java/android/telecom/StatusHints.java b/telecomm/java/android/telecom/StatusHints.java
+index 5f0c8d729e74..7b88bcc7ff57 100644
+--- a/telecomm/java/android/telecom/StatusHints.java
++++ b/telecomm/java/android/telecom/StatusHints.java
+@@ -27,6 +27,7 @@ import android.os.Bundle;
+ import android.os.Parcel;
+ import android.os.Parcelable;
+ import android.os.UserHandle;
++import android.util.Log;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
+ 
+@@ -40,6 +41,7 @@ public final class StatusHints implements Parcelable {
+     private final CharSequence mLabel;
+     private Icon mIcon;
+     private final Bundle mExtras;
++    private static final String TAG = StatusHints.class.getSimpleName();
+ 
+     /**
+      * @hide
+@@ -150,17 +152,37 @@ public final class StatusHints implements Parcelable {
+         // incompatible types.
+         if (icon != null && (icon.getType() == Icon.TYPE_URI
+                 || icon.getType() == Icon.TYPE_URI_ADAPTIVE_BITMAP)) {
+-            String encodedUser = icon.getUri().getEncodedUserInfo();
+-            // If there is no encoded user, the URI is calling into the calling user space
+-            if (encodedUser != null) {
+-                int userId = Integer.parseInt(encodedUser);
+-                // Do not try to save the icon if the user id isn't in the calling user space.
+-                if (userId != callingUserHandle.getIdentifier()) return null;
++            int callingUserId = callingUserHandle.getIdentifier();
++            int requestingUserId = getUserIdFromAuthority(
++                    icon.getUri().getAuthority(), callingUserId);
++            if (callingUserId != requestingUserId) {
++                return null;
+             }
+         }
+         return icon;
+     }
+ 
++    /**
++     * Derives the user id from the authority or the default user id if none could be found.
++     * @param auth
++     * @param defaultUserId
++     * @return The user id from the given authority.
++     * @hide
++     */
++    public static int getUserIdFromAuthority(String auth, int defaultUserId) {
++        if (auth == null) return defaultUserId;
++        int end = auth.lastIndexOf('@');
++        if (end == -1) return defaultUserId;
++        String userIdString = auth.substring(0, end);
++        try {
++            return Integer.parseInt(userIdString);
++        } catch (NumberFormatException e) {
++            Log.w(TAG, "Error parsing userId." + e);
++            return UserHandle.USER_NULL;
++        }
++    }
++
++
+     @Override
+     public void writeToParcel(Parcel out, int flags) {
+         out.writeCharSequence(mLabel);
+diff --git a/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java b/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java
+index 2b515c9b5cd1..b4dd7f1d4b95 100644
+--- a/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java
++++ b/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java
+@@ -100,6 +100,10 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
+                 throw new IllegalArgumentException("Client prefix cannot be greater than "
+                         + MAX_STRING_LENGTH + " characters");
+             }
++            if (clientPrefix.length() > MAX_STRING_LENGTH) {
++                throw new IllegalArgumentException("Client prefix cannot be greater than "
++                        + MAX_STRING_LENGTH + " characters");
++            }
+             mClientPrefix = clientPrefix;
+             return this;
+         }
+
+project frameworks/native/
+diff --git a/cmds/servicemanager/main.cpp b/cmds/servicemanager/main.cpp
+index c126e91373..df5a8ed0d1 100644
+--- a/cmds/servicemanager/main.cpp
++++ b/cmds/servicemanager/main.cpp
+@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
+     IPCThreadState::self()->disableBackgroundScheduling(true);
+ 
+     sp<ServiceManager> manager = sp<ServiceManager>::make(std::make_unique<Access>());
++    manager->setRequestingSid(true);
+     if (!manager->addService("manager", manager, false /*allowIsolated*/, IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT).isOk()) {
+         LOG(ERROR) << "Could not self register servicemanager";
+     }
+
+project hardware/qcom-caf/sm8450/audio/agm/
+diff --git a/ipc/HwBinders/agm_ipc_service/Android.mk b/ipc/HwBinders/agm_ipc_service/Android.mk
+index 5047ce1..a3aa4fd 100644
+--- a/ipc/HwBinders/agm_ipc_service/Android.mk
++++ b/ipc/HwBinders/agm_ipc_service/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE        := vendor.qti.hardware.AGMIPC@1.0-impl
++LOCAL_MODULE        := vendor.qti.hardware.AGMIPC@1.0-impl_c
+ LOCAL_MODULE_OWNER  := qti
+ LOCAL_VENDOR_MODULE := true
+ 
+diff --git a/service/Android.mk b/service/Android.mk
+index d404e8b..18840cd 100644
+--- a/service/Android.mk
++++ b/service/Android.mk
+@@ -9,7 +9,7 @@ include $(BUILD_HEADER_LIBRARY)
+ # Build libagm
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE        := libagm
++LOCAL_MODULE        := libagm_c
+ LOCAL_MODULE_OWNER  := qti
+ LOCAL_MODULE_TAGS   := optional
+ LOCAL_VENDOR_MODULE := true
+
+project hardware/qcom-caf/sm8450/audio/graphservices/
+diff --git a/acdb/Android.mk b/acdb/Android.mk
+index 24472fa..b23e7f1 100644
+--- a/acdb/Android.mk
++++ b/acdb/Android.mk
+@@ -32,7 +32,7 @@ LOCAL_SRC_FILES := \
+     src/acdb_heap.c\
+     src/acdb_context_mgr.c
+ 
+-LOCAL_MODULE := libar-acdb
++LOCAL_MODULE := libar-acdb_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+@@ -119,7 +119,7 @@ LOCAL_SRC_FILES := \
+ 
+ LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/diag/include
+ 
+-LOCAL_MODULE := libats
++LOCAL_MODULE := libats_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/ar_osal/Android.mk b/ar_osal/Android.mk
+index 6219e11..b337430 100644
+--- a/ar_osal/Android.mk
++++ b/ar_osal/Android.mk
+@@ -61,7 +61,7 @@ endif
+ 
+ LOCAL_SHARED_LIBRARIES := liblog
+ 
+-LOCAL_MODULE := liblx-osal
++LOCAL_MODULE := liblx-osal_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/ar_util/Android.mk b/ar_util/Android.mk
+index 5a0f49e..beb666a 100644
+--- a/ar_util/Android.mk
++++ b/ar_util/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE := liblx-ar_util
++LOCAL_MODULE := liblx-ar_util_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/gpr/Android.mk b/gpr/Android.mk
+index 3bc92e0..2b7edd4 100644
+--- a/gpr/Android.mk
++++ b/gpr/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE := libar-gpr
++LOCAL_MODULE := libar-gpr_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+diff --git a/gsl/Android.mk b/gsl/Android.mk
+index 4e3b70c..0752c21 100644
+--- a/gsl/Android.mk
++++ b/gsl/Android.mk
+@@ -1,7 +1,7 @@
+ LOCAL_PATH := $(call my-dir)
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE := libar-gsl
++LOCAL_MODULE := libar-gsl_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_MODULE_TAGS := optional
+ LOCAL_PROPRIETARY_MODULE := true
+
+project hardware/qcom-caf/sm8450/audio/pal/
+diff --git a/Android.mk b/Android.mk
+index 6bf3e1a3..af185f3c 100644
+--- a/Android.mk
++++ b/Android.mk
+@@ -26,7 +26,7 @@ include $(BUILD_HEADER_LIBRARY)
+ 
+ include $(CLEAR_VARS)
+ 
+-LOCAL_MODULE        := libar-pal
++LOCAL_MODULE        := libar-pal_c
+ LOCAL_MODULE_OWNER  := qti
+ LOCAL_MODULE_TAGS   := optional
+ LOCAL_VENDOR_MODULE := true
+diff --git a/plugins/codecs/Android.mk b/plugins/codecs/Android.mk
+index b93a1c33..7ff20393 100644
+--- a/plugins/codecs/Android.mk
++++ b/plugins/codecs/Android.mk
+@@ -25,7 +25,7 @@ LOCAL_HEADER_LIBRARIES := \
+     libarosal_headers
+ 
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE := lib_bt_bundle
++LOCAL_MODULE := lib_bt_bundle_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_VENDOR_MODULE := true
+ include $(BUILD_SHARED_LIBRARY)
+@@ -53,7 +53,7 @@ LOCAL_HEADER_LIBRARIES := \
+     libarosal_headers
+ 
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE := lib_bt_aptx
++LOCAL_MODULE := lib_bt_aptx_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_VENDOR_MODULE := true
+ include $(BUILD_SHARED_LIBRARY)
+@@ -81,7 +81,7 @@ LOCAL_HEADER_LIBRARIES := \
+     libarosal_headers
+ 
+ LOCAL_MODULE_TAGS := optional
+-LOCAL_MODULE := lib_bt_ble
++LOCAL_MODULE := lib_bt_ble_c
+ LOCAL_MODULE_OWNER := qti
+ LOCAL_VENDOR_MODULE := true
+ include $(BUILD_SHARED_LIBRARY)
+
+project packages/apps/Jelly/
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index d3f7a4e..9c80847 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -179,9 +179,9 @@
+     <!-- No activity found to open the given url error -->
+     <string name="error_no_activity_found">No app can handle this link</string>
+ 
+-    <string name="default_search_engine" translatable="false">https://google.com/search?ie=UTF-8&amp;source=android-browser&amp;q={searchTerms}</string>
+-    <string name="default_home_page" translatable="false">https://google.com</string>
+-    <string name="default_suggestion_provider" translatable="false">GOOGLE</string>
++    <string name="default_search_engine" translatable="false">https://www.bing.com/search?ie=UTF-8&amp;source=android-browser&amp;q={searchTerms}</string>
++    <string name="default_home_page" translatable="false">https://www.bing.com</string>
++    <string name="default_suggestion_provider" translatable="false">BING</string>
+ 
+     <!-- Auth dialog: title -->
+     <string name="auth_dialog_title">Authentication Required</string>
+
+project packages/modules/Bluetooth/
+diff --git a/android/app/src/com/android/bluetooth/btservice/AdapterService.java b/android/app/src/com/android/bluetooth/btservice/AdapterService.java
+index 62a532dccd..70408cc666 100644
+--- a/android/app/src/com/android/bluetooth/btservice/AdapterService.java
++++ b/android/app/src/com/android/bluetooth/btservice/AdapterService.java
+@@ -27,6 +27,7 @@ import static android.bluetooth.BluetoothAdapter.SCAN_MODE_CONNECTABLE;
+ import static android.bluetooth.BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE;
+ import static android.bluetooth.BluetoothAdapter.SCAN_MODE_NONE;
+ import static android.bluetooth.BluetoothDevice.BATTERY_LEVEL_UNKNOWN;
++import static android.bluetooth.BluetoothDevice.BOND_NONE;
+ import static android.bluetooth.BluetoothDevice.TRANSPORT_AUTO;
+ import static android.bluetooth.IBluetoothLeAudio.LE_AUDIO_GROUP_ID_INVALID;
+ import static android.text.format.DateUtils.MINUTE_IN_MILLIS;
+@@ -6109,6 +6110,13 @@ public class AdapterService extends Service {
+             mCsipSetCoordinatorService.handleBondStateChanged(device, fromState, toState);
+         }
+         mDatabaseManager.handleBondStateChanged(device, fromState, toState);
++
++        if (toState == BOND_NONE) {
++            // Remove the permissions for unbonded devices
++            setMessageAccessPermission(device, BluetoothDevice.ACCESS_UNKNOWN);
++            setPhonebookAccessPermission(device, BluetoothDevice.ACCESS_UNKNOWN);
++            setSimAccessPermission(device, BluetoothDevice.ACCESS_UNKNOWN);
++        }
+     }
+ 
+     static int convertScanModeToHal(int mode) {
+diff --git a/system/bta/hf_client/bta_hf_client_sdp.cc b/system/bta/hf_client/bta_hf_client_sdp.cc
+index e93c651c68..603d73e7c2 100644
+--- a/system/bta/hf_client/bta_hf_client_sdp.cc
++++ b/system/bta/hf_client/bta_hf_client_sdp.cc
+@@ -338,6 +338,20 @@ void bta_hf_client_do_disc(tBTA_HF_CLIENT_CB* client_cb) {
+     num_attr = 4;
+     uuid_list[0] = Uuid::From16Bit(UUID_SERVCLASS_AG_HANDSFREE);
+   }
++
++  /* If we already have a non-null discovery database at this point, we can get
++   * into a race condition leading to UAF once this connection is closed.
++   * This should only happen with malicious modifications to a client. */
++  if (client_cb->p_disc_db != NULL) {
++    log::error(
++        "Tried to set up a HF client with a preexisting discovery database.");
++    client_cb->p_disc_db = NULL;
++    // We manually set the state here because it's possible to call this from an
++    // OPEN state, in which case the discovery fail event will be ignored.
++    client_cb->state = 0;  // BTA_HF_CLIENT_INIT_ST
++    return;
++  }
++
+   /* acceptor; get features */
+   else {
+     attr_list[0] = ATTR_ID_SERVICE_CLASS_ID_LIST;
+diff --git a/system/stack/avct/avct_lcb_act.cc b/system/stack/avct/avct_lcb_act.cc
+index e06bf57634..a8d6b1e6ab 100644
+--- a/system/stack/avct/avct_lcb_act.cc
++++ b/system/stack/avct/avct_lcb_act.cc
+@@ -725,10 +725,13 @@ void avct_lcb_msg_ind(tAVCT_LCB* p_lcb, tAVCT_LCB_EVT* p_data) {
+     p = (uint8_t*)(p_buf + 1) + p_buf->offset;
+     AVCT_BUILD_HDR(p, label, AVCT_PKT_TYPE_SINGLE, AVCT_REJ);
+     UINT16_TO_BE_STREAM(p, pid);
++
++    uint16_t len = p_buf->len;
++
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_lcb->ch_lcid, p_buf) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_lcb->peer_addr,
+-                p_lcb->ch_lcid, p_buf->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_lcb->peer_addr, p_lcb->ch_lcid, len);
+     }
+   }
+ }
+diff --git a/system/stack/bnep/bnep_main.cc b/system/stack/bnep/bnep_main.cc
+index e0e3c4540c..cf2faa9650 100644
+--- a/system/stack/bnep/bnep_main.cc
++++ b/system/stack/bnep/bnep_main.cc
+@@ -295,10 +295,12 @@ static void bnep_congestion_ind(uint16_t l2cap_cid, bool is_congested) {
+         break;
+       }
+ 
++      uint16_t len = p_buf->len;
++
+       if (stack::l2cap::get_interface().L2CA_DataWrite(l2cap_cid, p_buf) !=
+           tL2CAP_DW_RESULT::SUCCESS) {
+-        log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_bcb->rem_bda, l2cap_cid,
+-                  p_buf->len);
++        log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++          p_bcb->rem_bda, l2cap_cid, len);
+       }
+     }
+   }
+diff --git a/system/stack/bnep/bnep_utils.cc b/system/stack/bnep/bnep_utils.cc
+index 06566d85b3..b2d81e5b6e 100644
+--- a/system/stack/bnep/bnep_utils.cc
++++ b/system/stack/bnep/bnep_utils.cc
+@@ -408,10 +408,11 @@ void bnepu_check_send_packet(tBNEP_CONN* p_bcb, BT_HDR* p_buf) {
+       fixed_queue_enqueue(p_bcb->xmit_q, p_buf);
+     }
+   } else {
++    uint16_t len = p_buf->len;
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_bcb->l2cap_cid, p_buf) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_bcb->rem_bda,
+-                p_bcb->l2cap_cid, p_buf->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_bcb->rem_bda, p_bcb->l2cap_cid, len);
+     }
+   }
+ }
+diff --git a/system/stack/hid/hidd_conn.cc b/system/stack/hid/hidd_conn.cc
+index c64a7b9104..7b881b6639 100644
+--- a/system/stack/hid/hidd_conn.cc
++++ b/system/stack/hid/hidd_conn.cc
+@@ -87,11 +87,13 @@ static void hidd_check_config_done() {
+     hd_cb.callback(hd_cb.device.addr, HID_DHOST_EVT_OPEN, 0, NULL);
+ 
+     // send outstanding data on intr
++
++    uint16_t len = hd_cb.pending_data->len;
++
+     if (hd_cb.pending_data) {
+       if (stack::l2cap::get_interface().L2CA_DataWrite(p_hcon->intr_cid, hd_cb.pending_data) !=
+           tL2CAP_DW_RESULT::SUCCESS) {
+-        log::warn("Unable to write L2CAP data cid:{} len:{}", p_hcon->intr_cid,
+-                  hd_cb.pending_data->len);
++        log::warn("Unable to write L2CAP data cid:{} len:{}", p_hcon->intr_cid, len);
+       }
+       hd_cb.pending_data = NULL;
+     }
+diff --git a/system/stack/rfcomm/rfc_ts_frames.cc b/system/stack/rfcomm/rfc_ts_frames.cc
+index b0b4b1c143..3428d04593 100644
+--- a/system/stack/rfcomm/rfc_ts_frames.cc
++++ b/system/stack/rfcomm/rfc_ts_frames.cc
+@@ -198,10 +198,12 @@ void rfc_send_buf_uih(tRFC_MCB* p_mcb, uint8_t dlci, BT_HDR* p_buf) {
+   if (dlci == RFCOMM_MX_DLCI) {
+     rfc_check_send_cmd(p_mcb, p_buf);
+   } else {
++    uint16_t len = p_buf->len;
++
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_mcb->lcid, p_buf) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_mcb->bd_addr, p_mcb->lcid,
+-                p_buf->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_mcb->bd_addr, p_mcb->lcid, len);
+     }
+   }
+ }
+diff --git a/system/stack/rfcomm/rfc_utils.cc b/system/stack/rfcomm/rfc_utils.cc
+index 23420892cb..f57aac7112 100644
+--- a/system/stack/rfcomm/rfc_utils.cc
++++ b/system/stack/rfcomm/rfc_utils.cc
+@@ -428,9 +428,10 @@ void rfc_check_send_cmd(tRFC_MCB* p_mcb, BT_HDR* p_buf) {
+     if (p == NULL) {
+       break;
+     }
++    uint16_t len = p->len;
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_mcb->lcid, p) != tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_mcb->bd_addr, p_mcb->lcid,
+-                p->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_mcb->bd_addr, p_mcb->lcid, len);
+     }
+   }
+ }
+diff --git a/system/stack/sdp/sdp_discovery.cc b/system/stack/sdp/sdp_discovery.cc
+index 7e8bacab80..5932d649b8 100644
+--- a/system/stack/sdp/sdp_discovery.cc
++++ b/system/stack/sdp/sdp_discovery.cc
+@@ -179,8 +179,8 @@ static void sdp_snd_service_search_req(tCONN_CB* p_ccb, uint8_t cont_len, uint8_
+ 
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_cmd) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_cmd->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p - p_start);
+   }
+ 
+   /* Start inactivity timer */
+@@ -707,8 +707,8 @@ static void process_service_search_attr_rsp(tCONN_CB* p_ccb, uint8_t* p_reply,
+ 
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_msg) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-                p_ccb->connection_id, p_msg->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_ccb->device_address, p_ccb->connection_id, p - p_start);
+     }
+ 
+     /* Start inactivity timer */
+@@ -876,8 +876,8 @@ static void process_service_attr_rsp(tCONN_CB* p_ccb, uint8_t* p_reply, uint8_t*
+ 
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_msg) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-                p_ccb->connection_id, p_msg->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_ccb->device_address, p_ccb->connection_id, p - p_start);
+     }
+ 
+     /* Start inactivity timer */
+diff --git a/system/stack/sdp/sdp_server.cc b/system/stack/sdp/sdp_server.cc
+index 7061cc5885..1df4862cee 100644
+--- a/system/stack/sdp/sdp_server.cc
++++ b/system/stack/sdp/sdp_server.cc
+@@ -299,8 +299,8 @@ static void process_service_search(tCONN_CB* p_ccb, uint16_t trans_num, uint16_t
+   /* Send the buffer through L2CAP */
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_buf) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_buf->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p_rsp - p_rsp_start);
+   }
+ }
+ 
+@@ -563,8 +563,8 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num, uint16
+   /* Send the buffer through L2CAP */
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_buf) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_buf->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p_rsp - p_rsp_start);
+   }
+ }
+ 
+@@ -920,8 +920,8 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
+   /* Send the buffer through L2CAP */
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_buf) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_buf->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p_rsp - p_rsp_start);
+   }
+ }
+ 
+
+project packages/modules/NetworkStack/
+diff --git a/res/values/config.xml b/res/values/config.xml
+index 16364d6b..31c674da 100644
+--- a/res/values/config.xml
++++ b/res/values/config.xml
+@@ -31,8 +31,8 @@
+          this resource. It will break if the enforcement of overlayable starts.
+          -->
+     <string-array name="default_captive_portal_fallback_urls" translatable="false">
+-        <item>http://www.google.com/gen_204</item>
+-        <item>http://play.googleapis.com/generate_204</item>
++        <item>http://connect.rom.miui.com/generate_204</item>
++        <item>https://connect.rom.miui.com/generate_204</item>
+     </string-array>
+     <!-- Configuration hooks for the above settings.
+          Empty by default but may be overridden by RROs. -->
+
+project packages/providers/DownloadProvider/
+diff --git a/src/com/android/providers/downloads/DownloadProvider.java b/src/com/android/providers/downloads/DownloadProvider.java
+index 77fe8832..a1d547ce 100644
+--- a/src/com/android/providers/downloads/DownloadProvider.java
++++ b/src/com/android/providers/downloads/DownloadProvider.java
+@@ -84,6 +84,7 @@ import java.io.FileDescriptor;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.io.PrintWriter;
++import java.util.Arrays;
+ import java.util.Iterator;
+ import java.util.Map;
+ 
+@@ -1120,8 +1121,49 @@ public final class DownloadProvider extends ContentProvider {
+         Helpers.checkDestinationFilePathRestrictions(file, getCallingPackage(), getContext(),
+                 mAppOpsManager, getCallingAttributionTag(), isLegacyMode,
+                 /* allowDownloadsDirOnly */ true);
++        // check whether record already exists in MP or getCallingPackage owns this file
++        checkWhetherCallingAppHasAccess(file.getPath(), Binder.getCallingUid());
+     }
+ 
++    private void checkWhetherCallingAppHasAccess(String filePath, int uid) {
++        try (ContentProviderClient client = getContext().getContentResolver()
++                .acquireContentProviderClient(MediaStore.AUTHORITY)) {
++            if (client == null) {
++                Log.w(Constants.TAG, "Failed to acquire ContentProviderClient for MediaStore");
++                return;
++            }
++
++            Uri filesUri = MediaStore.setIncludePending(
++                    Helpers.getContentUriForPath(getContext(), filePath));
++
++            try (Cursor cursor = client.query(filesUri,
++                    new String[]{MediaStore.Files.FileColumns._ID,
++                            MediaStore.Files.FileColumns.OWNER_PACKAGE_NAME},
++                    MediaStore.Files.FileColumns.DATA + "=?", new String[]{filePath},
++                    null)) {
++                if (cursor != null && cursor.moveToFirst()) {
++                    String fetchedOwnerPackageName = cursor.getString(
++                            cursor.getColumnIndexOrThrow(
++                                    MediaStore.Files.FileColumns.OWNER_PACKAGE_NAME));
++                    String[] packageNames = getContext().getPackageManager().getPackagesForUid(uid);
++
++                    if (fetchedOwnerPackageName != null && packageNames != null) {
++                        boolean isCallerAuthorized = Arrays.asList(packageNames)
++                                .contains(fetchedOwnerPackageName);
++                        if (!isCallerAuthorized) {
++                            throw new SecurityException("Caller does not have access to this path");
++                        }
++                    }
++                }
++            }
++        } catch (RemoteException e) {
++            Log.w(Constants.TAG, "Failed to query MediaStore: " + e.getMessage());
++        }
++    }
++
++
++
++
+     /**
+      * Apps with the ACCESS_DOWNLOAD_MANAGER permission can access this provider freely, subject to
+      * constraints in the rest of the code. Apps without that may still access this provider through
+
+project packages/services/Telecomm/
+diff --git a/src/com/android/server/telecom/TelecomServiceImpl.java b/src/com/android/server/telecom/TelecomServiceImpl.java
+index b8141bf95..b80702c0b 100644
+--- a/src/com/android/server/telecom/TelecomServiceImpl.java
++++ b/src/com/android/server/telecom/TelecomServiceImpl.java
+@@ -68,6 +68,7 @@ import android.telecom.DisconnectCause;
+ import android.telecom.Log;
+ import android.telecom.PhoneAccount;
+ import android.telecom.PhoneAccountHandle;
++import android.telecom.StatusHints;
+ import android.telecom.TelecomAnalytics;
+ import android.telecom.TelecomManager;
+ import android.telecom.VideoProfile;
+@@ -3423,15 +3424,13 @@ public class TelecomServiceImpl {
+         // incompatible types.
+         if (icon != null && (icon.getType() == Icon.TYPE_URI
+                 || icon.getType() == Icon.TYPE_URI_ADAPTIVE_BITMAP)) {
+-            String encodedUser = icon.getUri().getEncodedUserInfo();
+-            // If there is no encoded user, the URI is calling into the calling user space
+-            if (encodedUser != null) {
+-                int userId = Integer.parseInt(encodedUser);
+-                if (userId != UserHandle.getUserId(Binder.getCallingUid())) {
+-                    // If we are transcending the profile boundary, throw an error.
+-                    throw new IllegalArgumentException("Attempting to register a phone account with"
+-                            + " an image icon belonging to another user.");
+-                }
++            int callingUserId = UserHandle.getCallingUserId();
++            int requestingUserId = StatusHints.getUserIdFromAuthority(
++                    icon.getUri().getAuthority(), callingUserId);
++            if(callingUserId != requestingUserId) {
++                // If we are transcending the profile boundary, throw an error.
++                throw new IllegalArgumentException("Attempting to register a phone account with"
++                        + " an image icon belonging to another user.");
+             }
+         }
+     }
+diff --git a/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java b/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java
+index dc5f3256e..a52a14c3a 100644
+--- a/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java
++++ b/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java
+@@ -1090,6 +1090,20 @@ public class TelecomServiceImplTest extends TelecomTestCase {
+         // This should fail; security exception will be thrown.
+         registerPhoneAccountTestHelper(phoneAccount, false);
+ 
++        icon = Icon.createWithContentUri(
++                new Uri.Builder().scheme("content")
++                        .encodedAuthority("10%40media")
++                        .path("external/images/media/${mediaId.text}".trim())
++                        .build());
++        phoneAccount = makePhoneAccount(phHandle).setIcon(icon).build();
++        // This should fail; security exception will be thrown
++        registerPhoneAccountTestHelper(phoneAccount, false);
++
++        icon = Icon.createWithContentUri( Uri.parse("content://10%40play.ground"));
++        phoneAccount = makePhoneAccount(phHandle).setIcon(icon).build();
++        // This should fail; security exception will be thrown
++        registerPhoneAccountTestHelper(phoneAccount, false);
++
+         icon = Icon.createWithContentUri("content://0@media/external/images/media/");
+         phoneAccount = makePhoneAccount(phHandle).setIcon(icon).build();
+         // This should succeed.

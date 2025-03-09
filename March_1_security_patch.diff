@@ -1,0 +1,787 @@
+project build/release/
+diff --git a/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto b/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
+index 46d856b6..d7299023 100644
+--- a/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
++++ b/flag_values/ap4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
+@@ -1,5 +1,5 @@
+ name: "RELEASE_PLATFORM_SECURITY_PATCH"
+ value: {
+-  string_value: "2025-02-05"
++  string_value: "2025-03-01"
+ }
+
+ project external/dng_sdk/
+diff --git a/source/dng_lossless_jpeg.cpp b/source/dng_lossless_jpeg.cpp
+index 9d0d01a..0cb9944 100644
+--- a/source/dng_lossless_jpeg.cpp
++++ b/source/dng_lossless_jpeg.cpp
+@@ -1616,6 +1616,10 @@ inline int32 dng_lossless_decoder::get_bit ()
+ inline int32 dng_lossless_decoder::HuffDecode (HuffmanTable *htbl)
+ 	{
+ 	
++	if (htbl == nullptr) {
++		ThrowBadFormat ();
++	}
++	
+     // If the huffman code is less than 8 bits, we can use the fast
+     // table lookup to get its value.  It's more than 8 bits about
+     // 3-4% of the time.
+
+project frameworks/base/
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index b87ba58441af..fa35b64f613b 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -2666,7 +2666,7 @@
+          Items must be in the form: "ntp://<host>[:port]"
+          This is not a registered IANA URI scheme. -->
+     <string-array translatable="false" name="config_ntpServers">
+-        <item>ntp://time.android.com</item>
++        <item>ntp://ntp.aliyun.com</item>
+     </string-array>
+     <!-- SNTP client config: Timeout to wait for an NTP server response in milliseconds. -->
+     <integer name="config_ntpTimeout">5000</integer>
+diff --git a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java
+index b20117d78230..6a929cd26eaf 100644
+--- a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java
++++ b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveActivity.java
+@@ -19,6 +19,7 @@ package com.android.packageinstaller;
+ import static android.Manifest.permission;
+ import static android.content.pm.PackageManager.GET_PERMISSIONS;
+ import static android.content.pm.PackageManager.MATCH_ARCHIVED_PACKAGES;
++import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+ 
+ import android.app.Activity;
+ import android.app.DialogFragment;
+@@ -29,6 +30,7 @@ import android.content.pm.InstallSourceInfo;
+ import android.content.pm.PackageInstaller;
+ import android.content.pm.PackageManager;
+ import android.os.Bundle;
++import android.widget.Button;
+ import android.os.Process;
+ import android.text.TextUtils;
+ import android.util.Log;
+@@ -53,6 +55,8 @@ public class UnarchiveActivity extends Activity {
+ 
+     @Override
+     public void onCreate(Bundle icicle) {
++        getWindow().addSystemFlags(SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS);
++
+         super.onCreate(null);
+ 
+         int callingUid = getLaunchedFromUid();
+diff --git a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java
+index 42dd382b98bc..f2ebfc8e03f0 100644
+--- a/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java
++++ b/packages/PackageInstaller/src/com/android/packageinstaller/UnarchiveFragment.java
+@@ -21,10 +21,13 @@ import android.app.Dialog;
+ import android.app.DialogFragment;
+ import android.content.DialogInterface;
+ import android.os.Bundle;
++import android.widget.Button;
+ 
+ public class UnarchiveFragment extends DialogFragment implements
+         DialogInterface.OnClickListener {
+ 
++    private Dialog mDialog;
++    private Button mRestoreButton;
+     @Override
+     public Dialog onCreateDialog(Bundle savedInstanceState) {
+         String appTitle = getArguments().getString(UnarchiveActivity.APP_TITLE);
+@@ -40,7 +43,32 @@ public class UnarchiveFragment extends DialogFragment implements
+         dialogBuilder.setPositiveButton(R.string.restore, this);
+         dialogBuilder.setNegativeButton(android.R.string.cancel, this);
+ 
+-        return dialogBuilder.create();
++        mDialog = dialogBuilder.create();
++        return mDialog;
++    }
++
++    @Override
++    public void onStart() {
++        super.onStart();
++        if (mDialog != null) {
++            mRestoreButton = ((AlertDialog) mDialog).getButton(DialogInterface.BUTTON_POSITIVE);
++        }
++    }
++
++    @Override
++    public void onPause() {
++        super.onPause();
++        if (mRestoreButton != null) {
++            mRestoreButton.setEnabled(false);
++        }
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        if (mRestoreButton != null) {
++            mRestoreButton.setEnabled(true);
++        }
+     }
+ 
+     @Override
+diff --git a/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java b/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java
+index 170cb4546d0c..46b3be8a1ddf 100644
+--- a/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java
++++ b/packages/PackageInstaller/src/com/android/packageinstaller/UninstallerActivity.java
+@@ -49,17 +49,16 @@ import android.os.UserManager;
+ import android.util.Log;
+ import androidx.annotation.NonNull;
+ import androidx.annotation.StringRes;
++
++import com.android.packageinstaller.common.EventResultPersister;
++import com.android.packageinstaller.common.UninstallEventReceiver;
+ import com.android.packageinstaller.handheld.ErrorDialogFragment;
+ import com.android.packageinstaller.handheld.UninstallAlertDialogFragment;
+ import com.android.packageinstaller.television.ErrorFragment;
+ import com.android.packageinstaller.television.UninstallAlertFragment;
+ import com.android.packageinstaller.television.UninstallAppProgress;
+-import com.android.packageinstaller.common.EventResultPersister;
+-import com.android.packageinstaller.common.UninstallEventReceiver;
+ import com.android.packageinstaller.v2.ui.UninstallLaunch;
+ 
+-import java.util.List;
+-
+ /*
+  * This activity presents UI to uninstall an application. Usually launched with intent
+  * Intent.ACTION_UNINSTALL_PKG_COMMAND and attribute
+@@ -181,12 +180,15 @@ public class UninstallerActivity extends Activity {
+         if (mDialogInfo.user == null) {
+             mDialogInfo.user = Process.myUserHandle();
+         } else {
+-            List<UserHandle> profiles = userManager.getUserProfiles();
+-            if (!profiles.contains(mDialogInfo.user)) {
+-                Log.e(TAG, "User " + Process.myUserHandle() + " can't request uninstall "
+-                        + "for user " + mDialogInfo.user);
+-                showUserIsNotAllowed();
+-                return;
++            if (!mDialogInfo.user.equals(Process.myUserHandle())) {
++                final boolean isCurrentUserProfileOwner = Process.myUserHandle().equals(
++                        userManager.getProfileParent(mDialogInfo.user));
++                if (!isCurrentUserProfileOwner) {
++                    Log.e(TAG, "User " + Process.myUserHandle() + " can't request uninstall "
++                            + "for user " + mDialogInfo.user);
++                    showUserIsNotAllowed();
++                    return;
++                }
+             }
+         }
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java
+index c997ac5ad9df..8093ce829f3d 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcutListSearch.java
+@@ -20,7 +20,6 @@ import static android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG;
+ 
+ import static com.android.systemui.Flags.fetchBookmarksXmlKeyboardShortcuts;
+-import static com.android.systemui.Flags.validateKeyboardShortcutHelperIconUri;
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+@@ -428,9 +427,7 @@ public final class KeyboardShortcutListSearch {
+                 mKeySearchResultMap.put(SHORTCUT_SPECIFICAPP_INDEX, false);
+             } else {
+                 mCurrentAppPackageName = result.get(0).getPackageName();
+-                if (validateKeyboardShortcutHelperIconUri()) {
+-                    KeyboardShortcuts.sanitiseShortcuts(result);
+-                }
++                KeyboardShortcuts.sanitiseShortcuts(result);
+                 mSpecificAppGroup.addAll(
+                         reMapToKeyboardShortcutMultiMappingGroup(result));
+                 mKeySearchResultMap.put(SHORTCUT_SPECIFICAPP_INDEX, true);
+@@ -446,9 +443,7 @@ public final class KeyboardShortcutListSearch {
+         // Add specific Ime shortcuts
+         if (result != null) {
+             if (!result.isEmpty()) {
+-                if (validateKeyboardShortcutHelperIconUri()) {
+-                    KeyboardShortcuts.sanitiseShortcuts(result);
+-                }
++                KeyboardShortcuts.sanitiseShortcuts(result);
+                 mInputGroup.addAll(
+                         reMapToKeyboardShortcutMultiMappingGroup(result));
+             }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java
+index 766c391b14d8..2ed168aa82e8 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/KeyboardShortcuts.java
+@@ -21,7 +21,6 @@ import static android.view.View.IMPORTANT_FOR_ACCESSIBILITY_YES;
+ import static android.view.WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG;
+ 
+ import static com.android.systemui.Flags.fetchBookmarksXmlKeyboardShortcuts;
+-import static com.android.systemui.Flags.validateKeyboardShortcutHelperIconUri;
+ 
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+@@ -412,10 +411,7 @@ public final class KeyboardShortcuts {
+         mReceivedAppShortcutGroups =
+                 result == null ? Collections.emptyList() : result;
+ 
+-        if (validateKeyboardShortcutHelperIconUri()) {
+-            sanitiseShortcuts(mReceivedAppShortcutGroups);
+-        }
+-
++        sanitiseShortcuts(mReceivedAppShortcutGroups);
+         maybeMergeAndShowKeyboardShortcuts();
+     }
+ 
+@@ -423,10 +419,7 @@ public final class KeyboardShortcuts {
+         mReceivedImeShortcutGroups =
+                 result == null ? Collections.emptyList() : result;
+ 
+-        if (validateKeyboardShortcutHelperIconUri()) {
+-            sanitiseShortcuts(mReceivedImeShortcutGroups);
+-        }
+-
++        sanitiseShortcuts(mReceivedImeShortcutGroups);
+         maybeMergeAndShowKeyboardShortcuts();
+     }
+ 
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java
+index 63e56eeb730f..8045a13ff9be 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutListSearchTest.java
+@@ -26,7 +26,6 @@ import static org.mockito.Mockito.when;
+ 
+ import android.graphics.drawable.Icon;
+ import android.os.Handler;
+-import android.platform.test.annotations.EnableFlags;
+ import android.view.KeyboardShortcutGroup;
+ import android.view.KeyboardShortcutInfo;
+ import android.view.WindowManager;
+@@ -34,7 +33,6 @@ import android.view.WindowManager;
+ import androidx.test.filters.SmallTest;
+ import androidx.test.runner.AndroidJUnit4;
+ 
+-import com.android.systemui.Flags;
+ import com.android.systemui.SysuiTestCase;
+ 
+ import com.google.android.material.bottomsheet.BottomSheetDialog;
+@@ -95,7 +93,6 @@ public class KeyboardShortcutListSearchTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestAppKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+ 
+@@ -114,7 +111,6 @@ public class KeyboardShortcutListSearchTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestImeKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+ 
+diff --git a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java
+index 105cf168995c..20ecaf75c625 100644
+--- a/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java
++++ b/packages/SystemUI/tests/src/com/android/systemui/statusbar/KeyboardShortcutsTest.java
+@@ -31,7 +31,6 @@ import android.annotation.Nullable;
+ import android.app.Dialog;
+ import android.graphics.drawable.Icon;
+ import android.os.Handler;
+-import android.platform.test.annotations.EnableFlags;
+ import android.view.KeyboardShortcutGroup;
+ import android.view.KeyboardShortcutInfo;
+ import android.view.WindowManager;
+@@ -39,7 +38,6 @@ import android.view.WindowManager;
+ import androidx.test.filters.SmallTest;
+ import androidx.test.runner.AndroidJUnit4;
+ 
+-import com.android.systemui.Flags;
+ import com.android.systemui.SysuiTestCase;
+ 
+ import org.junit.Before;
+@@ -131,7 +129,6 @@ public class KeyboardShortcutsTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestAppKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+         KeyboardShortcuts.toggle(mContext, DEVICE_ID);
+@@ -143,7 +140,6 @@ public class KeyboardShortcutsTest extends SysuiTestCase {
+     }
+ 
+     @Test
+-    @EnableFlags(Flags.FLAG_VALIDATE_KEYBOARD_SHORTCUT_HELPER_ICON_URI)
+     public void requestImeKeyboardShortcuts_callback_sanitisesIcons() {
+         KeyboardShortcutGroup group = createKeyboardShortcutGroupForIconTests();
+         KeyboardShortcuts.toggle(mContext, DEVICE_ID);
+diff --git a/services/core/java/com/android/server/accounts/AccountManagerService.java b/services/core/java/com/android/server/accounts/AccountManagerService.java
+index 0ca3b56486e3..2c3a25949dc6 100644
+--- a/services/core/java/com/android/server/accounts/AccountManagerService.java
++++ b/services/core/java/com/android/server/accounts/AccountManagerService.java
+@@ -3174,6 +3174,12 @@ public class AccountManagerService
+                                         "the type and name should not be empty");
+                                 return;
+                             }
++                            if (!type.equals(mAccountType)) {
++                                onError(AccountManager.ERROR_CODE_INVALID_RESPONSE,
++                                        "incorrect account type");
++                                return;
++                            }
++
+                             Account resultAccount = new Account(name, type);
+                             if (!customTokens) {
+                                 saveAuthTokenToDatabase(
+diff --git a/telecomm/java/android/telecom/StatusHints.java b/telecomm/java/android/telecom/StatusHints.java
+index 5f0c8d729e74..7b88bcc7ff57 100644
+--- a/telecomm/java/android/telecom/StatusHints.java
++++ b/telecomm/java/android/telecom/StatusHints.java
+@@ -27,6 +27,7 @@ import android.os.Bundle;
+ import android.os.Parcel;
+ import android.os.Parcelable;
+ import android.os.UserHandle;
++import android.util.Log;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
+ 
+@@ -40,6 +41,7 @@ public final class StatusHints implements Parcelable {
+     private final CharSequence mLabel;
+     private Icon mIcon;
+     private final Bundle mExtras;
++    private static final String TAG = StatusHints.class.getSimpleName();
+ 
+     /**
+      * @hide
+@@ -150,17 +152,37 @@ public final class StatusHints implements Parcelable {
+         // incompatible types.
+         if (icon != null && (icon.getType() == Icon.TYPE_URI
+                 || icon.getType() == Icon.TYPE_URI_ADAPTIVE_BITMAP)) {
+-            String encodedUser = icon.getUri().getEncodedUserInfo();
+-            // If there is no encoded user, the URI is calling into the calling user space
+-            if (encodedUser != null) {
+-                int userId = Integer.parseInt(encodedUser);
+-                // Do not try to save the icon if the user id isn't in the calling user space.
+-                if (userId != callingUserHandle.getIdentifier()) return null;
++            int callingUserId = callingUserHandle.getIdentifier();
++            int requestingUserId = getUserIdFromAuthority(
++                    icon.getUri().getAuthority(), callingUserId);
++            if (callingUserId != requestingUserId) {
++                return null;
+             }
+         }
+         return icon;
+     }
+ 
++    /**
++     * Derives the user id from the authority or the default user id if none could be found.
++     * @param auth
++     * @param defaultUserId
++     * @return The user id from the given authority.
++     * @hide
++     */
++    public static int getUserIdFromAuthority(String auth, int defaultUserId) {
++        if (auth == null) return defaultUserId;
++        int end = auth.lastIndexOf('@');
++        if (end == -1) return defaultUserId;
++        String userIdString = auth.substring(0, end);
++        try {
++            return Integer.parseInt(userIdString);
++        } catch (NumberFormatException e) {
++            Log.w(TAG, "Error parsing userId." + e);
++            return UserHandle.USER_NULL;
++        }
++    }
++
++
+     @Override
+     public void writeToParcel(Parcel out, int flags) {
+         out.writeCharSequence(mLabel);
+diff --git a/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java b/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java
+index 2b515c9b5cd1..b4dd7f1d4b95 100644
+--- a/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java
++++ b/telephony/java/android/telephony/VisualVoicemailSmsFilterSettings.java
+@@ -100,6 +100,10 @@ public final class VisualVoicemailSmsFilterSettings implements Parcelable {
+                 throw new IllegalArgumentException("Client prefix cannot be greater than "
+                         + MAX_STRING_LENGTH + " characters");
+             }
++            if (clientPrefix.length() > MAX_STRING_LENGTH) {
++                throw new IllegalArgumentException("Client prefix cannot be greater than "
++                        + MAX_STRING_LENGTH + " characters");
++            }
+             mClientPrefix = clientPrefix;
+             return this;
+         }
+
+project frameworks/native/
+diff --git a/cmds/servicemanager/main.cpp b/cmds/servicemanager/main.cpp
+index c126e91373..df5a8ed0d1 100644
+--- a/cmds/servicemanager/main.cpp
++++ b/cmds/servicemanager/main.cpp
+@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
+     IPCThreadState::self()->disableBackgroundScheduling(true);
+ 
+     sp<ServiceManager> manager = sp<ServiceManager>::make(std::make_unique<Access>());
++    manager->setRequestingSid(true);
+     if (!manager->addService("manager", manager, false /*allowIsolated*/, IServiceManager::DUMP_FLAG_PRIORITY_DEFAULT).isOk()) {
+         LOG(ERROR) << "Could not self register servicemanager";
+     }
+project packages/modules/Bluetooth/
+diff --git a/android/app/src/com/android/bluetooth/btservice/AdapterService.java b/android/app/src/com/android/bluetooth/btservice/AdapterService.java
+index 62a532dccd..70408cc666 100644
+--- a/android/app/src/com/android/bluetooth/btservice/AdapterService.java
++++ b/android/app/src/com/android/bluetooth/btservice/AdapterService.java
+@@ -27,6 +27,7 @@ import static android.bluetooth.BluetoothAdapter.SCAN_MODE_CONNECTABLE;
+ import static android.bluetooth.BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE;
+ import static android.bluetooth.BluetoothAdapter.SCAN_MODE_NONE;
+ import static android.bluetooth.BluetoothDevice.BATTERY_LEVEL_UNKNOWN;
++import static android.bluetooth.BluetoothDevice.BOND_NONE;
+ import static android.bluetooth.BluetoothDevice.TRANSPORT_AUTO;
+ import static android.bluetooth.IBluetoothLeAudio.LE_AUDIO_GROUP_ID_INVALID;
+ import static android.text.format.DateUtils.MINUTE_IN_MILLIS;
+@@ -6109,6 +6110,13 @@ public class AdapterService extends Service {
+             mCsipSetCoordinatorService.handleBondStateChanged(device, fromState, toState);
+         }
+         mDatabaseManager.handleBondStateChanged(device, fromState, toState);
++
++        if (toState == BOND_NONE) {
++            // Remove the permissions for unbonded devices
++            setMessageAccessPermission(device, BluetoothDevice.ACCESS_UNKNOWN);
++            setPhonebookAccessPermission(device, BluetoothDevice.ACCESS_UNKNOWN);
++            setSimAccessPermission(device, BluetoothDevice.ACCESS_UNKNOWN);
++        }
+     }
+ 
+     static int convertScanModeToHal(int mode) {
+diff --git a/system/bta/hf_client/bta_hf_client_sdp.cc b/system/bta/hf_client/bta_hf_client_sdp.cc
+index e93c651c68..603d73e7c2 100644
+--- a/system/bta/hf_client/bta_hf_client_sdp.cc
++++ b/system/bta/hf_client/bta_hf_client_sdp.cc
+@@ -338,6 +338,20 @@ void bta_hf_client_do_disc(tBTA_HF_CLIENT_CB* client_cb) {
+     num_attr = 4;
+     uuid_list[0] = Uuid::From16Bit(UUID_SERVCLASS_AG_HANDSFREE);
+   }
++
++  /* If we already have a non-null discovery database at this point, we can get
++   * into a race condition leading to UAF once this connection is closed.
++   * This should only happen with malicious modifications to a client. */
++  if (client_cb->p_disc_db != NULL) {
++    log::error(
++        "Tried to set up a HF client with a preexisting discovery database.");
++    client_cb->p_disc_db = NULL;
++    // We manually set the state here because it's possible to call this from an
++    // OPEN state, in which case the discovery fail event will be ignored.
++    client_cb->state = 0;  // BTA_HF_CLIENT_INIT_ST
++    return;
++  }
++
+   /* acceptor; get features */
+   else {
+     attr_list[0] = ATTR_ID_SERVICE_CLASS_ID_LIST;
+diff --git a/system/stack/avct/avct_lcb_act.cc b/system/stack/avct/avct_lcb_act.cc
+index e06bf57634..a8d6b1e6ab 100644
+--- a/system/stack/avct/avct_lcb_act.cc
++++ b/system/stack/avct/avct_lcb_act.cc
+@@ -725,10 +725,13 @@ void avct_lcb_msg_ind(tAVCT_LCB* p_lcb, tAVCT_LCB_EVT* p_data) {
+     p = (uint8_t*)(p_buf + 1) + p_buf->offset;
+     AVCT_BUILD_HDR(p, label, AVCT_PKT_TYPE_SINGLE, AVCT_REJ);
+     UINT16_TO_BE_STREAM(p, pid);
++
++    uint16_t len = p_buf->len;
++
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_lcb->ch_lcid, p_buf) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_lcb->peer_addr,
+-                p_lcb->ch_lcid, p_buf->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_lcb->peer_addr, p_lcb->ch_lcid, len);
+     }
+   }
+ }
+diff --git a/system/stack/bnep/bnep_main.cc b/system/stack/bnep/bnep_main.cc
+index e0e3c4540c..cf2faa9650 100644
+--- a/system/stack/bnep/bnep_main.cc
++++ b/system/stack/bnep/bnep_main.cc
+@@ -295,10 +295,12 @@ static void bnep_congestion_ind(uint16_t l2cap_cid, bool is_congested) {
+         break;
+       }
+ 
++      uint16_t len = p_buf->len;
++
+       if (stack::l2cap::get_interface().L2CA_DataWrite(l2cap_cid, p_buf) !=
+           tL2CAP_DW_RESULT::SUCCESS) {
+-        log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_bcb->rem_bda, l2cap_cid,
+-                  p_buf->len);
++        log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++          p_bcb->rem_bda, l2cap_cid, len);
+       }
+     }
+   }
+diff --git a/system/stack/bnep/bnep_utils.cc b/system/stack/bnep/bnep_utils.cc
+index 06566d85b3..b2d81e5b6e 100644
+--- a/system/stack/bnep/bnep_utils.cc
++++ b/system/stack/bnep/bnep_utils.cc
+@@ -408,10 +408,11 @@ void bnepu_check_send_packet(tBNEP_CONN* p_bcb, BT_HDR* p_buf) {
+       fixed_queue_enqueue(p_bcb->xmit_q, p_buf);
+     }
+   } else {
++    uint16_t len = p_buf->len;
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_bcb->l2cap_cid, p_buf) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_bcb->rem_bda,
+-                p_bcb->l2cap_cid, p_buf->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_bcb->rem_bda, p_bcb->l2cap_cid, len);
+     }
+   }
+ }
+diff --git a/system/stack/hid/hidd_conn.cc b/system/stack/hid/hidd_conn.cc
+index c64a7b9104..7b881b6639 100644
+--- a/system/stack/hid/hidd_conn.cc
++++ b/system/stack/hid/hidd_conn.cc
+@@ -87,11 +87,13 @@ static void hidd_check_config_done() {
+     hd_cb.callback(hd_cb.device.addr, HID_DHOST_EVT_OPEN, 0, NULL);
+ 
+     // send outstanding data on intr
++
++    uint16_t len = hd_cb.pending_data->len;
++
+     if (hd_cb.pending_data) {
+       if (stack::l2cap::get_interface().L2CA_DataWrite(p_hcon->intr_cid, hd_cb.pending_data) !=
+           tL2CAP_DW_RESULT::SUCCESS) {
+-        log::warn("Unable to write L2CAP data cid:{} len:{}", p_hcon->intr_cid,
+-                  hd_cb.pending_data->len);
++        log::warn("Unable to write L2CAP data cid:{} len:{}", p_hcon->intr_cid, len);
+       }
+       hd_cb.pending_data = NULL;
+     }
+diff --git a/system/stack/rfcomm/rfc_ts_frames.cc b/system/stack/rfcomm/rfc_ts_frames.cc
+index b0b4b1c143..3428d04593 100644
+--- a/system/stack/rfcomm/rfc_ts_frames.cc
++++ b/system/stack/rfcomm/rfc_ts_frames.cc
+@@ -198,10 +198,12 @@ void rfc_send_buf_uih(tRFC_MCB* p_mcb, uint8_t dlci, BT_HDR* p_buf) {
+   if (dlci == RFCOMM_MX_DLCI) {
+     rfc_check_send_cmd(p_mcb, p_buf);
+   } else {
++    uint16_t len = p_buf->len;
++
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_mcb->lcid, p_buf) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_mcb->bd_addr, p_mcb->lcid,
+-                p_buf->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_mcb->bd_addr, p_mcb->lcid, len);
+     }
+   }
+ }
+diff --git a/system/stack/rfcomm/rfc_utils.cc b/system/stack/rfcomm/rfc_utils.cc
+index 23420892cb..f57aac7112 100644
+--- a/system/stack/rfcomm/rfc_utils.cc
++++ b/system/stack/rfcomm/rfc_utils.cc
+@@ -428,9 +428,10 @@ void rfc_check_send_cmd(tRFC_MCB* p_mcb, BT_HDR* p_buf) {
+     if (p == NULL) {
+       break;
+     }
++    uint16_t len = p->len;
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_mcb->lcid, p) != tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_mcb->bd_addr, p_mcb->lcid,
+-                p->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_mcb->bd_addr, p_mcb->lcid, len);
+     }
+   }
+ }
+diff --git a/system/stack/sdp/sdp_discovery.cc b/system/stack/sdp/sdp_discovery.cc
+index 7e8bacab80..5932d649b8 100644
+--- a/system/stack/sdp/sdp_discovery.cc
++++ b/system/stack/sdp/sdp_discovery.cc
+@@ -179,8 +179,8 @@ static void sdp_snd_service_search_req(tCONN_CB* p_ccb, uint8_t cont_len, uint8_
+ 
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_cmd) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_cmd->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p - p_start);
+   }
+ 
+   /* Start inactivity timer */
+@@ -707,8 +707,8 @@ static void process_service_search_attr_rsp(tCONN_CB* p_ccb, uint8_t* p_reply,
+ 
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_msg) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-                p_ccb->connection_id, p_msg->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_ccb->device_address, p_ccb->connection_id, p - p_start);
+     }
+ 
+     /* Start inactivity timer */
+@@ -876,8 +876,8 @@ static void process_service_attr_rsp(tCONN_CB* p_ccb, uint8_t* p_reply, uint8_t*
+ 
+     if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_msg) !=
+         tL2CAP_DW_RESULT::SUCCESS) {
+-      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-                p_ccb->connection_id, p_msg->len);
++      log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++        p_ccb->device_address, p_ccb->connection_id, p - p_start);
+     }
+ 
+     /* Start inactivity timer */
+diff --git a/system/stack/sdp/sdp_server.cc b/system/stack/sdp/sdp_server.cc
+index 7061cc5885..1df4862cee 100644
+--- a/system/stack/sdp/sdp_server.cc
++++ b/system/stack/sdp/sdp_server.cc
+@@ -299,8 +299,8 @@ static void process_service_search(tCONN_CB* p_ccb, uint16_t trans_num, uint16_t
+   /* Send the buffer through L2CAP */
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_buf) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_buf->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p_rsp - p_rsp_start);
+   }
+ }
+ 
+@@ -563,8 +563,8 @@ static void process_service_attr_req(tCONN_CB* p_ccb, uint16_t trans_num, uint16
+   /* Send the buffer through L2CAP */
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_buf) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_buf->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p_rsp - p_rsp_start);
+   }
+ }
+ 
+@@ -920,8 +920,8 @@ static void process_service_search_attr_req(tCONN_CB* p_ccb, uint16_t trans_num,
+   /* Send the buffer through L2CAP */
+   if (stack::l2cap::get_interface().L2CA_DataWrite(p_ccb->connection_id, p_buf) !=
+       tL2CAP_DW_RESULT::SUCCESS) {
+-    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}", p_ccb->device_address,
+-              p_ccb->connection_id, p_buf->len);
++    log::warn("Unable to write L2CAP data peer:{} cid:{} len:{}",
++      p_ccb->device_address, p_ccb->connection_id, p_rsp - p_rsp_start);
+   }
+ }
+
+project packages/providers/DownloadProvider/
+diff --git a/src/com/android/providers/downloads/DownloadProvider.java b/src/com/android/providers/downloads/DownloadProvider.java
+index 77fe8832..a1d547ce 100644
+--- a/src/com/android/providers/downloads/DownloadProvider.java
++++ b/src/com/android/providers/downloads/DownloadProvider.java
+@@ -84,6 +84,7 @@ import java.io.FileDescriptor;
+ import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.io.PrintWriter;
++import java.util.Arrays;
+ import java.util.Iterator;
+ import java.util.Map;
+ 
+@@ -1120,8 +1121,49 @@ public final class DownloadProvider extends ContentProvider {
+         Helpers.checkDestinationFilePathRestrictions(file, getCallingPackage(), getContext(),
+                 mAppOpsManager, getCallingAttributionTag(), isLegacyMode,
+                 /* allowDownloadsDirOnly */ true);
++        // check whether record already exists in MP or getCallingPackage owns this file
++        checkWhetherCallingAppHasAccess(file.getPath(), Binder.getCallingUid());
+     }
+ 
++    private void checkWhetherCallingAppHasAccess(String filePath, int uid) {
++        try (ContentProviderClient client = getContext().getContentResolver()
++                .acquireContentProviderClient(MediaStore.AUTHORITY)) {
++            if (client == null) {
++                Log.w(Constants.TAG, "Failed to acquire ContentProviderClient for MediaStore");
++                return;
++            }
++
++            Uri filesUri = MediaStore.setIncludePending(
++                    Helpers.getContentUriForPath(getContext(), filePath));
++
++            try (Cursor cursor = client.query(filesUri,
++                    new String[]{MediaStore.Files.FileColumns._ID,
++                            MediaStore.Files.FileColumns.OWNER_PACKAGE_NAME},
++                    MediaStore.Files.FileColumns.DATA + "=?", new String[]{filePath},
++                    null)) {
++                if (cursor != null && cursor.moveToFirst()) {
++                    String fetchedOwnerPackageName = cursor.getString(
++                            cursor.getColumnIndexOrThrow(
++                                    MediaStore.Files.FileColumns.OWNER_PACKAGE_NAME));
++                    String[] packageNames = getContext().getPackageManager().getPackagesForUid(uid);
++
++                    if (fetchedOwnerPackageName != null && packageNames != null) {
++                        boolean isCallerAuthorized = Arrays.asList(packageNames)
++                                .contains(fetchedOwnerPackageName);
++                        if (!isCallerAuthorized) {
++                            throw new SecurityException("Caller does not have access to this path");
++                        }
++                    }
++                }
++            }
++        } catch (RemoteException e) {
++            Log.w(Constants.TAG, "Failed to query MediaStore: " + e.getMessage());
++        }
++    }
++
++
++
++
+     /**
+      * Apps with the ACCESS_DOWNLOAD_MANAGER permission can access this provider freely, subject to
+      * constraints in the rest of the code. Apps without that may still access this provider through
+
+project packages/services/Telecomm/
+diff --git a/src/com/android/server/telecom/TelecomServiceImpl.java b/src/com/android/server/telecom/TelecomServiceImpl.java
+index b8141bf95..b80702c0b 100644
+--- a/src/com/android/server/telecom/TelecomServiceImpl.java
++++ b/src/com/android/server/telecom/TelecomServiceImpl.java
+@@ -68,6 +68,7 @@ import android.telecom.DisconnectCause;
+ import android.telecom.Log;
+ import android.telecom.PhoneAccount;
+ import android.telecom.PhoneAccountHandle;
++import android.telecom.StatusHints;
+ import android.telecom.TelecomAnalytics;
+ import android.telecom.TelecomManager;
+ import android.telecom.VideoProfile;
+@@ -3423,15 +3424,13 @@ public class TelecomServiceImpl {
+         // incompatible types.
+         if (icon != null && (icon.getType() == Icon.TYPE_URI
+                 || icon.getType() == Icon.TYPE_URI_ADAPTIVE_BITMAP)) {
+-            String encodedUser = icon.getUri().getEncodedUserInfo();
+-            // If there is no encoded user, the URI is calling into the calling user space
+-            if (encodedUser != null) {
+-                int userId = Integer.parseInt(encodedUser);
+-                if (userId != UserHandle.getUserId(Binder.getCallingUid())) {
+-                    // If we are transcending the profile boundary, throw an error.
+-                    throw new IllegalArgumentException("Attempting to register a phone account with"
+-                            + " an image icon belonging to another user.");
+-                }
++            int callingUserId = UserHandle.getCallingUserId();
++            int requestingUserId = StatusHints.getUserIdFromAuthority(
++                    icon.getUri().getAuthority(), callingUserId);
++            if(callingUserId != requestingUserId) {
++                // If we are transcending the profile boundary, throw an error.
++                throw new IllegalArgumentException("Attempting to register a phone account with"
++                        + " an image icon belonging to another user.");
+             }
+         }
+     }
+diff --git a/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java b/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java
+index dc5f3256e..a52a14c3a 100644
+--- a/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java
++++ b/tests/src/com/android/server/telecom/tests/TelecomServiceImplTest.java
+@@ -1090,6 +1090,20 @@ public class TelecomServiceImplTest extends TelecomTestCase {
+         // This should fail; security exception will be thrown.
+         registerPhoneAccountTestHelper(phoneAccount, false);
+ 
++        icon = Icon.createWithContentUri(
++                new Uri.Builder().scheme("content")
++                        .encodedAuthority("10%40media")
++                        .path("external/images/media/${mediaId.text}".trim())
++                        .build());
++        phoneAccount = makePhoneAccount(phHandle).setIcon(icon).build();
++        // This should fail; security exception will be thrown
++        registerPhoneAccountTestHelper(phoneAccount, false);
++
++        icon = Icon.createWithContentUri( Uri.parse("content://10%40play.ground"));
++        phoneAccount = makePhoneAccount(phHandle).setIcon(icon).build();
++        // This should fail; security exception will be thrown
++        registerPhoneAccountTestHelper(phoneAccount, false);
++
+         icon = Icon.createWithContentUri("content://0@media/external/images/media/");
+         phoneAccount = makePhoneAccount(phHandle).setIcon(icon).build();
+         // This should succeed.
