@@ -1,0 +1,26 @@
+
+project device/xiaomi/marble/
+diff --git a/properties/build_CN.prop b/properties/build_CN.prop
+index 2025db3..df26b18 100644
+--- a/properties/build_CN.prop
++++ b/properties/build_CN.prop
+@@ -7,3 +7,5 @@ ro.product.odm.manufacturer=Xiaomi
+ ro.product.odm.model=23049RAD8C
+ ro.product.odm.name=marble
+ ro.product.mod_device=marble
++ro.com.google.gmsversion=15_202408
++ro.opa.eligible_device=true
+
+project vendor/gapps
+diff --git a/common/common-vendor.mk b/common/common-vendor.mk
+index 779ffae..928e5a7 100644
+--- a/common/common-vendor.mk
++++ b/common/common-vendor.mk
+@@ -8,7 +8,6 @@ PRODUCT_SOONG_NAMESPACES += \
+ PRODUCT_COPY_FILES += \
+     vendor/gapps/common/proprietary/product/etc/default-permissions/default-permissions-google.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/default-permissions/default-permissions-google.xml \
+     vendor/gapps/common/proprietary/product/etc/default-permissions/default-permissions-mtg.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/default-permissions/default-permissions-mtg.xml \
+-    vendor/gapps/common/proprietary/product/etc/init/gapps.rc:$(TARGET_COPY_OUT_PRODUCT)/etc/init/gapps.rc \
+     vendor/gapps/common/proprietary/product/etc/permissions/com.google.android.dialer.support.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/com.google.android.dialer.support.xml \
+     vendor/gapps/common/proprietary/product/etc/permissions/privapp-permissions-google-product.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/privapp-permissions-google-product.xml \
+     vendor/gapps/common/proprietary/product/etc/permissions/privapp-permissions-mtg.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/privapp-permissions-mtg.xml \

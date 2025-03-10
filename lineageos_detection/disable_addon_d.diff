@@ -1,0 +1,45 @@
+project vendor/lineage/
+diff --git a/config/common.mk b/config/common.mk
+index a3cb1f20..53d921e8 100644
+--- a/config/common.mk
++++ b/config/common.mk
+@@ -38,24 +38,24 @@ PRODUCT_SYSTEM_DEFAULT_PROPERTIES += persist.sys.strictmode.disable=true
+ endif
+
+ # Backup Tool
+-PRODUCT_COPY_FILES += \
+-    vendor/lineage/prebuilt/common/bin/backuptool.sh:install/bin/backuptool.sh \
+-    vendor/lineage/prebuilt/common/bin/backuptool.functions:install/bin/backuptool.functions \
+-    vendor/lineage/prebuilt/common/bin/50-lineage.sh:$(TARGET_COPY_OUT_SYSTEM)/addon.d/50-lineage.sh
++#PRODUCT_COPY_FILES += \
++#    vendor/lineage/prebuilt/common/bin/backuptool.sh:install/bin/backuptool.sh \
++#    vendor/lineage/prebuilt/common/bin/backuptool.functions:install/bin/backuptool.functions
++#    vendor/lineage/prebuilt/common/bin/50-lineage.sh:$(TARGET_COPY_OUT_SYSTEM)/addon.d/50-lineage.sh
+
+-PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+-    system/addon.d/50-lineage.sh
++# PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
++#    system/addon.d/50-lineage.sh
+
+ ifneq ($(strip $(AB_OTA_PARTITIONS) $(AB_OTA_POSTINSTALL_CONFIG)),)
+-PRODUCT_COPY_FILES += \
+-    vendor/lineage/prebuilt/common/bin/backuptool_ab.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_ab.sh \
+-    vendor/lineage/prebuilt/common/bin/backuptool_ab.functions:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_ab.functions \
+-    vendor/lineage/prebuilt/common/bin/backuptool_postinstall.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_postinstall.sh
+-
+-PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+-    system/bin/backuptool_ab.sh \
+-    system/bin/backuptool_ab.functions \
+-    system/bin/backuptool_postinstall.sh
++#PRODUCT_COPY_FILES += \
++#    vendor/lineage/prebuilt/common/bin/backuptool_ab.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_ab.sh \
++#    vendor/lineage/prebuilt/common/bin/backuptool_ab.functions:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_ab.functions \
++#    vendor/lineage/prebuilt/common/bin/backuptool_postinstall.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_postinstall.sh
++
++#PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
++#    system/bin/backuptool_ab.sh \
++#    system/bin/backuptool_ab.functions \
++#    system/bin/backuptool_postinstall.sh
+
+ ifneq ($(TARGET_BUILD_VARIANT),user)
+ PRODUCT_SYSTEM_DEFAULT_PROPERTIES += \
