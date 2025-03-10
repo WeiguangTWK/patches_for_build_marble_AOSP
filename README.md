@@ -26,11 +26,23 @@ First of all, use device and vendor from [Chaitanyakm](https://github.com/Chaita
 git clone --depth=1 https://github.com/WeiguangTWK/patches_for_build_marble_AOSP .
 ```
 
+*1.(if you need Chaitanyakm's device&vendor&miui-camera) copy folder local_mainfest into .repo then sync
+
+```
+repo sync -c
+```
+
 2. apply them according to your need
 
 ```
 chmod +x ./patch_diff.sh
 patch_diff.sh <diff file>
+```
+
+*3. To enable GMS, ont only you need to patch Enable GMS patch but also need to clone Mind The Gapps repo
+
+```
+git clone --depth=1 https://gitlab.com/MindTheGapps/vendor_gapps vendor/gapps
 ```
 
 Enjoy!
