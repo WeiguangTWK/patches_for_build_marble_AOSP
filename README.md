@@ -26,10 +26,17 @@ First of all, use device and vendor from [Chaitanyakm](https://github.com/Chaita
 git clone --depth=1 https://github.com/WeiguangTWK/patches_for_build_marble_AOSP .
 ```
 
-*1.(if you need Chaitanyakm's device&vendor&miui-camera) copy folder local_mainfest into .repo then sync
+*1. (if you need Chaitanyakm's device&vendor&miui-camera) copy folder local_mainfest into .repo then sync
 
 ```
 repo sync -c
+```
+
+**1. also to build with miui camera, you need to extract blob from your phone first
+
+```
+cd device/xiaomi/miuicamera-marble
+./extract-files.py
 ```
 
 2. apply them according to your need
