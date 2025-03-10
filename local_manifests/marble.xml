@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <!-- NOTE: Do not forget to use clone-depth=1. We only need shallow copies since this is discarded immediately after the build -->
+
+  <!-- Device trees -->
+  <project name="Chaitanyakm/device_xiaomi_marble" path="device/xiaomi/marble" remote="github" revision="fifteen" clone-depth="1" />
+
+  <!-- Vendor -->
+  <project name="Chaitanyakm/vendor_xiaomi_marble" path="vendor/xiaomi/marble" remote="github" revision="fifteen" clone-depth="1" />
+</manifest>

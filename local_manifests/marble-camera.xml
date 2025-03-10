@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <!-- NOTE: Do not forget to use clone-depth=1. We only need shallow copies since this is discarded immediately after the build -->
+
+  <!-- MIUI Camera for marble -->
+  <project name="Chaitanyakm/device_xiaomi_miuicamera-marble" path="device/xiaomi/miuicamera-marble" remote="github" revision="fourteen" clone-depth="1" />
+
+</manifest>

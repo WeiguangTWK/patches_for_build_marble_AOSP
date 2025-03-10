@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <!-- NOTE: Do not forget to use clone-depth=1. We only need shallow copies since this is discarded immediately after the build -->
+
+  <!-- Remotes -->
+  <remote fetch="https://git.mainlining.org" name="mainlining" revision="lineage-22.1" clone-depth="1" />
+
+  <!-- Device trees -->
+  <project name="Chaitanyakm/device_xiaomi_sm8450-common" path="device/xiaomi/sm8450-common" remote="github" revision="fifteen" clone-depth="1" />
+
+  <!-- Xiaomi common hardware -->
+  <project path="hardware/xiaomi" remote="github" name="LineageOS/android_hardware_xiaomi" revision="lineage-22.1" clone-depth="1" />
+
+  <!-- Kernel -->
+  <project name="cupid-development/android_kernel_xiaomi_sm8450" path="kernel/xiaomi/sm8450" remote="github" revision="lineage-22.1" clone-depth="1" />
+  <project name="cupid-development/android_kernel_xiaomi_sm8450-devicetrees" path="kernel/xiaomi/sm8450-devicetrees" remote="github" revision="lineage-22.1" clone-depth="1" />
+  <project name="cupid-development/android_kernel_xiaomi_sm8450-modules" path="kernel/xiaomi/sm8450-modules" remote="github" revision="lineage-22.1" clone-depth="1" />
+
+  <!-- Vendor -->
+  <project name="Chaitanyakm/vendor_xiaomi_sm8450-common.git" path="vendor/xiaomi/sm8450-common" remote="github" revision="fifteen" clone-depth="1" />
+
+  <!-- Extra vendor for OTA URLs -->
+  <project path="vendor/extra" remote="github" name="cupid-development/android_vendor_extra" revision="lineage-22.1" clone-depth="1" />
+</manifest>
