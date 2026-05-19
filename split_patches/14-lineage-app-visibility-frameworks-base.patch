@@ -1,0 +1,455 @@
+diff --git a/frameworks/base/services/core/java/com/android/server/pm/ComputerEngine.java b/frameworks/base/services/core/java/com/android/server/pm/ComputerEngine.java
+index 1cc02de..d80e14c 100644
+--- a/frameworks/base/services/core/java/com/android/server/pm/ComputerEngine.java
++++ b/frameworks/base/services/core/java/com/android/server/pm/ComputerEngine.java
+@@ -140,6 +140,7 @@ import com.android.internal.util.IndentingPrintWriter;
+ import com.android.internal.util.Preconditions;
+ import com.android.modules.utils.TypedXmlSerializer;
+ import com.android.server.LocalManagerRegistry;
++import com.android.server.LocalServices;
+ import com.android.server.ondeviceintelligence.OnDeviceIntelligenceManagerLocal;
+ import com.android.server.pm.parsing.PackageInfoUtils;
+ import com.android.server.pm.parsing.pkg.AndroidPackageUtils;
+@@ -1273,6 +1274,11 @@ public class ComputerEngine implements Computer {
+                         mSettings.getSettingBase(UserHandle.getAppId(filterCallingUid));
+                 PackageStateInternal resolvedSetting =
+                         getPackageStateInternal(info.activityInfo.packageName, 0);
++                if (shouldFilterLineageTargetPackage(resolvedSetting, filterCallingUid,
++                        callingSetting, userId)) {
++                    resolveInfos.remove(i);
++                    continue;
++                }
+                 if (resolveForStart
+                         || !mAppsFilter.shouldFilterApplication(this,
+                         filterCallingUid, callingSetting, resolvedSetting, userId)) {
+@@ -2655,9 +2661,23 @@ public class ComputerEngine implements Computer {
+         }
+         int appId = UserHandle.getAppId(callingUid);
+         final SettingBase callingPs = mSettings.getSettingBase(appId);
++        if (shouldFilterLineageTargetPackage(ps, callingUid, callingPs, userId)) {
++            return true;
++        }
+         return mAppsFilter.shouldFilterApplication(this, callingUid, callingPs, ps, userId);
+     }
+ 
++    private boolean shouldFilterLineageTargetPackage(@Nullable PackageStateInternal targetPs,
++            int callingUid, @Nullable SettingBase callingPs, @UserIdInt int userId) {
++        if (targetPs == null) {
++            return false;
++        }
++        final LineageAppVisibilityManagerInternal visibilityManager =
++                LocalServices.getService(LineageAppVisibilityManagerInternal.class);
++        return visibilityManager != null && visibilityManager.shouldHideForCallingSetting(
++                targetPs.getPackageName(), callingPs, callingUid, userId);
++    }
++
+     /**
+      * @see #shouldFilterApplication(PackageStateInternal, int, ComponentName, int, int, boolean,
+      * boolean)
+@@ -4611,7 +4631,8 @@ public class ComputerEngine implements Computer {
+             @UserIdInt int userId) {
+         if (!mUserManager.exists(userId)) return ParceledListSlice.emptyList();
+         flags = updateFlagsForPackage(flags, userId);
+-        enforceCrossUserPermission(Binder.getCallingUid(), userId, true /* requireFullPermission */,
++        final int callingUid = Binder.getCallingUid();
++        enforceCrossUserPermission(callingUid, userId, true /* requireFullPermission */,
+                 false /* checkShell */, "get packages holding permissions");
+         final boolean listUninstalled =
+                 (flags & (MATCH_KNOWN_PACKAGES | MATCH_ARCHIVED_PACKAGES)) != 0;
+@@ -4622,7 +4643,8 @@ public class ComputerEngine implements Computer {
+             if (ps.getPkg() == null && !listUninstalled) {
+                 continue;
+             }
+-            addPackageHoldingPermissions(list, ps, permissions, tmpBools, flags, userId);
++            addPackageHoldingPermissions(list, ps, permissions, tmpBools, flags, userId,
++                    callingUid);
+         }
+ 
+         return new ParceledListSlice<>(list);
+@@ -4630,7 +4652,7 @@ public class ComputerEngine implements Computer {
+ 
+     private void addPackageHoldingPermissions(ArrayList<PackageInfo> list, PackageStateInternal ps,
+             String[] permissions, boolean[] tmp, @PackageManager.PackageInfoFlagsBits long flags,
+-            int userId) {
++            int userId, int callingUid) {
+         int numMatch = 0;
+         for (int i=0; i<permissions.length; i++) {
+             final String permission = permissions[i];
+@@ -4646,6 +4668,9 @@ public class ComputerEngine implements Computer {
+         if (numMatch == 0) {
+             return;
+         }
++        if (shouldFilterApplicationIncludingUninstalled(ps, callingUid, userId)) {
++            return;
++        }
+         final PackageInfo pi = generatePackageInfo(ps, flags, userId);
+ 
+         // The above might return null in cases of uninstalled apps or install-state
+diff --git a/frameworks/base/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java b/frameworks/base/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java
+new file mode 100644
+index 0000000..7e0ad53
+--- /dev/null
++++ b/frameworks/base/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java
+@@ -0,0 +1,36 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.pm;
++
++import android.annotation.Nullable;
++import android.annotation.UserIdInt;
++
++/**
++ * Internal visibility policy for hiding LineageOS packages from selected callers.
++ *
++ * @hide
++ */
++public abstract class LineageAppVisibilityManagerInternal {
++
++    public abstract boolean isLineageVisibilityTargetPackage(@Nullable String packageName);
++
++    public abstract boolean shouldHideForCallingPackage(@Nullable String targetPackageName,
++            @Nullable String callingPackage, int callingUid, @UserIdInt int userId);
++
++    public abstract boolean shouldHideForCallingSetting(@Nullable String targetPackageName,
++            @Nullable SettingBase callingSetting, int callingUid, @UserIdInt int userId);
++}
+diff --git a/frameworks/base/services/core/java/com/android/server/pm/LineageAppVisibilityService.java b/frameworks/base/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
+new file mode 100644
+index 0000000..91876cd
+--- /dev/null
++++ b/frameworks/base/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
+@@ -0,0 +1,232 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.pm;
++
++import static com.android.server.pm.PackageManagerServiceUtils.isSystemOrRootOrShell;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.UserIdInt;
++import android.content.Context;
++import android.content.pm.UserInfo;
++import android.database.ContentObserver;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.UserHandle;
++import android.provider.Settings;
++import android.text.TextUtils;
++import android.util.ArraySet;
++import android.util.SparseArray;
++
++import com.android.server.LocalServices;
++import com.android.server.SystemService;
++import com.android.server.pm.pkg.PackageStateInternal;
++
++/**
++ * Tracks per-user app visibility overrides for hiding LineageOS packages.
++ *
++ * @hide
++ */
++public final class LineageAppVisibilityService extends SystemService {
++    private static final String LINEAGE_VISIBILITY_BLOCKED_PACKAGES_SETTING =
++            "lineage_visibility_blocked_packages";
++    private static final ArraySet<String> TARGET_PACKAGES = createTargetPackages();
++
++    private final Object mLock = new Object();
++    private final SparseArray<ArraySet<String>> mBlockedPackagesByUser = new SparseArray<>();
++    private final SettingsObserver mSettingsObserver;
++
++    private final UserManagerInternal.UserLifecycleListener mUserLifecycleListener =
++            new UserManagerInternal.UserLifecycleListener() {
++                @Override
++                public void onUserCreated(UserInfo user, @Nullable Object token) {
++                    invalidateBlockedPackages(user.id);
++                }
++
++                @Override
++                public void onUserRemoved(UserInfo user) {
++                    invalidateBlockedPackages(user.id);
++                }
++            };
++
++    private final LineageAppVisibilityManagerInternal mLocalService =
++            new LineageAppVisibilityManagerInternal() {
++                @Override
++                public boolean isLineageVisibilityTargetPackage(@Nullable String packageName) {
++                    return LineageAppVisibilityService.this
++                            .isLineageVisibilityTargetPackage(packageName);
++                }
++
++                @Override
++                public boolean shouldHideForCallingPackage(@Nullable String targetPackageName,
++                        @Nullable String callingPackage, int callingUid, @UserIdInt int userId) {
++                    if (!isLineageVisibilityTargetPackage(targetPackageName)) {
++                        return false;
++                    }
++                    if (!UserHandle.isApp(callingUid) || TextUtils.isEmpty(callingPackage)) {
++                        return false;
++                    }
++                    return getBlockedPackages(userId).contains(callingPackage);
++                }
++
++                @Override
++                public boolean shouldHideForCallingSetting(@Nullable String targetPackageName,
++                        @Nullable SettingBase callingSetting, int callingUid,
++                        @UserIdInt int userId) {
++                    if (!isLineageVisibilityTargetPackage(targetPackageName)) {
++                        return false;
++                    }
++                    if (isSystemOrRootOrShell(callingUid) || callingSetting == null) {
++                        return false;
++                    }
++                    final ArraySet<String> blockedPackages = getBlockedPackages(userId);
++                    if (blockedPackages.isEmpty()) {
++                        return false;
++                    }
++                    if (callingSetting instanceof PackageSetting) {
++                        return blockedPackages.contains(
++                                ((PackageSetting) callingSetting).getPackageName());
++                    }
++                    if (callingSetting instanceof SharedUserSetting) {
++                        @SuppressWarnings("unchecked")
++                        final ArraySet<PackageStateInternal> packageStates =
++                                (ArraySet<PackageStateInternal>)
++                                        ((SharedUserSetting) callingSetting).getPackageStates();
++                        for (int i = packageStates.size() - 1; i >= 0; i--) {
++                            if (blockedPackages.contains(
++                                    packageStates.valueAt(i).getPackageName())) {
++                                return true;
++                            }
++                        }
++                    }
++                    return false;
++                }
++            };
++
++    public LineageAppVisibilityService(Context context) {
++        super(context);
++        mSettingsObserver = new SettingsObserver(new Handler(context.getMainLooper()));
++    }
++
++    @Override
++    public void onStart() {
++        getContext().getContentResolver().registerContentObserver(
++                Settings.Secure.getUriFor(LINEAGE_VISIBILITY_BLOCKED_PACKAGES_SETTING),
++                false,
++                mSettingsObserver,
++                UserHandle.USER_ALL);
++        LocalServices.getService(UserManagerInternal.class)
++                .addUserLifecycleListener(mUserLifecycleListener);
++        publishLocalService(LineageAppVisibilityManagerInternal.class, mLocalService);
++    }
++
++    private boolean isLineageVisibilityTargetPackage(@Nullable String packageName) {
++        return packageName != null && TARGET_PACKAGES.contains(packageName);
++    }
++
++    @NonNull
++    private ArraySet<String> getBlockedPackages(@UserIdInt int userId) {
++        synchronized (mLock) {
++            final ArraySet<String> cached = mBlockedPackagesByUser.get(userId);
++            if (cached != null) {
++                return cached;
++            }
++            final ArraySet<String> loaded = loadBlockedPackages(userId);
++            mBlockedPackagesByUser.put(userId, loaded);
++            return loaded;
++        }
++    }
++
++    @NonNull
++    private ArraySet<String> loadBlockedPackages(@UserIdInt int userId) {
++        final String value = Settings.Secure.getStringForUser(
++                getContext().getContentResolver(),
++                LINEAGE_VISIBILITY_BLOCKED_PACKAGES_SETTING,
++                userId);
++        final ArraySet<String> packages = new ArraySet<>();
++        if (TextUtils.isEmpty(value)) {
++            return packages;
++        }
++        final String[] packageNames = value.split(",");
++        for (int i = 0; i < packageNames.length; i++) {
++            final String packageName = packageNames[i].trim();
++            if (!packageName.isEmpty()) {
++                packages.add(packageName);
++            }
++        }
++        return packages;
++    }
++
++    private void invalidateBlockedPackages(@UserIdInt int userId) {
++        synchronized (mLock) {
++            mBlockedPackagesByUser.remove(userId);
++        }
++    }
++
++    private void invalidateAllBlockedPackages() {
++        synchronized (mLock) {
++            mBlockedPackagesByUser.clear();
++        }
++    }
++
++    @NonNull
++    private static ArraySet<String> createTargetPackages() {
++        final ArraySet<String> packages = new ArraySet<>();
++        packages.add("org.lineageos.updater");
++        packages.add("org.lineageos.jelly");
++        packages.add("org.lineageos.aperture");
++        packages.add("org.lineageos.recorder");
++        packages.add("org.lineageos.etar");
++        packages.add("org.lineageos.twelve");
++        packages.add("org.lineageos.glimpse");
++        packages.add("org.lineageos.lineageparts");
++        packages.add("org.lineageos.profiles");
++        packages.add("org.lineageos.backgrounds");
++        packages.add("org.lineageos.camelot");
++        packages.add("org.lineageos.lineagesettings");
++        packages.add("org.lineageos.setupwizard");
++        packages.add("org.lineageos.audiofx");
++        packages.add("org.lineageos.overlay.customization.blacktheme");
++        packages.add("lineageos.platform");
++        packages.add("lineageos.platform.overlay.xiaomi");
++        packages.add("org.lineageos.aperture.frameworksbaseoverlay");
++        packages.add("org.lineageos.aperture.overlay.marble");
++        packages.add("org.lineageos.glimpse.frameworksbaseoverlay");
++        packages.add("org.lineageos.overlay.font.googlesansflex");
++        packages.add("org.lineageos.qtitelephony.compat");
++        packages.add("org.lineageos.settingsconfig");
++        packages.add("co.aospa.sense");
++        packages.add("org.protonaosp.deviceconfig");
++        packages.add("org.lineageos.dspvolume.xiaomi");
++        return packages;
++    }
++
++    private final class SettingsObserver extends ContentObserver {
++        SettingsObserver(Handler handler) {
++            super(handler);
++        }
++
++        @Override
++        public void onChange(boolean selfChange, Uri uri, int userId) {
++            if (userId == UserHandle.USER_ALL) {
++                invalidateAllBlockedPackages();
++            } else {
++                invalidateBlockedPackages(userId);
++            }
++        }
++    }
++}
+diff --git a/frameworks/base/services/core/java/com/android/server/wm/ActivityStarter.java b/frameworks/base/services/core/java/com/android/server/wm/ActivityStarter.java
+index b0a8007..4819a63 100644
+--- a/frameworks/base/services/core/java/com/android/server/wm/ActivityStarter.java
++++ b/frameworks/base/services/core/java/com/android/server/wm/ActivityStarter.java
+@@ -96,6 +96,7 @@ import static com.android.window.flags.Flags.balReportAbortedActivityStarts;
+ import android.annotation.IntDef;
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.annotation.UserIdInt;
+ import android.app.ActivityManager;
+ import android.app.ActivityOptions;
+ import android.app.IApplicationThread;
+@@ -139,10 +140,12 @@ import com.android.internal.app.HeavyWeightSwitcherActivity;
+ import com.android.internal.app.IVoiceInteractor;
+ import com.android.internal.protolog.ProtoLog;
+ import com.android.internal.util.FrameworkStatsLog;
++import com.android.server.LocalServices;
+ import com.android.server.UiThread;
+ import com.android.server.am.ActivityManagerService.IntentCreatorToken;
+ import com.android.server.am.PendingIntentRecord;
+ import com.android.server.pm.InstantAppResolver;
++import com.android.server.pm.LineageAppVisibilityManagerInternal;
+ import com.android.server.pm.PackageArchiver;
+ import com.android.server.power.ShutdownCheckPoints;
+ import com.android.server.statusbar.StatusBarManagerInternal;
+@@ -1020,6 +1023,25 @@ class ActivityStarter {
+         return res;
+     }
+ 
++    @Nullable
++    private static String getTargetPackageNameForVisibilityCheck(@Nullable Intent intent) {
++        if (intent == null) {
++            return null;
++        }
++        if (intent.getComponent() != null) {
++            return intent.getComponent().getPackageName();
++        }
++        return intent.getPackage();
++    }
++
++    private boolean shouldHideLineageTargetForCaller(@Nullable String targetPackageName,
++            @Nullable String callingPackage, int callingUid, @UserIdInt int userId) {
++        final LineageAppVisibilityManagerInternal visibilityManager =
++                LocalServices.getService(LineageAppVisibilityManagerInternal.class);
++        return visibilityManager != null && visibilityManager.shouldHideForCallingPackage(
++                targetPackageName, callingPackage, callingUid, userId);
++    }
++
+     /**
+      * Executing activity start request and starts the journey of starting an activity. Here
+      * begins with performing several preliminary checks. The normally activity launch flow will
+@@ -1076,6 +1098,13 @@ class ActivityStarter {
+         final int userId = aInfo != null && aInfo.applicationInfo != null
+                 ? UserHandle.getUserId(aInfo.applicationInfo.uid) : 0;
+         final int launchMode = aInfo != null ? aInfo.launchMode : 0;
++        if (err == ActivityManager.START_SUCCESS) {
++            final String targetPackageName = getTargetPackageNameForVisibilityCheck(intent);
++            if (shouldHideLineageTargetForCaller(targetPackageName, callingPackage, callingUid,
++                    request.userId)) {
++                err = ActivityManager.START_CLASS_NOT_FOUND;
++            }
++        }
+         if (err == ActivityManager.START_SUCCESS) {
+             request.logMessage.append("START u").append(userId).append(" {")
+                     .append(intent.toShortString(true, true, true, false))
+diff --git a/frameworks/base/services/java/com/android/server/SystemServer.java b/frameworks/base/services/java/com/android/server/SystemServer.java
+index a184d6a..15c2192 100644
+--- a/frameworks/base/services/java/com/android/server/SystemServer.java
++++ b/frameworks/base/services/java/com/android/server/SystemServer.java
+@@ -227,6 +227,7 @@ import com.android.server.pm.DynamicCodeLoggingService;
+ import com.android.server.pm.HsumBootUserInitializer;
+ import com.android.server.pm.Installer;
+ import com.android.server.pm.LauncherAppsService;
++import com.android.server.pm.LineageAppVisibilityService;
+ import com.android.server.pm.PackageManagerService;
+ import com.android.server.pm.ShortcutService;
+ import com.android.server.pm.UserManagerService;
+@@ -1653,6 +1654,10 @@ public final class SystemServer implements Dumpable {
+             SQLiteCompatibilityWalFlags.reset();
+             t.traceEnd();
+ 
++            t.traceBegin("StartLineageAppVisibilityService");
++            mSystemServiceManager.startService(LineageAppVisibilityService.class);
++            t.traceEnd();
++
+             // Records errors and logs, for example wtf()
+             // Currently this service indirectly depends on SettingsProvider so do this after
+             // InstallSystemProviders.

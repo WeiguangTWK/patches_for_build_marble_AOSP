@@ -1,0 +1,155 @@
+diff --git a/packages/apps/Settings/res/values/strings.xml b/packages/apps/Settings/res/values/strings.xml
+index 3e49820..d17d106 100644
+--- a/packages/apps/Settings/res/values/strings.xml
++++ b/packages/apps/Settings/res/values/strings.xml
+@@ -4667,6 +4667,12 @@
+     <string name="screen_compatibility_label">Screen compatibility</string>
+     <!-- Manage applications, individual application info screen, heading for settings related to the app's permissions. for example, it may list all the permissions the app has. -->
+     <string name="permissions_label">Permissions</string>
++    <!-- Manage applications, individual application info screen, switch title to hide LineageOS apps
++         from this third-party app at runtime. -->
++    <string name="lineage_visibility_block_title">Block LineageOS Apps detection</string>
++    <!-- Manage applications, individual application info screen, switch summary for runtime package
++         visibility filtering. -->
++    <string name="lineage_visibility_block_summary">Hide LineageOS apps from this app at runtime</string>
+     <!-- Manage applications, Header name used for cache information -->
+     <string name="cache_header_label">Cache</string>
+     <!-- Manage applications, text label for button -->
+diff --git a/packages/apps/Settings/res/values-zh-rCN/strings.xml b/packages/apps/Settings/res/values-zh-rCN/strings.xml
+index 33131a8..71b8a3c 100644
+--- a/packages/apps/Settings/res/values-zh-rCN/strings.xml
++++ b/packages/apps/Settings/res/values-zh-rCN/strings.xml
+@@ -2006,6 +2006,8 @@
+     <string name="auto_launch_label_generic" msgid="5033137408273064599">"默认操作"</string>
+     <string name="screen_compatibility_label" msgid="7549658546078613431">"屏幕兼容性"</string>
+     <string name="permissions_label" msgid="1708927634370314404">"权限"</string>
++    <string name="lineage_visibility_block_title">"阻止检测 LineageOS 应用"</string>
++    <string name="lineage_visibility_block_summary">"在运行时向此应用隐藏 LineageOS 应用"</string>
+     <string name="cache_header_label" msgid="2441967971921741047">"缓存"</string>
+     <string name="clear_cache_btn_text" msgid="8597272828928143723">"清除缓存"</string>
+     <string name="cache_size_label" msgid="313456088966822757">"缓存"</string>
+diff --git a/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt b/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
+index 2004757..541f337 100644
+--- a/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
++++ b/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
+@@ -147,6 +147,7 @@ private fun AppInfoSettings(packageInfoPresenter: PackageInfoPresenter) {
+             AppAllServicesPreference(app)
+             AppNotificationPreference(app)
+             AppPermissionPreference(app)
++            LineageAppVisibilityBlockSwitchPreference(app)
+             ManageTargetAppFunctionAccessPreference(app)
+             ManageAgentAppFunctionAccessPreference(app)
+             AppStoragePreference(app)
+diff --git a/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/LineageAppVisibilityBlockSwitchPreference.kt b/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/LineageAppVisibilityBlockSwitchPreference.kt
+new file mode 100644
+index 0000000..0b77c70
+--- /dev/null
++++ b/packages/apps/Settings/src/com/android/settings/spa/app/appinfo/LineageAppVisibilityBlockSwitchPreference.kt
+@@ -0,0 +1,107 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.spa.app.appinfo
++
++import android.content.Context
++import android.content.pm.ApplicationInfo
++import android.os.Process
++import android.provider.Settings
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.remember
++import androidx.compose.ui.platform.LocalContext
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import com.android.settings.R
++import com.android.settingslib.spa.widget.preference.SwitchPreference
++import com.android.settingslib.spa.widget.preference.SwitchPreferenceModel
++import com.android.settingslib.spaprivileged.model.app.userId
++import kotlinx.coroutines.flow.MutableStateFlow
++
++private const val LINEAGE_VISIBILITY_BLOCKED_PACKAGES_SETTING =
++    "lineage_visibility_blocked_packages"
++private const val LINEAGE_TARGET_PACKAGE = "org.lineageos.updater"
++
++@Composable
++fun LineageAppVisibilityBlockSwitchPreference(app: ApplicationInfo) {
++    val context = LocalContext.current
++    val presenter = remember(app) { LineageAppVisibilityBlockPresenter(context, app) }
++    if (!presenter.isAvailable()) return
++
++    val isCheckedState = presenter.isCheckedFlow.collectAsStateWithLifecycle()
++    SwitchPreference(remember {
++        object : SwitchPreferenceModel {
++            override val title = context.getString(R.string.lineage_visibility_block_title)
++            override val summary = {
++                context.getString(R.string.lineage_visibility_block_summary)
++            }
++            override val checked = { isCheckedState.value }
++            override val onCheckedChange = presenter::onCheckedChange
++        }
++    })
++}
++
++private class LineageAppVisibilityBlockPresenter(
++    private val context: Context,
++    private val app: ApplicationInfo,
++) {
++    private val isChecked = MutableStateFlow(readBlockedPackages().contains(app.packageName))
++    val isCheckedFlow = isChecked
++
++    fun isAvailable(): Boolean {
++        if (app.packageName == LINEAGE_TARGET_PACKAGE) return false
++        if (app.uid < Process.FIRST_APPLICATION_UID) return false
++        if ((app.flags and ApplicationInfo.FLAG_SYSTEM) != 0) return false
++        if ((app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0) return false
++        return true
++    }
++
++    fun onCheckedChange(newChecked: Boolean) {
++        val blockedPackages = readBlockedPackages().toMutableSet()
++        if (newChecked) {
++            blockedPackages.add(app.packageName)
++        } else {
++            blockedPackages.remove(app.packageName)
++        }
++        if (writeBlockedPackages(blockedPackages)) {
++            isChecked.value = newChecked
++        }
++    }
++
++    private fun readBlockedPackages(): Set<String> {
++        val value =
++            Settings.Secure.getStringForUser(
++                context.contentResolver,
++                LINEAGE_VISIBILITY_BLOCKED_PACKAGES_SETTING,
++                app.userId,
++            ) ?: return emptySet()
++        return value.split(',').mapNotNull { item ->
++            val trimmed = item.trim()
++            if (trimmed.isEmpty()) null else trimmed
++        }.toSet()
++    }
++
++    private fun writeBlockedPackages(packages: Set<String>): Boolean {
++        val value = packages.sorted().joinToString(",")
++        return runCatching {
++            Settings.Secure.putStringForUser(
++                context.contentResolver,
++                LINEAGE_VISIBILITY_BLOCKED_PACKAGES_SETTING,
++                if (value.isEmpty()) null else value,
++                app.userId,
++            )
++        }.getOrDefault(false)
++    }
++}
