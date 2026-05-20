@@ -1,0 +1,4450 @@
+
+project bionic/
+diff --git a/libc/system_properties/include/system_properties/system_properties.h b/libc/system_properties/include/system_properties/system_properties.h
+index ea4f339..6626c6f 100644
+--- a/libc/system_properties/include/system_properties/system_properties.h
++++ b/libc/system_properties/include/system_properties/system_properties.h
+@@ -73,6 +73,8 @@ class SystemProperties {
+ 
+  private:
+   uint32_t ReadMutablePropertyValue(const prop_info* pi, char* value);
++  bool IsNhOverrideEnabled();
++  const char* GetNhOverrideValueForName(const char* name);
+ 
+   // We don't want to use new or malloc in properties (b/31659220), and we don't want to waste a
+   // full page by using mmap(), so we set aside enough space to create any context of the three
+diff --git a/libc/system_properties/system_properties.cpp b/libc/system_properties/system_properties.cpp
+index 6924ff1..89a6e0a 100644
+--- a/libc/system_properties/system_properties.cpp
++++ b/libc/system_properties/system_properties.cpp
+@@ -32,6 +32,7 @@
+ #include <private/android_filesystem_config.h>
+ #include <stdatomic.h>
+ #include <stdlib.h>
++#include <strings.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -53,6 +54,16 @@
+ #define SERIAL_VALUE_LEN(serial) ((serial) >> 24)
+ #define APPCOMPAT_PREFIX "ro.appcompat_override."
+ 
++static constexpr const char* kNhOverrideFlagProp = "persist.sys.nhoverride";
++static constexpr const char* kNhOverrideVerifiedBootStateProp = "ro.boot.verifiedbootstate";
++static constexpr const char* kNhOverrideDeviceStateProp = "ro.boot.vbmeta.device_state";
++
++static bool IsNhOverrideTruthy(const char* value) {
++  if (value == nullptr || value[0] == '\0') return false;
++  return !strcasecmp(value, "1") || !strcasecmp(value, "true") || !strcasecmp(value, "y") ||
++         !strcasecmp(value, "yes") || !strcasecmp(value, "on");
++}
++
+ static bool is_dir(const char* pathname) {
+   struct stat info;
+   if (stat(pathname, &info) == -1) {
+@@ -212,7 +223,47 @@ uint32_t SystemProperties::ReadMutablePropertyValue(const prop_info* pi, char* v
+   return serial;
+ }
+ 
++bool SystemProperties::IsNhOverrideEnabled() {
++  if (!initialized_) return false;
++
++  prop_area* pa = contexts_->GetPropAreaForName(kNhOverrideFlagProp);
++  if (pa == nullptr) return false;
++
++  const prop_info* pi = pa->find(kNhOverrideFlagProp);
++  if (pi == nullptr) return false;
++
++  char value_buf[PROP_VALUE_MAX];
++  if (is_read_only(pi->name)) {
++    if (pi->is_long()) {
++      return IsNhOverrideTruthy(pi->long_value());
++    }
++    return IsNhOverrideTruthy(pi->value);
++  }
++
++  ReadMutablePropertyValue(pi, value_buf);
++  return IsNhOverrideTruthy(value_buf);
++}
++
++const char* SystemProperties::GetNhOverrideValueForName(const char* name) {
++  if (name == nullptr) return nullptr;
++  if (strcmp(name, kNhOverrideVerifiedBootStateProp) && strcmp(name, kNhOverrideDeviceStateProp)) {
++    return nullptr;
++  }
++  if (!IsNhOverrideEnabled()) return nullptr;
++  if (!strcmp(name, kNhOverrideVerifiedBootStateProp)) return "green";
++  if (!strcmp(name, kNhOverrideDeviceStateProp)) return "locked";
++  return nullptr;
++}
++
+ int SystemProperties::Read(const prop_info* pi, char* name, char* value) {
++  if (const char* override = GetNhOverrideValueForName(pi->name); override != nullptr) {
++    size_t len = strlcpy(value, override, PROP_VALUE_MAX);
++    if (name != nullptr) {
++      strlcpy(name, pi->name, PROP_NAME_MAX);
++    }
++    return static_cast<int>(len);
++  }
++
+   uint32_t serial = ReadMutablePropertyValue(pi, value);
+   if (name != nullptr) {
+     size_t namelen = strlcpy(name, pi->name, PROP_NAME_MAX);
+@@ -239,6 +290,12 @@ void SystemProperties::ReadCallback(const prop_info* pi,
+                                     void (*callback)(void* cookie, const char* name,
+                                                      const char* value, uint32_t serial),
+                                     void* cookie) {
++  if (const char* override = GetNhOverrideValueForName(pi->name); override != nullptr) {
++    uint32_t serial = load_const_atomic(&pi->serial, memory_order_relaxed);
++    callback(cookie, pi->name, override, serial);
++    return;
++  }
++
+   // Read only properties don't need to copy the value to a temporary buffer, since it can never
+   // change.  We use relaxed memory order on the serial load for the same reason.
+   if (is_read_only(pi->name)) {
+@@ -257,6 +314,11 @@ void SystemProperties::ReadCallback(const prop_info* pi,
+ }
+ 
+ int SystemProperties::Get(const char* name, char* value) {
++  if (const char* override = GetNhOverrideValueForName(name); override != nullptr) {
++    size_t len = strlcpy(value, override, PROP_VALUE_MAX);
++    return static_cast<int>(len);
++  }
++
+   const prop_info* pi = Find(name);
+ 
+   if (pi != nullptr) {
+
+project lineage-sdk/
+diff --git a/sdk/src/java/lineageos/providers/LineageSettings.java b/sdk/src/java/lineageos/providers/LineageSettings.java
+index 160a1db..efb436a 100644
+--- a/sdk/src/java/lineageos/providers/LineageSettings.java
++++ b/sdk/src/java/lineageos/providers/LineageSettings.java
+@@ -2096,6 +2096,42 @@ public final class LineageSettings {
+         public static final Validator ENABLE_TASKBAR_VALIDATOR =
+                 sBooleanValidator;
+ 
++        /**
++         * Whether TEE soft debug mode is enabled.
++         */
++        public static final String TEE_SOFT_DEBUG_ENABLED = "tee_soft_debug_enabled";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_ENABLED_VALIDATOR = sBooleanValidator;
++
++        /**
++         * Pipe-delimited target package list used by TEE soft debug.
++         */
++        public static final String TEE_SOFT_DEBUG_TARGET_PACKAGES =
++                "tee_soft_debug_target_packages";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_TARGET_PACKAGES_VALIDATOR =
++                sAlwaysTrueValidator;
++
++        /**
++         * Absolute keybox XML path used by TEE soft debug.
++         */
++        public static final String TEE_SOFT_DEBUG_KEYBOX_PATH = "tee_soft_debug_keybox_path";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_KEYBOX_PATH_VALIDATOR =
++                sAlwaysTrueValidator;
++
++        /**
++         * Inline keybox XML content used by TEE soft debug.
++         */
++        public static final String TEE_SOFT_DEBUG_KEYBOX_XML = "tee_soft_debug_keybox_xml";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_KEYBOX_XML_VALIDATOR =
++                sAlwaysTrueValidator;
++
+         /**
+          * I can haz more bukkits
+          * @hide
+@@ -2273,6 +2309,14 @@ public final class LineageSettings {
+                     CLICK_PARTIAL_SCREENSHOT_VALIDATOR);
+             VALIDATORS.put(ENABLE_TASKBAR,
+                     ENABLE_TASKBAR_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_ENABLED,
++                    TEE_SOFT_DEBUG_ENABLED_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_TARGET_PACKAGES,
++                    TEE_SOFT_DEBUG_TARGET_PACKAGES_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_KEYBOX_PATH,
++                    TEE_SOFT_DEBUG_KEYBOX_PATH_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_KEYBOX_XML,
++                    TEE_SOFT_DEBUG_KEYBOX_XML_VALIDATOR);
+             VALIDATORS.put(__MAGICAL_TEST_PASSING_ENABLER,
+                     __MAGICAL_TEST_PASSING_ENABLER_VALIDATOR);
+         };
+
+project packages/apps/LineageParts/
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 67dd1f9..daa68bb 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -167,6 +167,39 @@
+                 android:resource="@string/summary_empty" />
+         </activity-alias>
+ 
++
++        <!-- TEE soft debug settings (System category) -->
++        <activity-alias
++            android:name=".teedebug.TeeSoftDebugSettings"
++            android:exported="true"
++            android:label="@string/tee_soft_debug_title"
++            android:targetActivity="PartsActivity">
++            <intent-filter>
++                <action android:name="com.android.settings.action.IA_SETTINGS" />
++                <action android:name="org.lineageos.lineageparts.TEE_SOFT_DEBUG_SETTINGS" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++
++            <meta-data
++                android:name="com.android.settings.category"
++                android:value="com.android.settings.category.ia.system" />
++            <meta-data
++                android:name="com.android.settings.icon"
++                android:resource="@drawable/ic_add_24dp" />
++            <meta-data
++                android:name="com.android.settings.icon_tintable"
++                android:value="true" />
++            <meta-data
++                android:name="com.android.settings.order"
++                android:value="-255" />
++            <meta-data
++                android:name="com.android.settings.profile"
++                android:value="primary_profile_only" />
++            <meta-data
++                android:name="com.android.settings.summary"
++                android:resource="@string/tee_soft_debug_summary" />
++        </activity-alias>
++
+         <activity android:name=".gestures.KeyHandler" />
+ 
+         <!-- Profiles settings (System category) -->
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index adfd8df..1416cff 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -540,4 +540,10 @@
+     <string name="sms_security_check_limit_summary">应用在 1 分钟内发送不超过 %s 条短信无需确认</string>
+     <string name="sms_security_check_limit_summary_none">应用在发送任何短信前必须获得您的确认</string>
+     <string name="sms_security_check_limit_always_confirm">始终确认</string>
++    <string name="tee_soft_debug_title">TEE 软模拟</string>
++    <string name="tee_soft_debug_summary">对指定App开启KeyAttestation模拟</string>
++    <string name="tee_soft_debug_enable_title">启用 TEE 软模拟</string>
++    <string name="tee_soft_debug_show_system_apps_title">显示系统应用</string>
++    <string name="tee_soft_debug_show_system_apps_summary">在应用选择器中包含预装系统软件</string>
++    <string name="tee_soft_debug_remove_app_message">将 %1$s 从 TEE 软模拟目标中移除？</string>
+ </resources>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index d023b1b..a9d7346 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -528,4 +528,10 @@
+     <string name="sms_security_check_limit_summary">在使用者認可之前，應用程式在 1 分鐘內只能傳送 %s 則訊息</string>
+     <string name="sms_security_check_limit_summary_none">未經確認的應用程式不允許傳送任何訊息</string>
+     <string name="sms_security_check_limit_always_confirm">一律確認</string>
++    <string name="tee_soft_debug_title">TEE 軟模擬</string>
++    <string name="tee_soft_debug_summary">依應用程式控制證明模擬與 keybox 覆寫</string>
++    <string name="tee_soft_debug_enable_title">啟用 TEE 軟模擬</string>
++    <string name="tee_soft_debug_show_system_apps_title">顯示系統應用程式</string>
++    <string name="tee_soft_debug_show_system_apps_summary">在應用程式選擇器中包含預載系統軟體</string>
++    <string name="tee_soft_debug_remove_app_message">要將 %1$s 從 TEE 軟模擬目標中移除嗎？</string>
+ </resources>
+diff --git a/res/values/arrays.xml b/res/values/arrays.xml
+index c858e69..0b6d3cd 100644
+--- a/res/values/arrays.xml
++++ b/res/values/arrays.xml
+@@ -505,4 +505,17 @@
+         <item>1</item>
+         <item>0</item>
+     </string-array>
++
++    <!-- TEE soft debug -->
++    <string-array name="tee_soft_debug_mode_entries" translatable="false">
++        <item>@string/tee_soft_debug_mode_patch</item>
++        <item>@string/tee_soft_debug_mode_auto</item>
++        <item>@string/tee_soft_debug_mode_generate</item>
++    </string-array>
++
++    <string-array name="tee_soft_debug_mode_values" translatable="false">
++        <item>patch</item>
++        <item>auto</item>
++        <item>generate</item>
++    </string-array>
+ </resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 0ecd120..c943e20 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -689,4 +689,28 @@
+     <string name="sms_security_check_limit_summary">Apps can send %s messages in 1 minute before requiring confirmation</string>
+     <string name="sms_security_check_limit_summary_none">Apps are not allowed to send any messages without confirmation</string>
+     <string name="sms_security_check_limit_always_confirm">Always confirm</string>
++
++    <!-- TEE soft emulate -->
++    <string name="tee_soft_debug_title">TEE Soft Emulate</string>
++    <string name="tee_soft_debug_summary">Per-app attestation emulation controls and keybox override</string>
++    <string name="tee_soft_debug_enable_title">Enable TEE Soft Emulate</string>
++    <string name="tee_soft_debug_mode_title">Operation mode</string>
++    <string name="tee_soft_debug_mode_patch">Patch</string>
++    <string name="tee_soft_debug_mode_auto">Auto</string>
++    <string name="tee_soft_debug_mode_generate">Generate</string>
++    <string name="tee_soft_debug_keybox_path_title">Custom keybox XML path</string>
++    <string name="tee_soft_debug_keybox_path_summary">No keybox imported. Tap to choose keybox.xml for attestation debugging</string>
++    <string name="tee_soft_debug_keybox_pick_success">Keybox copied: %1$s</string>
++    <string name="tee_soft_debug_keybox_pick_failed">Unable to import selected keybox XML</string>
++    <string name="tee_soft_debug_applications_title">Target applications</string>
++    <string name="tee_soft_debug_show_system_apps_title">Show system apps</string>
++    <string name="tee_soft_debug_show_system_apps_summary">Include preinstalled system software in the app picker</string>
++    <string name="tee_soft_debug_applications_empty">No target apps selected. Tap Add to include one.</string>
++    <string name="tee_soft_debug_remove_app_message">Remove %1$s from TEE Soft Emulate targets?</string>
++    <string name="tee_soft_debug_enabled_no_apps">Enabled (no apps selected)</string>
++    <string name="tee_soft_debug_enabled_no_keybox">Enabled (no keybox imported)</string>
++    <plurals name="tee_soft_debug_enabled_with_apps">
++        <item quantity="one">Enabled for %d app</item>
++        <item quantity="other">Enabled for %d apps</item>
++    </plurals>
+ </resources>
+diff --git a/res/xml/parts_catalog.xml b/res/xml/parts_catalog.xml
+index 558286b..70f6465 100644
+--- a/res/xml/parts_catalog.xml
++++ b/res/xml/parts_catalog.xml
+@@ -33,6 +33,12 @@
+           android:fragment="org.lineageos.lineageparts.input.ButtonSettings"
+           lineage:xmlRes="@xml/button_settings" />
+ 
++    <part android:key="tee_soft_debug"
++          android:title="@string/tee_soft_debug_title"
++          android:summary="@string/tee_soft_debug_summary"
++          android:fragment="org.lineageos.lineageparts.teedebug.TeeSoftDebugSettings"
++          lineage:xmlRes="@xml/tee_soft_debug_settings" />
++
+     <part android:key="contributors"
+           android:title="@string/contributors_cloud_fragment_title"
+           android:fragment="org.lineageos.lineageparts.contributors.ContributorsCloudFragment"
+diff --git a/src/org/lineageos/lineageparts/widget/PackageListAdapter.java b/src/org/lineageos/lineageparts/widget/PackageListAdapter.java
+index c5b300c..f7ffdf5 100644
+--- a/src/org/lineageos/lineageparts/widget/PackageListAdapter.java
++++ b/src/org/lineageos/lineageparts/widget/PackageListAdapter.java
+@@ -26,9 +26,11 @@ import android.widget.TextView;
+ import org.lineageos.lineageparts.R;
+ 
+ import java.util.Collections;
++import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.LinkedList;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.TreeSet;
+ 
+@@ -37,6 +39,7 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+     private final LayoutInflater mInflater;
+     private final List<PackageItem> mInstalledPackages = new LinkedList<>();
+     private Set<String> mExcludedPackages = new HashSet<>();
++    private volatile boolean mIncludeSystemApps = false;
+ 
+     // Packages which don't have launcher icons, but which we want to show nevertheless
+     private static final String[] PACKAGE_WHITELIST = new String[] {
+@@ -152,6 +155,7 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+         mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+         List<ResolveInfo> installedAppsInfo = mPm.queryIntentActivities(mainIntent,
+                 PackageManager.ResolveInfoFlags.of(0));
++        final Map<String, PackageItem> packageItemMap = new HashMap<>();
+ 
+         for (ResolveInfo info : installedAppsInfo) {
+             ApplicationInfo appInfo = info.activityInfo.applicationInfo;
+@@ -159,26 +163,47 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+                 continue;
+             }
+ 
+-            final PackageItem item = new PackageItem(appInfo.packageName,
+-                    appInfo.loadLabel(mPm), appInfo.loadIcon(mPm));
++            final PackageItem item = packageItemMap.computeIfAbsent(appInfo.packageName, packageName ->
++                    new PackageItem(packageName, appInfo.loadLabel(mPm), appInfo.loadIcon(mPm)));
+             item.activityTitles.add(info.loadLabel(mPm));
+-            mHandler.obtainMessage(0, item).sendToTarget();
+         }
+ 
+         for (String packageName : PACKAGE_WHITELIST) {
+             if (mExcludedPackages.contains(packageName)) {
+                 continue;
+             }
++            if (packageItemMap.containsKey(packageName)) {
++                continue;
++            }
+             try {
+                 ApplicationInfo appInfo = mPm.getApplicationInfo(packageName,
+                         PackageManager.ApplicationInfoFlags.of(0));
+                 final PackageItem item = new PackageItem(appInfo.packageName,
+                         appInfo.loadLabel(mPm), appInfo.loadIcon(mPm));
+-                mHandler.obtainMessage(0, item).sendToTarget();
++                packageItemMap.put(packageName, item);
+             } catch (PackageManager.NameNotFoundException ignored) {
+                 // package not present, so nothing to add -> ignore it
+             }
+         }
++
++        if (mIncludeSystemApps) {
++            final List<ApplicationInfo> installedApps = mPm.getInstalledApplications(
++                    PackageManager.ApplicationInfoFlags.of(0));
++            for (ApplicationInfo appInfo : installedApps) {
++                if (mExcludedPackages.contains(appInfo.packageName)
++                        || packageItemMap.containsKey(appInfo.packageName)
++                        || !isSystemApp(appInfo)) {
++                    continue;
++                }
++                final PackageItem item = new PackageItem(appInfo.packageName,
++                        appInfo.loadLabel(mPm), appInfo.loadIcon(mPm));
++                packageItemMap.put(appInfo.packageName, item);
++            }
++        }
++
++        for (PackageItem item : packageItemMap.values()) {
++            mHandler.obtainMessage(0, item).sendToTarget();
++        }
+     }
+ 
+     public void setExcludedPackages(HashSet<String> packages) {
+@@ -186,6 +211,19 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+         reloadList();
+     }
+ 
++    public void setIncludeSystemApps(boolean includeSystemApps) {
++        if (mIncludeSystemApps == includeSystemApps) {
++            return;
++        }
++        mIncludeSystemApps = includeSystemApps;
++        reloadList();
++    }
++
++    private static boolean isSystemApp(ApplicationInfo appInfo) {
++        return (appInfo.flags & (ApplicationInfo.FLAG_SYSTEM
++                | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
++    }
++
+     private static class ViewHolder {
+         TextView title;
+         TextView summary;
+diff --git a/res/xml/tee_soft_debug_settings.xml b/res/xml/tee_soft_debug_settings.xml
+new file mode 100644
+index 0000000..1257ebd
+--- /dev/null
++++ b/res/xml/tee_soft_debug_settings.xml
+@@ -0,0 +1,45 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    android:key="tee_soft_debug"
++    android:title="@string/tee_soft_debug_title">
++
++    <androidx.preference.SwitchPreferenceCompat
++        android:key="tee_soft_debug_enabled"
++        android:title="@string/tee_soft_debug_enable_title" />
++
++    <ListPreference
++        android:key="tee_soft_debug_mode"
++        android:title="@string/tee_soft_debug_mode_title"
++        android:entries="@array/tee_soft_debug_mode_entries"
++        android:entryValues="@array/tee_soft_debug_mode_values"
++        android:defaultValue="patch"
++        android:dependency="tee_soft_debug_enabled" />
++
++    <Preference
++        android:key="tee_soft_debug_keybox_path"
++        android:title="@string/tee_soft_debug_keybox_path_title"
++        android:summary="@string/tee_soft_debug_keybox_path_summary"
++        android:dependency="tee_soft_debug_enabled" />
++
++    <PreferenceCategory
++        android:key="tee_soft_debug_applications"
++        android:title="@string/tee_soft_debug_applications_title"
++        android:dependency="tee_soft_debug_enabled">
++
++        <androidx.preference.SwitchPreferenceCompat
++            android:key="tee_soft_debug_show_system_apps"
++            android:title="@string/tee_soft_debug_show_system_apps_title"
++            android:summary="@string/tee_soft_debug_show_system_apps_summary" />
++
++        <Preference
++            android:key="tee_soft_debug_add_app"
++            android:title="@string/add"
++            android:icon="@drawable/ic_add_24dp" />
++
++    </PreferenceCategory>
++
++</PreferenceScreen>
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+new file mode 100644
+index 0000000..62bc90b
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+@@ -0,0 +1,570 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package org.lineageos.lineageparts.teedebug;
++
++import android.app.Activity;
++import android.app.Dialog;
++import android.content.ContentResolver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageManager;
++import android.net.Uri;
++import android.os.SystemProperties;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.text.TextUtils;
++import android.util.ArraySet;
++import android.util.Log;
++import android.widget.ListView;
++import android.widget.Toast;
++
++import androidx.activity.result.ActivityResultLauncher;
++import androidx.activity.result.contract.ActivityResultContracts;
++import androidx.appcompat.app.AlertDialog;
++import androidx.preference.ListPreference;
++import androidx.preference.Preference;
++import androidx.preference.PreferenceGroup;
++import androidx.preference.PreferenceScreen;
++import androidx.preference.SwitchPreferenceCompat;
++
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++import org.lineageos.lineageparts.search.BaseSearchIndexProvider;
++import org.lineageos.lineageparts.search.Searchable;
++import org.lineageos.lineageparts.widget.PackageListAdapter;
++import org.lineageos.lineageparts.widget.PackageListAdapter.PackageItem;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
++        Preference.OnPreferenceChangeListener, Searchable {
++    private static final String TAG = "TeeSoftDebugSettings";
++
++    private static final String KEY_ENABLED = "tee_soft_debug_enabled";
++    private static final String KEY_MODE = "tee_soft_debug_mode";
++    private static final String KEY_KEYBOX_PATH = "tee_soft_debug_keybox_path";
++    private static final String KEY_APPLICATIONS = "tee_soft_debug_applications";
++    private static final String KEY_SHOW_SYSTEM_APPS = "tee_soft_debug_show_system_apps";
++    private static final String KEY_ADD_APP = "tee_soft_debug_add_app";
++    private static final String MODE_PATCH = "patch";
++    private static final String MODE_AUTO = "auto";
++    private static final String MODE_GENERATE = "generate";
++
++    private static final int DIALOG_ADD_APPS = 0;
++    private static final String KEYBOX_STORE_DIR = "/data/adbroot/tee_soft_debug";
++    private static final String KEYBOX_STORE_FILE = "keybox.xml";
++    private static final String RUNTIME_CONFIG_FILE = "config.conf";
++    private static final String PROP_NH_OVERRIDE = "persist.sys.nhoverride";
++    private static final int MODE_DIR_WORLD_RX_OWNER_W = 0755;
++    private static final int MODE_FILE_WORLD_R_OWNER_W = 0644;
++
++    private SwitchPreferenceCompat mEnabledPref;
++    private ListPreference mModePref;
++    private Preference mKeyboxPathPref;
++    private PreferenceGroup mApplicationsPrefList;
++    private SwitchPreferenceCompat mShowSystemAppsPref;
++    private PackageListAdapter mPackageAdapter;
++
++    private boolean mEnabled;
++    private String mMode = MODE_PATCH;
++    private String mKeyboxPath = "";
++    private boolean mShowSystemApps = false;
++    private final Set<String> mTargetPackages = new ArraySet<>();
++    private final ActivityResultLauncher<Intent> mDocumentPickerLauncher =
++            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
++                    result -> {
++                        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
++                            return;
++                        }
++                        final Uri uri = result.getData().getData();
++                        if (uri == null) {
++                            return;
++                        }
++                        onKeyboxSelected(uri);
++                    });
++
++    @Override
++    public void onActivityCreated(android.os.Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++
++        addPreferencesFromResource(R.xml.tee_soft_debug_settings);
++        if (requireActivity().getActionBar() != null) {
++            requireActivity().getActionBar().setTitle(R.string.tee_soft_debug_title);
++        }
++
++        final PreferenceScreen prefSet = getPreferenceScreen();
++
++        mEnabledPref = prefSet.findPreference(KEY_ENABLED);
++        mEnabledPref.setPersistent(false);
++        mEnabledPref.setOnPreferenceChangeListener(this);
++
++        mModePref = prefSet.findPreference(KEY_MODE);
++        mModePref.setPersistent(false);
++        mModePref.setOnPreferenceChangeListener(this);
++
++        mKeyboxPathPref = prefSet.findPreference(KEY_KEYBOX_PATH);
++        mKeyboxPathPref.setOnPreferenceClickListener(pref -> {
++            launchDocumentPicker();
++            return true;
++        });
++
++        mApplicationsPrefList = prefSet.findPreference(KEY_APPLICATIONS);
++        mApplicationsPrefList.setOrderingAsAdded(false);
++        mShowSystemAppsPref = prefSet.findPreference(KEY_SHOW_SYSTEM_APPS);
++        mShowSystemAppsPref.setPersistent(false);
++        mShowSystemAppsPref.setOnPreferenceChangeListener(this);
++
++        mPackageAdapter = new PackageListAdapter(getActivity());
++
++        final Preference addPreference = prefSet.findPreference(KEY_ADD_APP);
++        addPreference.setOnPreferenceClickListener(preference -> {
++            showDialog(DIALOG_ADD_APPS);
++            return true;
++        });
++
++        loadRuntimeConfigIntoState();
++        applyStateToUi();
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        loadRuntimeConfigIntoState();
++        applyStateToUi();
++    }
++
++    @Override
++    public boolean onPreferenceChange(Preference preference, Object newValue) {
++        if (preference == mEnabledPref) {
++            mEnabled = (Boolean) newValue;
++            persistRuntimeConfig();
++            refreshKeyboxPathSummary();
++            return true;
++        }
++        if (preference == mModePref) {
++            mMode = normalizeMode(String.valueOf(newValue));
++            mModePref.setValue(mMode);
++            persistRuntimeConfig();
++            refreshModeSummary();
++            return true;
++        }
++        if (preference == mShowSystemAppsPref) {
++            mShowSystemApps = (Boolean) newValue;
++            mPackageAdapter.setIncludeSystemApps(mShowSystemApps);
++            persistRuntimeConfig();
++            return true;
++        }
++        return false;
++    }
++
++    @Override
++    public Dialog onCreateDialog(int id) {
++        if (id != DIALOG_ADD_APPS) {
++            return null;
++        }
++
++        final AlertDialog.Builder builder = new AlertDialog.Builder(requireActivity());
++        final ListView list = new ListView(requireActivity());
++        list.setAdapter(mPackageAdapter);
++        list.setDivider(null);
++
++        builder.setTitle(R.string.choose_app);
++        builder.setView(list);
++
++        final Dialog dialog = builder.create();
++        list.setOnItemClickListener((parent, view, position, itemId) -> {
++            final PackageItem info = (PackageItem) parent.getItemAtPosition(position);
++            addTargetPackage(info.packageName);
++            dialog.dismiss();
++        });
++        return dialog;
++    }
++
++    private void applyStateToUi() {
++        mEnabledPref.setChecked(mEnabled);
++        mModePref.setValue(mMode);
++        mShowSystemAppsPref.setChecked(mShowSystemApps);
++        mPackageAdapter.setIncludeSystemApps(mShowSystemApps);
++        refreshModeSummary();
++        refreshKeyboxPathSummary();
++        refreshTargetApplicationPrefs();
++    }
++
++    private void refreshModeSummary() {
++        final CharSequence modeEntry = mModePref.getEntry();
++        if (!TextUtils.isEmpty(modeEntry)) {
++            mModePref.setSummary(modeEntry);
++        }
++    }
++
++    private void refreshKeyboxPathSummary() {
++        if (TextUtils.isEmpty(mKeyboxPath)) {
++            mKeyboxPathPref.setSummary(getString(R.string.tee_soft_debug_keybox_path_summary));
++        } else {
++            mKeyboxPathPref.setSummary(mKeyboxPath);
++        }
++    }
++
++    private void refreshTargetApplicationPrefs() {
++        for (int i = 0; i < mApplicationsPrefList.getPreferenceCount();) {
++            final Preference pref = mApplicationsPrefList.getPreference(i);
++            if (KEY_ADD_APP.equals(pref.getKey()) || KEY_SHOW_SYSTEM_APPS.equals(pref.getKey())) {
++                i++;
++                continue;
++            }
++            mApplicationsPrefList.removePreference(pref);
++        }
++
++        final PackageManager pm = getPackageManager();
++        final List<String> sortedPkgs = new ArrayList<>(mTargetPackages);
++        sortedPkgs.sort(String::compareToIgnoreCase);
++
++        for (String packageName : sortedPkgs) {
++            final Preference pref = new Preference(requireContext());
++            pref.setKey(packageName);
++            pref.setSummary(packageName);
++            pref.setPersistent(false);
++
++            try {
++                final ApplicationInfo info = pm.getApplicationInfo(packageName,
++                        PackageManager.ApplicationInfoFlags.of(0));
++                pref.setTitle(info.loadLabel(pm));
++                pref.setIcon(info.loadIcon(pm));
++            } catch (PackageManager.NameNotFoundException e) {
++                pref.setTitle(packageName);
++            }
++
++            pref.setOnPreferenceClickListener(clicked -> {
++                confirmRemoveTargetPackage(packageName);
++                return true;
++            });
++            mApplicationsPrefList.addPreference(pref);
++        }
++
++        maybeShowEmptyHint();
++        mPackageAdapter.setExcludedPackages(new HashSet<>(mTargetPackages));
++    }
++
++    private void maybeShowEmptyHint() {
++        if (mApplicationsPrefList.getPreferenceCount() == 2) {
++            final Preference hint = new Preference(requireContext());
++            hint.setSummary(R.string.tee_soft_debug_applications_empty);
++            hint.setEnabled(false);
++            mApplicationsPrefList.addPreference(hint);
++        }
++    }
++
++    private void addTargetPackage(String packageName) {
++        if (mTargetPackages.add(packageName)) {
++            persistRuntimeConfig();
++            refreshTargetApplicationPrefs();
++        }
++    }
++
++    private void removeTargetPackage(String packageName) {
++        if (mTargetPackages.remove(packageName)) {
++            persistRuntimeConfig();
++            refreshTargetApplicationPrefs();
++        }
++    }
++
++    private void confirmRemoveTargetPackage(String packageName) {
++        new AlertDialog.Builder(requireActivity())
++                .setTitle(R.string.dialog_delete_title)
++                .setMessage(getString(R.string.tee_soft_debug_remove_app_message, packageName))
++                .setPositiveButton(android.R.string.ok,
++                        (dialog, which) -> removeTargetPackage(packageName))
++                .setNegativeButton(android.R.string.cancel, null)
++                .show();
++    }
++
++    private void launchDocumentPicker() {
++        final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++        intent.addCategory(Intent.CATEGORY_OPENABLE);
++        intent.setType("text/xml");
++        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
++        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
++        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"text/xml", "application/xml"});
++        mDocumentPickerLauncher.launch(intent);
++    }
++
++    private void onKeyboxSelected(Uri uri) {
++        try {
++            final int takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION;
++            requireActivity().getContentResolver().takePersistableUriPermission(uri, takeFlags);
++        } catch (SecurityException e) {
++            Log.w(TAG, "Unable to persist URI permission for " + uri, e);
++        }
++
++        try {
++            final String keyboxXml = readTextFromUri(uri);
++            if (TextUtils.isEmpty(keyboxXml)) {
++                Log.e(TAG, "Selected keybox XML is empty.");
++                Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
++                        Toast.LENGTH_LONG).show();
++                return;
++            }
++
++            final String copiedPath = copyKeyboxToDataDir(uri);
++            if (TextUtils.isEmpty(copiedPath)) {
++                Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
++                        Toast.LENGTH_LONG).show();
++                return;
++            }
++
++            mKeyboxPath = copiedPath;
++            persistRuntimeConfig();
++            refreshKeyboxPathSummary();
++            Toast.makeText(requireContext(),
++                    getString(R.string.tee_soft_debug_keybox_pick_success, copiedPath),
++                    Toast.LENGTH_LONG).show();
++        } catch (IOException e) {
++            Log.e(TAG, "Failed to import keybox XML from URI: " + uri, e);
++            Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
++                    Toast.LENGTH_LONG).show();
++        }
++    }
++
++    private String copyKeyboxToDataDir(Uri uri) throws IOException {
++        final ContentResolver resolver = requireActivity().getContentResolver();
++        final File targetDir = new File(KEYBOX_STORE_DIR);
++        if (!targetDir.exists() && !targetDir.mkdirs()) {
++            Log.w(TAG, "Unable to create keybox dir: " + targetDir);
++            return null;
++        }
++        ensurePathPermissions(targetDir.getAbsolutePath(), MODE_DIR_WORLD_RX_OWNER_W);
++
++        final File target = new File(targetDir, KEYBOX_STORE_FILE);
++        try (InputStream in = resolver.openInputStream(uri);
++             FileOutputStream out = new FileOutputStream(target, false)) {
++            if (in == null) {
++                return null;
++            }
++            final byte[] buffer = new byte[8192];
++            int read;
++            while ((read = in.read(buffer)) != -1) {
++                out.write(buffer, 0, read);
++            }
++            out.flush();
++        }
++        ensurePathPermissions(target.getAbsolutePath(), MODE_FILE_WORLD_R_OWNER_W);
++        return target.getAbsolutePath();
++    }
++
++    private String readTextFromUri(Uri uri) throws IOException {
++        final ContentResolver resolver = requireActivity().getContentResolver();
++        try (InputStream in = resolver.openInputStream(uri)) {
++            if (in == null) {
++                return null;
++            }
++            final byte[] data = in.readAllBytes();
++            return new String(data, StandardCharsets.UTF_8);
++        }
++    }
++
++    private void loadRuntimeConfigIntoState() {
++        mEnabled = false;
++        mMode = MODE_PATCH;
++        mKeyboxPath = "";
++        mShowSystemApps = false;
++        mTargetPackages.clear();
++
++        final File config = new File(KEYBOX_STORE_DIR, RUNTIME_CONFIG_FILE);
++        if (!config.exists()) {
++            return;
++        }
++
++        final String content;
++        try (InputStream in = new FileInputStream(config)) {
++            final byte[] data = in.readAllBytes();
++            content = new String(data, StandardCharsets.UTF_8);
++        } catch (IOException e) {
++            Log.w(TAG, "Failed to read runtime config: " + config, e);
++            return;
++        }
++
++        for (String line : content.split("\\R")) {
++            final int sep = line.indexOf('=');
++            if (sep <= 0) {
++                continue;
++            }
++            final String key = line.substring(0, sep).trim();
++            final String value = line.substring(sep + 1).trim();
++            switch (key) {
++                case "enabled":
++                    mEnabled = "1".equals(value) || "true".equalsIgnoreCase(value);
++                    break;
++                case "target_packages":
++                    parseTargetPackages(value, mTargetPackages);
++                    break;
++                case "mode":
++                    mMode = normalizeMode(value);
++                    break;
++                case "keybox_path":
++                    mKeyboxPath = value;
++                    break;
++                case "show_system_apps":
++                    mShowSystemApps = "1".equals(value) || "true".equalsIgnoreCase(value);
++                    break;
++                default:
++                    break;
++            }
++        }
++    }
++
++    private void persistRuntimeConfig() {
++        final File dir = new File(KEYBOX_STORE_DIR);
++        if (!dir.exists() && !dir.mkdirs()) {
++            Log.w(TAG, "Unable to create runtime config dir: " + dir);
++            return;
++        }
++        ensurePathPermissions(dir.getAbsolutePath(), MODE_DIR_WORLD_RX_OWNER_W);
++
++        final File config = new File(dir, RUNTIME_CONFIG_FILE);
++        final List<String> sortedPkgs = new ArrayList<>(mTargetPackages);
++        sortedPkgs.sort(String::compareToIgnoreCase);
++        final String payload =
++                "enabled=" + (mEnabled ? 1 : 0) + "\n"
++                        + "mode=" + normalizeMode(mMode) + "\n"
++                        + "target_packages=" + TextUtils.join("|", sortedPkgs) + "\n"
++                        + "keybox_path=" + (mKeyboxPath == null ? "" : mKeyboxPath) + "\n"
++                        + "show_system_apps=" + (mShowSystemApps ? 1 : 0) + "\n";
++        try (FileOutputStream out = new FileOutputStream(config, false)) {
++            out.write(payload.getBytes(StandardCharsets.UTF_8));
++            out.flush();
++            ensurePathPermissions(config.getAbsolutePath(), MODE_FILE_WORLD_R_OWNER_W);
++            syncNhOverrideProperty();
++        } catch (IOException e) {
++            Log.w(TAG, "Failed to write runtime config: " + config, e);
++        }
++    }
++
++    private void syncNhOverrideProperty() {
++        try {
++            SystemProperties.set(PROP_NH_OVERRIDE, mEnabled ? "1" : "0");
++        } catch (RuntimeException e) {
++            Log.w(TAG, "Failed to update nhoverride property", e);
++        }
++    }
++
++    private void ensurePathPermissions(String path, int mode) {
++        try {
++            Os.chmod(path, mode);
++        } catch (ErrnoException e) {
++            Log.w(TAG, "Failed to chmod " + path + " to " + Integer.toOctalString(mode), e);
++        }
++    }
++
++    private static void parseTargetPackages(String raw, Set<String> out) {
++        out.clear();
++        if (TextUtils.isEmpty(raw)) {
++            return;
++        }
++        final String[] entries = TextUtils.split(raw, "\\|");
++        for (String entry : entries) {
++            if (!TextUtils.isEmpty(entry)) {
++                out.add(entry);
++            }
++        }
++    }
++
++    private static String normalizeMode(String raw) {
++        if (TextUtils.isEmpty(raw)) {
++            return MODE_PATCH;
++        }
++        switch (raw.trim().toLowerCase()) {
++            case MODE_AUTO:
++                return MODE_AUTO;
++            case MODE_GENERATE:
++                return MODE_GENERATE;
++            default:
++                return MODE_PATCH;
++        }
++    }
++
++    private static RuntimeConfigSnapshot loadRuntimeConfigSnapshot() {
++        final RuntimeConfigSnapshot snapshot = new RuntimeConfigSnapshot();
++        final File config = new File(KEYBOX_STORE_DIR, RUNTIME_CONFIG_FILE);
++        if (!config.exists()) {
++            return snapshot;
++        }
++
++        final String content;
++        try (InputStream in = new FileInputStream(config)) {
++            final byte[] data = in.readAllBytes();
++            content = new String(data, StandardCharsets.UTF_8);
++        } catch (IOException e) {
++            return snapshot;
++        }
++
++        String targets = "";
++        for (String line : content.split("\\R")) {
++            final int sep = line.indexOf('=');
++            if (sep <= 0) {
++                continue;
++            }
++            final String key = line.substring(0, sep).trim();
++            final String value = line.substring(sep + 1).trim();
++            switch (key) {
++                case "enabled":
++                    snapshot.enabled = "1".equals(value) || "true".equalsIgnoreCase(value);
++                    break;
++                case "target_packages":
++                    targets = value;
++                    break;
++                case "keybox_path":
++                    snapshot.keyboxPath = value;
++                    break;
++                default:
++                    break;
++            }
++        }
++        snapshot.packageCount = TextUtils.isEmpty(targets) ? 0 : TextUtils.split(targets, "\\|").length;
++        return snapshot;
++    }
++
++    private static final class RuntimeConfigSnapshot {
++        boolean enabled;
++        int packageCount;
++        String keyboxPath = "";
++    }
++
++    public static final SummaryProvider SUMMARY_PROVIDER = (context, key) -> {
++        final RuntimeConfigSnapshot snapshot = loadRuntimeConfigSnapshot();
++        if (!snapshot.enabled) {
++            return context.getString(R.string.disabled);
++        }
++
++        if (TextUtils.isEmpty(snapshot.keyboxPath)) {
++            return context.getString(R.string.tee_soft_debug_enabled_no_keybox);
++        }
++
++        if (snapshot.packageCount <= 0) {
++            return context.getString(R.string.tee_soft_debug_enabled_no_apps);
++        }
++
++        return context.getResources().getQuantityString(
++                R.plurals.tee_soft_debug_enabled_with_apps, snapshot.packageCount, snapshot.packageCount);
++    };
++
++    public static final Searchable.SearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
++            new BaseSearchIndexProvider() {
++                @Override
++                public Set<String> getNonIndexableKeys(Context context) {
++                    return null;
++                }
++            };
++}
+
+project packages/modules/adb/
+diff --git a/root/adb_root.rc b/root/adb_root.rc
+index 8c65c0b..3c07eb1 100644
+--- a/root/adb_root.rc
++++ b/root/adb_root.rc
+@@ -2,6 +2,21 @@ service adb_root /system_ext/bin/adb_root
+     class main
+     user root
+     group root
++    disabled
++
++on init && property:ro.debuggable=1
++    start adb_root
++
++on property:ro.debuggable=1
++    start adb_root
+ 
+ on post-fs-data
+-    mkdir /data/adbroot 0700 root root
++    # Keep parent directory private from listing, but allow path traversal.
++    mkdir /data/adbroot 0711 root root
++    chown root root /data/adbroot
++    chmod 0711 /data/adbroot
++    # TEE soft debug runtime payloads are written by system_app (LineageParts),
++    # and read by keystore2.
++    mkdir /data/adbroot/tee_soft_debug 0755 system system
++    chown system system /data/adbroot/tee_soft_debug
++    chmod 0755 /data/adbroot/tee_soft_debug
+
+project system/security/keystore2/
+diff --git a/keystore2/Android.bp b/keystore2/Android.bp
+index fdd643b..06fa526 100644
+--- a/keystore2/Android.bp
++++ b/keystore2/Android.bp
+@@ -46,6 +46,7 @@ rust_defaults {
+         "libaconfig_android_hardware_biometrics_rust",
+         "libandroid_security_flags_rust",
+         "libanyhow",
++        "libbase64_rust",
+         "libbinder_rs",
+         "libbssl_crypto",
+         "libder",
+diff --git a/keystore2/src/crypto/Android.bp b/keystore2/src/crypto/Android.bp
+index f8da06f..aa75d95 100644
+--- a/keystore2/src/crypto/Android.bp
++++ b/keystore2/src/crypto/Android.bp
+@@ -50,6 +50,7 @@ cc_library {
+     ],
+     export_include_dirs: ["include"],
+     shared_libs: [
++        "libbase",
+         "libcrypto",
+         "liblog",
+     ],
+@@ -84,9 +85,16 @@ rust_bindgen {
+         "--allowlist-function=HKDFExpand",
+         "--allowlist-function=HKDFExtract",
+         "--allowlist-function=PBKDF2",
++        "--allowlist-function=extractAttestationPatchLevels",
++        "--allowlist-function=extractIssuerFromCertificate",
+         "--allowlist-function=extractSubjectFromCertificate",
++        "--allowlist-function=getCertificateSignatureKeyFamily",
++        "--allowlist-function=getCertificatePublicKeyFamily",
++        "--allowlist-function=getCertificateTbsSignatureKeyFamily",
+         "--allowlist-function=hmacSha256",
+         "--allowlist-function=randomBytes",
++        "--allowlist-function=resignLeafCertificate",
++        "--allowlist-function=verifyCertificateSignedBy",
+         "--allowlist-type=EC_KEY",
+         "--allowlist-type=EC_POINT",
+         "--allowlist-var=EC_MAX_BYTES",
+diff --git a/keystore2/src/crypto/crypto.cpp b/keystore2/src/crypto/crypto.cpp
+index 56d8de6..9061330 100644
+--- a/keystore2/src/crypto/crypto.cpp
++++ b/keystore2/src/crypto/crypto.cpp
+@@ -18,6 +18,9 @@
+ 
+ #include "crypto.hpp"
+ 
++#include "certificate_utils.h"
++
++#include <android-base/properties.h>
+ #include <assert.h>
+ #include <log/log.h>
+ #include <openssl/aes.h>
+@@ -27,9 +30,13 @@
+ #include <openssl/evp.h>
+ #include <openssl/hkdf.h>
+ #include <openssl/hmac.h>
++#include <openssl/obj.h>
++#include <openssl/pem.h>
+ #include <openssl/rand.h>
++#include <openssl/sha.h>
+ #include <openssl/x509.h>
+ 
++#include <string_view>
+ #include <vector>
+ 
+ // Copied from system/security/keystore/blob.h.
+@@ -319,3 +326,817 @@ int extractSubjectFromCertificate(const uint8_t* cert_buf, size_t cert_len, uint
+     uint8_t* tmp = subject_buf;
+     return i2d_X509_NAME(subject, &tmp);
+ }
++
++int extractIssuerFromCertificate(const uint8_t* cert_buf, size_t cert_len, uint8_t* issuer_buf,
++                                 size_t issuer_buf_len) {
++    if (!cert_buf || !issuer_buf) {
++        ALOGE("extractIssuerFromCertificate: received null pointer");
++        return 0;
++    }
++
++    const uint8_t* p = cert_buf;
++    bssl::UniquePtr<X509> cert(d2i_X509(nullptr /* Allocate X509 struct */, &p, cert_len));
++    if (!cert) {
++        ALOGE("extractIssuerFromCertificate: failed to parse certificate");
++        return 0;
++    }
++
++    X509_NAME* issuer = X509_get_issuer_name(cert.get());
++    if (!issuer) {
++        ALOGE("extractIssuerFromCertificate: failed to retrieve issuer name");
++        return 0;
++    }
++
++    int issuer_len = i2d_X509_NAME(issuer, nullptr /* Don't copy the data */);
++    if (issuer_len < 0) {
++        ALOGE("extractIssuerFromCertificate: error obtaining encoded issuer name length");
++        return 0;
++    }
++
++    if (issuer_len > issuer_buf_len) {
++        ALOGI("extractIssuerFromCertificate: needed %d bytes for issuer, caller provided %zu",
++              issuer_len, issuer_buf_len);
++        return -issuer_len;
++    }
++
++    uint8_t* tmp = issuer_buf;
++    return i2d_X509_NAME(issuer, &tmp);
++}
++
++static bssl::UniquePtr<EVP_PKEY> parseSigningKey(const uint8_t* key_buf, size_t key_len) {
++    if (!key_buf || key_len == 0) {
++        return nullptr;
++    }
++
++    std::string_view key_view(reinterpret_cast<const char*>(key_buf), key_len);
++    bool looks_pem = key_view.find("-----BEGIN") != std::string_view::npos;
++    if (looks_pem) {
++        bssl::UniquePtr<BIO> bio(BIO_new_mem_buf(key_buf, static_cast<int>(key_len)));
++        if (!bio) {
++            return nullptr;
++        }
++        return bssl::UniquePtr<EVP_PKEY>(PEM_read_bio_PrivateKey(bio.get(), nullptr, nullptr, nullptr));
++    }
++
++    const uint8_t* p = key_buf;
++    return bssl::UniquePtr<EVP_PKEY>(d2i_AutoPrivateKey(nullptr, &p, static_cast<long>(key_len)));
++}
++
++static bool parseHexDigestProperty(const std::string& value, std::vector<uint8_t>* out) {
++    if (!out || value.size() != 64) {
++        return false;
++    }
++    auto nibble = [](char c) -> int {
++        if (c >= '0' && c <= '9') return c - '0';
++        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++        return -1;
++    };
++    out->clear();
++    out->reserve(32);
++    for (size_t i = 0; i < value.size(); i += 2) {
++        int hi = nibble(value[i]);
++        int lo = nibble(value[i + 1]);
++        if (hi < 0 || lo < 0) return false;
++        out->push_back(static_cast<uint8_t>((hi << 4) | lo));
++    }
++    return out->size() == 32;
++}
++
++static bool isAllZeroDigest(const std::vector<uint8_t>& v) {
++    if (v.empty()) return true;
++    for (uint8_t b : v) {
++        if (b != 0) return false;
++    }
++    return true;
++}
++
++static bool readBootDigestProperty(const char* prop_name, std::vector<uint8_t>* out) {
++    if (!prop_name || !out) return false;
++    const std::string value = android::base::GetProperty(prop_name, "");
++    if (!parseHexDigestProperty(value, out)) return false;
++    if (isAllZeroDigest(*out)) return false;
++    return true;
++}
++
++static void appendDerLength(std::vector<uint8_t>* out, size_t len) {
++    if (len < 0x80) {
++        out->push_back(static_cast<uint8_t>(len));
++        return;
++    }
++    uint8_t tmp[8];
++    size_t n = 0;
++    size_t v = len;
++    while (v > 0) {
++        tmp[n++] = static_cast<uint8_t>(v & 0xff);
++        v >>= 8;
++    }
++    out->push_back(static_cast<uint8_t>(0x80 | n));
++    while (n > 0) {
++        out->push_back(tmp[--n]);
++    }
++}
++
++static std::vector<uint8_t> makeDerTlv(uint8_t tag, const std::vector<uint8_t>& value) {
++    std::vector<uint8_t> out;
++    out.reserve(1 + 5 + value.size());
++    out.push_back(tag);
++    appendDerLength(&out, value.size());
++    out.insert(out.end(), value.begin(), value.end());
++    return out;
++}
++
++static bool parseOneDerElement(const uint8_t* buf, size_t len, size_t* total_len, size_t* hdr_len,
++                               uint32_t* tag_number, bool* tag_ctx_specific) {
++    if (!buf || len < 2 || !total_len || !hdr_len || !tag_number || !tag_ctx_specific) return false;
++
++    size_t pos = 0;
++    const uint8_t first = buf[pos++];
++    *tag_ctx_specific = (first & 0xC0) == 0x80;
++    uint32_t tag = first & 0x1F;
++    if (tag == 0x1F) {
++        tag = 0;
++        bool saw_last = false;
++        while (pos < len) {
++            const uint8_t b = buf[pos++];
++            tag = (tag << 7) | (b & 0x7F);
++            if ((b & 0x80) == 0) {
++                saw_last = true;
++                break;
++            }
++        }
++        if (!saw_last) return false;
++    }
++    *tag_number = tag;
++
++    if (pos >= len) return false;
++    uint8_t l = buf[pos++];
++    size_t value_len = 0;
++    if ((l & 0x80) == 0) {
++        value_len = l;
++    } else {
++        size_t n = l & 0x7F;
++        if (n == 0 || n > sizeof(size_t) || pos + n > len) return false;
++        for (size_t i = 0; i < n; ++i) {
++            value_len = (value_len << 8) | buf[pos++];
++        }
++    }
++    if (pos + value_len > len) return false;
++    *hdr_len = pos;
++    *total_len = pos + value_len;
++    return true;
++}
++
++static bool parseDerIntegerToInt32(const uint8_t* der, size_t der_len, int32_t* out) {
++    if (!der || der_len < 3 || !out) return false;
++    if (der[0] != 0x02) return false;  // INTEGER
++
++    size_t total_len = 0, hdr_len = 0;
++    uint32_t tag = 0;
++    bool is_ctx = false;
++    if (!parseOneDerElement(der, der_len, &total_len, &hdr_len, &tag, &is_ctx)) return false;
++    if (total_len != der_len || is_ctx || tag != 0x02) return false;
++
++    const uint8_t* value = der + hdr_len;
++    const size_t value_len = der_len - hdr_len;
++    if (value_len == 0 || value_len > 5) return false;
++
++    int64_t acc = 0;
++    for (size_t i = 0; i < value_len; ++i) {
++        acc = (acc << 8) | value[i];
++    }
++
++    if ((value[0] & 0x80) != 0) {
++        // Two's complement sign extension for negative values.
++        const int shift = static_cast<int>((8 - value_len) * 8);
++        acc = (acc << shift) >> shift;
++    }
++
++    if (acc < INT32_MIN || acc > INT32_MAX) return false;
++    *out = static_cast<int32_t>(acc);
++    return true;
++}
++
++static uint32_t extractPatchLevelsFromAuthorizationListDer(const std::vector<uint8_t>& auth_list_der,
++                                                           int32_t* out_os_patchlevel,
++                                                           int32_t* out_vendor_patchlevel,
++                                                           int32_t* out_boot_patchlevel) {
++    if (auth_list_der.empty() || auth_list_der[0] != 0x30) {
++        return 0;
++    }
++
++    size_t seq_total = 0, seq_hdr = 0;
++    uint32_t seq_tag = 0;
++    bool seq_ctx = false;
++    if (!parseOneDerElement(auth_list_der.data(), auth_list_der.size(), &seq_total, &seq_hdr, &seq_tag,
++                            &seq_ctx)) {
++        return 0;
++    }
++    if (seq_total != auth_list_der.size() || seq_ctx || seq_tag != 0x10) {
++        return 0;
++    }
++
++    uint32_t mask = 0;
++    const uint8_t* items = auth_list_der.data() + seq_hdr;
++    const size_t items_len = auth_list_der.size() - seq_hdr;
++    size_t pos = 0;
++    while (pos < items_len) {
++        size_t el_total = 0, el_hdr = 0;
++        uint32_t tag_no = 0;
++        bool is_ctx = false;
++        if (!parseOneDerElement(items + pos, items_len - pos, &el_total, &el_hdr, &tag_no, &is_ctx)) {
++            return mask;
++        }
++        if (is_ctx && (tag_no == 706 || tag_no == 718 || tag_no == 719)) {
++            const uint8_t* inner = items + pos + el_hdr;
++            const size_t inner_len = el_total - el_hdr;
++            int32_t value = 0;
++            if (parseDerIntegerToInt32(inner, inner_len, &value)) {
++                if (tag_no == 706) {
++                    if (out_os_patchlevel) *out_os_patchlevel = value;
++                    mask |= 0x1;
++                } else if (tag_no == 718) {
++                    if (out_vendor_patchlevel) *out_vendor_patchlevel = value;
++                    mask |= 0x2;
++                } else if (tag_no == 719) {
++                    if (out_boot_patchlevel) *out_boot_patchlevel = value;
++                    mask |= 0x4;
++                }
++            }
++        }
++        pos += el_total;
++    }
++    return mask;
++}
++
++static bool replaceRootOfTrustInTeeEnforced(const std::vector<uint8_t>& tee_enforced_der,
++                                            const std::vector<uint8_t>& boot_key,
++                                            const std::vector<uint8_t>& boot_hash,
++                                            std::vector<uint8_t>* out) {
++    if (!out || tee_enforced_der.empty() || boot_key.size() != 32 || boot_hash.size() != 32) {
++        return false;
++    }
++
++    size_t seq_total = 0, seq_hdr = 0;
++    uint32_t seq_tag = 0;
++    bool seq_ctx = false;
++    if (!parseOneDerElement(tee_enforced_der.data(), tee_enforced_der.size(), &seq_total, &seq_hdr,
++                            &seq_tag, &seq_ctx)) {
++        return false;
++    }
++    (void)seq_tag;
++    (void)seq_ctx;
++    if (seq_total != tee_enforced_der.size() || tee_enforced_der[0] != 0x30) {
++        return false;
++    }
++
++    const uint8_t* items = tee_enforced_der.data() + seq_hdr;
++    size_t items_len = tee_enforced_der.size() - seq_hdr;
++    size_t pos = 0;
++    std::vector<uint8_t> rebuilt_items;
++    rebuilt_items.reserve(items_len + 128);
++    while (pos < items_len) {
++        size_t el_total = 0, el_hdr = 0;
++        uint32_t tag_no = 0;
++        bool is_ctx = false;
++        if (!parseOneDerElement(items + pos, items_len - pos, &el_total, &el_hdr, &tag_no, &is_ctx)) {
++            return false;
++        }
++        if (!(is_ctx && tag_no == 704)) {
++            rebuilt_items.insert(rebuilt_items.end(), items + pos, items + pos + el_total);
++        }
++        pos += el_total;
++    }
++
++    const auto vbk = makeDerTlv(0x04, boot_key);
++    // deviceLocked = true (locked)
++    const std::vector<uint8_t> locked = {0x01, 0x01, 0xff};
++    const std::vector<uint8_t> verified = {0x0A, 0x01, 0x00};  // VerifiedBootState = Verified(0)
++    const auto vbh = makeDerTlv(0x04, boot_hash);
++
++    std::vector<uint8_t> rot_value;
++    rot_value.reserve(vbk.size() + locked.size() + verified.size() + vbh.size() + 8);
++    rot_value.insert(rot_value.end(), vbk.begin(), vbk.end());
++    rot_value.insert(rot_value.end(), locked.begin(), locked.end());
++    rot_value.insert(rot_value.end(), verified.begin(), verified.end());
++    rot_value.insert(rot_value.end(), vbh.begin(), vbh.end());
++    const auto rot_seq = makeDerTlv(0x30, rot_value);
++
++    std::vector<uint8_t> rot_tagged;
++    rot_tagged.reserve(3 + 5 + rot_seq.size());
++    rot_tagged.push_back(0xBF);  // [704] EXPLICIT
++    rot_tagged.push_back(0x85);
++    rot_tagged.push_back(0x40);
++    appendDerLength(&rot_tagged, rot_seq.size());
++    rot_tagged.insert(rot_tagged.end(), rot_seq.begin(), rot_seq.end());
++    rebuilt_items.insert(rebuilt_items.end(), rot_tagged.begin(), rot_tagged.end());
++
++    *out = makeDerTlv(0x30, rebuilt_items);
++    return true;
++}
++
++static bool extractRootOfTrustBootFields(const std::vector<uint8_t>& tee_enforced_der,
++                                         std::vector<uint8_t>* out_boot_key,
++                                         std::vector<uint8_t>* out_boot_hash) {
++    if (!out_boot_key || !out_boot_hash || tee_enforced_der.empty()) {
++        return false;
++    }
++    size_t seq_total = 0, seq_hdr = 0;
++    uint32_t seq_tag = 0;
++    bool seq_ctx = false;
++    if (!parseOneDerElement(tee_enforced_der.data(), tee_enforced_der.size(), &seq_total, &seq_hdr,
++                            &seq_tag, &seq_ctx)) {
++        return false;
++    }
++    (void)seq_tag;
++    (void)seq_ctx;
++    if (seq_total != tee_enforced_der.size() || tee_enforced_der[0] != 0x30) {
++        return false;
++    }
++
++    const uint8_t* items = tee_enforced_der.data() + seq_hdr;
++    size_t items_len = tee_enforced_der.size() - seq_hdr;
++    size_t pos = 0;
++    while (pos < items_len) {
++        size_t el_total = 0, el_hdr = 0;
++        uint32_t tag_no = 0;
++        bool is_ctx = false;
++        if (!parseOneDerElement(items + pos, items_len - pos, &el_total, &el_hdr, &tag_no, &is_ctx)) {
++            return false;
++        }
++        if (is_ctx && tag_no == 704) {
++            const uint8_t* tagged = items + pos;
++            const uint8_t* rot_der = tagged + el_hdr;
++            size_t rot_der_len = el_total - el_hdr;
++            size_t rot_total = 0, rot_hdr = 0;
++            uint32_t rot_tag = 0;
++            bool rot_ctx = false;
++            if (!parseOneDerElement(rot_der, rot_der_len, &rot_total, &rot_hdr, &rot_tag, &rot_ctx)) {
++                return false;
++            }
++            (void)rot_tag;
++            (void)rot_ctx;
++            if (rot_total != rot_der_len || rot_der[0] != 0x30) {
++                return false;
++            }
++
++            const uint8_t* rot_items = rot_der + rot_hdr;
++            size_t rot_items_len = rot_der_len - rot_hdr;
++            size_t rpos = 0;
++            int idx = 0;
++            while (rpos < rot_items_len) {
++                size_t f_total = 0, f_hdr = 0;
++                uint32_t f_tag = 0;
++                bool f_ctx = false;
++                if (!parseOneDerElement(rot_items + rpos, rot_items_len - rpos, &f_total, &f_hdr, &f_tag,
++                                        &f_ctx)) {
++                    return false;
++                }
++                (void)f_tag;
++                (void)f_ctx;
++                const uint8_t* f = rot_items + rpos;
++                if (idx == 0 && f[0] == 0x04) {
++                    out_boot_key->assign(f + f_hdr, f + f_total);
++                } else if (idx == 3 && f[0] == 0x04) {
++                    out_boot_hash->assign(f + f_hdr, f + f_total);
++                }
++                rpos += f_total;
++                idx++;
++            }
++            return !out_boot_key->empty() || !out_boot_hash->empty();
++        }
++        pos += el_total;
++    }
++    return false;
++}
++
++static bool sha256OfBytes(const uint8_t* data, size_t len, std::vector<uint8_t>* out) {
++    if (!data || !out) return false;
++    out->assign(SHA256_DIGEST_LENGTH, 0);
++    return SHA256(data, len, out->data()) != nullptr;
++}
++
++static bool deriveStableBootDigestsFromSignerCert(const uint8_t* signing_cert_buf, size_t signing_cert_len,
++                                                  std::vector<uint8_t>* out_boot_key,
++                                                  std::vector<uint8_t>* out_boot_hash) {
++    if (!signing_cert_buf || signing_cert_len == 0 || !out_boot_key || !out_boot_hash) {
++        return false;
++    }
++    const uint8_t* p = signing_cert_buf;
++    bssl::UniquePtr<X509> cert(d2i_X509(nullptr, &p, static_cast<long>(signing_cert_len)));
++    if (!cert) return false;
++
++    bssl::UniquePtr<EVP_PKEY> pubkey(X509_get_pubkey(cert.get()));
++    if (!pubkey) return false;
++    int pub_len = i2d_PUBKEY(pubkey.get(), nullptr);
++    if (pub_len <= 0) return false;
++    std::vector<uint8_t> pub_der(static_cast<size_t>(pub_len));
++    uint8_t* pub_ptr = pub_der.data();
++    if (i2d_PUBKEY(pubkey.get(), &pub_ptr) <= 0) return false;
++
++    if (!sha256OfBytes(pub_der.data(), pub_der.size(), out_boot_key)) return false;
++
++    std::vector<uint8_t> hash_seed(signing_cert_buf, signing_cert_buf + signing_cert_len);
++    static constexpr char kDomain[] = "tee_soft_debug_vbmeta_digest_v1";
++    hash_seed.insert(hash_seed.end(), reinterpret_cast<const uint8_t*>(kDomain),
++                     reinterpret_cast<const uint8_t*>(kDomain) + sizeof(kDomain) - 1);
++    if (!sha256OfBytes(hash_seed.data(), hash_seed.size(), out_boot_hash)) return false;
++
++    if (isAllZeroDigest(*out_boot_key) || isAllZeroDigest(*out_boot_hash)) return false;
++    return true;
++}
++
++static bool patchAttestationRootOfTrust(X509* cert, const uint8_t* signing_cert_buf,
++                                        size_t signing_cert_len) {
++    if (!cert) return false;
++
++    std::vector<uint8_t> boot_key;
++    std::vector<uint8_t> boot_hash;
++    const bool prop_key_ok = readBootDigestProperty("ro.boot.vbmeta.public_key_digest", &boot_key);
++    const bool prop_hash_ok = readBootDigestProperty("ro.boot.vbmeta.digest", &boot_hash);
++
++    ASN1_OBJECT* att_oid_obj = OBJ_txt2obj("1.3.6.1.4.1.11129.2.1.17", 1);
++    if (!att_oid_obj) return false;
++    int ext_idx = X509_get_ext_by_OBJ(cert, att_oid_obj, -1);
++    ASN1_OBJECT_free(att_oid_obj);
++    if (ext_idx < 0) return false;
++
++    X509_EXTENSION* ext = X509_get_ext(cert, ext_idx);
++    if (!ext) return false;
++    ASN1_OCTET_STRING* ext_data = X509_EXTENSION_get_data(ext);
++    if (!ext_data || !ext_data->data || ext_data->length <= 0) return false;
++
++    const uint8_t* p = ext_data->data;
++    STACK_OF(ASN1_TYPE)* key_desc = d2i_ASN1_SEQUENCE_ANY(nullptr, &p, ext_data->length);
++    if (!key_desc || sk_ASN1_TYPE_num(key_desc) < 8) {
++        if (key_desc) {
++            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++        }
++        return false;
++    }
++
++    ASN1_TYPE* tee_enforced = sk_ASN1_TYPE_value(key_desc, 7);
++    if (!tee_enforced) {
++        sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++        return false;
++    }
++    int tee_len = i2d_ASN1_TYPE(tee_enforced, nullptr);
++    if (tee_len <= 0) {
++        sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++        return false;
++    }
++    std::vector<uint8_t> tee_buf(static_cast<size_t>(tee_len));
++    uint8_t* tee_ptr = tee_buf.data();
++    if (i2d_ASN1_TYPE(tee_enforced, &tee_ptr) <= 0) {
++        sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++        return false;
++    }
++
++    // TEESimulator-like fallback chain for boot key/hash:
++    // 1) ro.boot.vbmeta.* properties
++    // 2) original attestation RootOfTrust values
++    if (!prop_key_ok || !prop_hash_ok) {
++        std::vector<uint8_t> old_boot_key;
++        std::vector<uint8_t> old_boot_hash;
++        if (extractRootOfTrustBootFields(tee_buf, &old_boot_key, &old_boot_hash)) {
++            if (!prop_key_ok && !old_boot_key.empty() && !isAllZeroDigest(old_boot_key)) {
++                boot_key = old_boot_key;
++            }
++            if (!prop_hash_ok && !old_boot_hash.empty() && !isAllZeroDigest(old_boot_hash)) {
++                boot_hash = old_boot_hash;
++            }
++        }
++    }
++    if (boot_key.size() != 32 || isAllZeroDigest(boot_key) || boot_hash.size() != 32 ||
++        isAllZeroDigest(boot_hash)) {
++        std::vector<uint8_t> derived_key;
++        std::vector<uint8_t> derived_hash;
++        if (deriveStableBootDigestsFromSignerCert(signing_cert_buf, signing_cert_len, &derived_key,
++                                                  &derived_hash)) {
++            if (boot_key.size() != 32 || isAllZeroDigest(boot_key)) {
++                boot_key = std::move(derived_key);
++                ALOGI("patchAttestationRootOfTrust: derived stable verifiedBootKey from signer cert");
++            }
++            if (boot_hash.size() != 32 || isAllZeroDigest(boot_hash)) {
++                boot_hash = std::move(derived_hash);
++                ALOGI("patchAttestationRootOfTrust: derived stable verifiedBootHash from signer cert");
++            }
++        }
++    }
++    if (boot_key.size() != 32 || isAllZeroDigest(boot_key)) {
++        boot_key.assign(32, 0);
++        if (!RAND_bytes(boot_key.data(), static_cast<int>(boot_key.size())) ||
++            isAllZeroDigest(boot_key)) {
++            ALOGW("patchAttestationRootOfTrust: failed to synthesize verifiedBootKey");
++            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++            return false;
++        }
++        ALOGI("patchAttestationRootOfTrust: synthesized verifiedBootKey fallback");
++    }
++    if (boot_hash.size() != 32 || isAllZeroDigest(boot_hash)) {
++        boot_hash.assign(32, 0);
++        if (!RAND_bytes(boot_hash.data(), static_cast<int>(boot_hash.size())) ||
++            isAllZeroDigest(boot_hash)) {
++            ALOGW("patchAttestationRootOfTrust: failed to synthesize verifiedBootHash");
++            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++            return false;
++        }
++        ALOGI("patchAttestationRootOfTrust: synthesized verifiedBootHash fallback");
++    }
++
++    std::vector<uint8_t> new_tee;
++    if (!replaceRootOfTrustInTeeEnforced(tee_buf, boot_key, boot_hash, &new_tee)) {
++        ALOGW("patchAttestationRootOfTrust: failed to rebuild teeEnforced RootOfTrust");
++        sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++        return false;
++    }
++
++    std::vector<uint8_t> key_desc_items;
++    for (int i = 0; i < sk_ASN1_TYPE_num(key_desc); ++i) {
++        if (i == 7) {
++            key_desc_items.insert(key_desc_items.end(), new_tee.begin(), new_tee.end());
++            continue;
++        }
++        ASN1_TYPE* item = sk_ASN1_TYPE_value(key_desc, i);
++        if (!item) {
++            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++            return false;
++        }
++        int n = i2d_ASN1_TYPE(item, nullptr);
++        if (n <= 0) {
++            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++            return false;
++        }
++        std::vector<uint8_t> tmp(static_cast<size_t>(n));
++        uint8_t* ptr = tmp.data();
++        if (i2d_ASN1_TYPE(item, &ptr) <= 0) {
++            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++            return false;
++        }
++        key_desc_items.insert(key_desc_items.end(), tmp.begin(), tmp.end());
++    }
++    sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++    std::vector<uint8_t> new_key_desc = makeDerTlv(0x30, key_desc_items);
++    if (ASN1_OCTET_STRING_set(ext_data, new_key_desc.data(), static_cast<int>(new_key_desc.size())) != 1) {
++        ALOGW("patchAttestationRootOfTrust: failed to write patched attestation extension");
++        return false;
++    }
++    ALOGI("patchAttestationRootOfTrust: patched verifiedBoot fields (locked=true,state=verified)");
++    return true;
++}
++
++int resignLeafCertificate(const uint8_t* leaf_cert_buf, size_t leaf_cert_len,
++                          const uint8_t* signing_cert_buf, size_t signing_cert_len,
++                          const uint8_t* signing_key_buf, size_t signing_key_len,
++                          uint8_t* out_cert_buf, size_t out_cert_buf_len) {
++    if (!leaf_cert_buf || !signing_cert_buf || !signing_key_buf || !out_cert_buf) {
++        ALOGE("resignLeafCertificate: null pointer input");
++        return 0;
++    }
++
++    const uint8_t* leaf_p = leaf_cert_buf;
++    bssl::UniquePtr<X509> leaf(d2i_X509(nullptr, &leaf_p, static_cast<long>(leaf_cert_len)));
++    if (!leaf) {
++        ALOGE("resignLeafCertificate: failed to parse leaf cert");
++        return 0;
++    }
++
++    const uint8_t* signer_p = signing_cert_buf;
++    bssl::UniquePtr<X509> signing_cert(
++            d2i_X509(nullptr, &signer_p, static_cast<long>(signing_cert_len)));
++    if (!signing_cert) {
++        ALOGE("resignLeafCertificate: failed to parse signing cert");
++        return 0;
++    }
++
++    bssl::UniquePtr<EVP_PKEY> signing_key = parseSigningKey(signing_key_buf, signing_key_len);
++    if (!signing_key) {
++        ALOGE("resignLeafCertificate: failed to parse signing key");
++        return 0;
++    }
++
++    if (auto e = keystore::setIssuer(leaf.get(), signing_cert.get(), false /* addAuthKeyExt */); e) {
++        ALOGE("resignLeafCertificate: setIssuer failed");
++        return 0;
++    }
++
++    // Align key attestation RootOfTrust semantics with simulator behavior:
++    // force Verified state and locked=true, with boot key/hash from vbmeta properties.
++    (void)patchAttestationRootOfTrust(leaf.get(), signing_cert_buf, signing_cert_len);
++
++    if (auto e = keystore::signCert(leaf.get(), signing_key.get()); e) {
++        ALOGE("resignLeafCertificate: signCert failed");
++        return 0;
++    }
++
++    bssl::UniquePtr<EVP_PKEY> signing_pubkey(X509_get_pubkey(signing_cert.get()));
++    if (!signing_pubkey) {
++        ALOGE("resignLeafCertificate: failed to get signer pubkey");
++        return 0;
++    }
++    if (X509_verify(leaf.get(), signing_pubkey.get()) != 1) {
++        ALOGE("resignLeafCertificate: leaf verification against signer pubkey failed");
++        return 0;
++    }
++
++    auto encoded_or_error = keystore::encodeCert(leaf.get());
++    if (std::holds_alternative<keystore::CertUtilsError>(encoded_or_error)) {
++        ALOGE("resignLeafCertificate: encodeCert failed");
++        return 0;
++    }
++
++    const auto& encoded = std::get<std::vector<uint8_t>>(encoded_or_error);
++    if (encoded.size() > out_cert_buf_len) {
++        return -static_cast<int>(encoded.size());
++    }
++
++    std::copy(encoded.begin(), encoded.end(), out_cert_buf);
++    return static_cast<int>(encoded.size());
++}
++
++bool verifyCertificateSignedBy(const uint8_t* child_cert_buf, size_t child_cert_len,
++                               const uint8_t* parent_cert_buf, size_t parent_cert_len) {
++    if (!child_cert_buf || !parent_cert_buf) {
++        ALOGE("verifyCertificateSignedBy: null pointer input");
++        return false;
++    }
++
++    const uint8_t* child_p = child_cert_buf;
++    bssl::UniquePtr<X509> child(d2i_X509(nullptr, &child_p, static_cast<long>(child_cert_len)));
++    if (!child) {
++        ALOGE("verifyCertificateSignedBy: failed to parse child cert");
++        return false;
++    }
++
++    const uint8_t* parent_p = parent_cert_buf;
++    bssl::UniquePtr<X509> parent(d2i_X509(nullptr, &parent_p, static_cast<long>(parent_cert_len)));
++    if (!parent) {
++        ALOGE("verifyCertificateSignedBy: failed to parse parent cert");
++        return false;
++    }
++
++    bssl::UniquePtr<EVP_PKEY> parent_pubkey(X509_get_pubkey(parent.get()));
++    if (!parent_pubkey) {
++        ALOGE("verifyCertificateSignedBy: failed to get parent pubkey");
++        return false;
++    }
++
++    if (X509_verify(child.get(), parent_pubkey.get()) != 1) {
++        ALOGE("verifyCertificateSignedBy: certificate signature verification failed");
++        return false;
++    }
++
++    return true;
++}
++
++int extractAttestationPatchLevels(const uint8_t* cert_buf, size_t cert_len, int32_t* out_os_patchlevel,
++                                  int32_t* out_vendor_patchlevel, int32_t* out_boot_patchlevel) {
++    if (!cert_buf || cert_len == 0) {
++        ALOGE("extractAttestationPatchLevels: invalid cert input");
++        return 0;
++    }
++
++    const uint8_t* p = cert_buf;
++    bssl::UniquePtr<X509> cert(d2i_X509(nullptr, &p, static_cast<long>(cert_len)));
++    if (!cert) {
++        ALOGE("extractAttestationPatchLevels: failed to parse cert");
++        return 0;
++    }
++
++    ASN1_OBJECT* att_oid_obj = OBJ_txt2obj("1.3.6.1.4.1.11129.2.1.17", 1);
++    if (!att_oid_obj) return 0;
++    int ext_idx = X509_get_ext_by_OBJ(cert.get(), att_oid_obj, -1);
++    ASN1_OBJECT_free(att_oid_obj);
++    if (ext_idx < 0) return 0;
++
++    X509_EXTENSION* ext = X509_get_ext(cert.get(), ext_idx);
++    if (!ext) return 0;
++    ASN1_OCTET_STRING* ext_data = X509_EXTENSION_get_data(ext);
++    if (!ext_data || !ext_data->data || ext_data->length <= 0) return 0;
++
++    const uint8_t* ext_ptr = ext_data->data;
++    STACK_OF(ASN1_TYPE)* key_desc = d2i_ASN1_SEQUENCE_ANY(nullptr, &ext_ptr, ext_data->length);
++    if (!key_desc) return 0;
++
++    uint32_t mask = 0;
++    for (int i = 0; i < sk_ASN1_TYPE_num(key_desc); ++i) {
++        if (i != 6 && i != 7) continue;  // softwareEnforced and teeEnforced
++        ASN1_TYPE* item = sk_ASN1_TYPE_value(key_desc, i);
++        if (!item) continue;
++        const int n = i2d_ASN1_TYPE(item, nullptr);
++        if (n <= 0) continue;
++        std::vector<uint8_t> buf(static_cast<size_t>(n));
++        uint8_t* ptr = buf.data();
++        if (i2d_ASN1_TYPE(item, &ptr) <= 0) continue;
++        mask |= extractPatchLevelsFromAuthorizationListDer(buf, out_os_patchlevel, out_vendor_patchlevel,
++                                                           out_boot_patchlevel);
++    }
++
++    sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
++    return static_cast<int>(mask);
++}
++
++int getCertificateSignatureKeyFamily(const uint8_t* cert_buf, size_t cert_len) {
++    if (!cert_buf) {
++        ALOGE("getCertificateSignatureKeyFamily: null pointer input");
++        return 0;
++    }
++
++    const uint8_t* p = cert_buf;
++    bssl::UniquePtr<X509> cert(d2i_X509(nullptr, &p, static_cast<long>(cert_len)));
++    if (!cert) {
++        ALOGE("getCertificateSignatureKeyFamily: failed to parse cert");
++        return 0;
++    }
++
++    int sig_nid = X509_get_signature_nid(cert.get());
++    if (sig_nid == NID_undef) {
++        ALOGE("getCertificateSignatureKeyFamily: certificate signature nid undefined");
++        return 0;
++    }
++
++    int pkey_nid = NID_undef;
++    if (OBJ_find_sigid_algs(sig_nid, nullptr, &pkey_nid) != 1) {
++        ALOGE("getCertificateSignatureKeyFamily: failed to derive signature key algorithm");
++        return 0;
++    }
++
++    switch (EVP_PKEY_type(pkey_nid)) {
++    case EVP_PKEY_RSA:
++        return 1;
++    case EVP_PKEY_EC:
++        return 2;
++    default:
++        return 0;
++    }
++}
++
++int getCertificatePublicKeyFamily(const uint8_t* cert_buf, size_t cert_len) {
++    if (!cert_buf) {
++        ALOGE("getCertificatePublicKeyFamily: null pointer input");
++        return 0;
++    }
++
++    const uint8_t* p = cert_buf;
++    bssl::UniquePtr<X509> cert(d2i_X509(nullptr, &p, static_cast<long>(cert_len)));
++    if (!cert) {
++        ALOGE("getCertificatePublicKeyFamily: failed to parse cert");
++        return 0;
++    }
++
++    bssl::UniquePtr<EVP_PKEY> pubkey(X509_get_pubkey(cert.get()));
++    if (!pubkey) {
++        ALOGE("getCertificatePublicKeyFamily: failed to extract public key");
++        return 0;
++    }
++
++    switch (EVP_PKEY_base_id(pubkey.get())) {
++    case EVP_PKEY_RSA:
++        return 1;
++    case EVP_PKEY_EC:
++        return 2;
++    default:
++        return 0;
++    }
++}
++
++int getCertificateTbsSignatureKeyFamily(const uint8_t* cert_buf, size_t cert_len) {
++    if (!cert_buf) {
++        ALOGE("getCertificateTbsSignatureKeyFamily: null pointer input");
++        return 0;
++    }
++
++    const uint8_t* p = cert_buf;
++    bssl::UniquePtr<X509> cert(d2i_X509(nullptr, &p, static_cast<long>(cert_len)));
++    if (!cert) {
++        ALOGE("getCertificateTbsSignatureKeyFamily: failed to parse cert");
++        return 0;
++    }
++
++    const X509_ALGOR* tbs_sig_alg = X509_get0_tbs_sigalg(cert.get());
++    if (!tbs_sig_alg || !tbs_sig_alg->algorithm) {
++        ALOGE("getCertificateTbsSignatureKeyFamily: missing tbs signature algorithm");
++        return 0;
++    }
++
++    int sig_nid = OBJ_obj2nid(tbs_sig_alg->algorithm);
++    if (sig_nid == NID_undef) {
++        ALOGE("getCertificateTbsSignatureKeyFamily: tbs signature nid undefined");
++        return 0;
++    }
++
++    int pkey_nid = NID_undef;
++    if (OBJ_find_sigid_algs(sig_nid, nullptr, &pkey_nid) != 1) {
++        ALOGE("getCertificateTbsSignatureKeyFamily: failed to derive tbs signature key algorithm");
++        return 0;
++    }
++
++    switch (EVP_PKEY_type(pkey_nid)) {
++    case EVP_PKEY_RSA:
++        return 1;
++    case EVP_PKEY_EC:
++        return 2;
++    default:
++        return 0;
++    }
++}
+diff --git a/keystore2/src/crypto/crypto.hpp b/keystore2/src/crypto/crypto.hpp
+index f67f640..106dfaa 100644
+--- a/keystore2/src/crypto/crypto.hpp
++++ b/keystore2/src/crypto/crypto.hpp
+@@ -89,4 +89,65 @@ extern "C" {
+ int extractSubjectFromCertificate(const uint8_t* cert_buf, size_t cert_len,
+                                   uint8_t* subject_buf, size_t subject_buf_len);
+ 
++// Parse a DER-encoded X.509 certificate contained in cert_buf, with length
++// cert_len, extract the issuer, DER-encode it and write the result to
++// issuer_buf, which has issuer_buf_len capacity.
++//
++// Return value semantics are identical to extractSubjectFromCertificate:
++// - > 0: success, number of bytes written
++// - = 0: unrecoverable failure
++// - < 0: output buffer too small, required size is -ret
++int extractIssuerFromCertificate(const uint8_t* cert_buf, size_t cert_len,
++                                 uint8_t* issuer_buf, size_t issuer_buf_len);
++
++// Re-sign a DER-encoded leaf certificate with a private key and issuer certificate.
++//
++// `signing_key_buf` supports either PEM text ("BEGIN PRIVATE KEY") or DER key bytes.
++//
++// Return value semantics:
++// - > 0: success, number of bytes written to out_cert_buf.
++// - = 0: failure.
++// - < 0: output buffer too small; required size is `-ret`.
++int resignLeafCertificate(const uint8_t* leaf_cert_buf, size_t leaf_cert_len,
++                          const uint8_t* signing_cert_buf, size_t signing_cert_len,
++                          const uint8_t* signing_key_buf, size_t signing_key_len,
++                          uint8_t* out_cert_buf, size_t out_cert_buf_len);
++
++// Verify that `child_cert_buf` is signed by `parent_cert_buf` public key.
++//
++// Return true on successful verification, false otherwise.
++bool verifyCertificateSignedBy(const uint8_t* child_cert_buf, size_t child_cert_len,
++                               const uint8_t* parent_cert_buf, size_t parent_cert_len);
++
++// Return signature key family used by certificate's signature algorithm:
++// - 1: RSA
++// - 2: EC/ECDSA
++// - 0: unknown or parse failure
++int getCertificateSignatureKeyFamily(const uint8_t* cert_buf, size_t cert_len);
++
++// Return public key family of certificate SubjectPublicKeyInfo:
++// - 1: RSA
++// - 2: EC/ECDSA
++// - 0: unknown or parse failure
++int getCertificatePublicKeyFamily(const uint8_t* cert_buf, size_t cert_len);
++
++// Return signature key family encoded in TBSCertificate.signature field:
++// - 1: RSA
++// - 2: EC/ECDSA
++// - 0: unknown or parse failure
++int getCertificateTbsSignatureKeyFamily(const uint8_t* cert_buf, size_t cert_len);
++
++// Extract patch levels from Android attestation extension (OID 1.3.6.1.4.1.11129.2.1.17).
++//
++// Output pointers may be null. If non-null and the corresponding field is found, it is written.
++//
++// Return value is a bitmask:
++// - bit 0 (0x1): OS_PATCHLEVEL found
++// - bit 1 (0x2): VENDOR_PATCHLEVEL found
++// - bit 2 (0x4): BOOT_PATCHLEVEL found
++//
++// Returns 0 if parsing fails or none of the fields are found.
++int extractAttestationPatchLevels(const uint8_t* cert_buf, size_t cert_len, int32_t* out_os_patchlevel,
++                                  int32_t* out_vendor_patchlevel, int32_t* out_boot_patchlevel);
++
+ #endif  //  __CRYPTO_H__
+diff --git a/keystore2/src/crypto/error.rs b/keystore2/src/crypto/error.rs
+index 48a2d4c..4744cea 100644
+--- a/keystore2/src/crypto/error.rs
++++ b/keystore2/src/crypto/error.rs
+@@ -95,6 +95,14 @@ pub enum Error {
+     #[error("Failed to extract certificate subject.")]
+     ExtractSubjectFailed,
+ 
++    /// This is returned if the C implementation of extractIssuerFromCertificate failed.
++    #[error("Failed to extract certificate issuer.")]
++    ExtractIssuerFailed,
++
++    /// This is returned if the C implementation of resignLeafCertificate failed.
++    #[error("Failed to re-sign certificate.")]
++    ResignCertificateFailed,
++
+     /// This is returned if the C implementation of hmacSha256 failed.
+     #[error("Failed to calculate HMAC-SHA256.")]
+     HmacSha256Failed,
+diff --git a/keystore2/src/crypto/lib.rs b/keystore2/src/crypto/lib.rs
+index b6f308b..0765212 100644
+--- a/keystore2/src/crypto/lib.rs
++++ b/keystore2/src/crypto/lib.rs
+@@ -19,10 +19,15 @@ mod error;
+ pub mod zvec;
+ pub use error::Error;
+ use keystore2_crypto_bindgen::{
+-    extractSubjectFromCertificate, hmacSha256, randomBytes, AES_gcm_decrypt, AES_gcm_encrypt,
++    extractAttestationPatchLevels, extractIssuerFromCertificate, extractSubjectFromCertificate,
++    hmacSha256, randomBytes,
++    AES_gcm_decrypt, AES_gcm_encrypt,
++    getCertificatePublicKeyFamily, getCertificateSignatureKeyFamily,
++    getCertificateTbsSignatureKeyFamily,
+     ECDHComputeKey, ECKEYGenerateKey, ECKEYMarshalPrivateKey, ECKEYParsePrivateKey,
+     ECPOINTOct2Point, ECPOINTPoint2Oct, EC_KEY_free, EC_KEY_get0_public_key, EC_POINT_free,
+-    HKDFExpand, HKDFExtract, EC_KEY, EC_MAX_BYTES, EC_POINT, EVP_MAX_MD_SIZE, PBKDF2,
++    HKDFExpand, HKDFExtract, PBKDF2, resignLeafCertificate, verifyCertificateSignedBy, EC_KEY,
++    EC_MAX_BYTES, EC_POINT, EVP_MAX_MD_SIZE,
+ };
+ use std::convert::TryFrom;
+ use std::convert::TryInto;
+@@ -477,6 +482,188 @@ pub fn parse_subject_from_certificate(cert_buf: &[u8]) -> Result<Vec<u8>, Error>
+     Ok(retval)
+ }
+ 
++/// Uses BoringSSL to extract the DER-encoded issuer from a DER-encoded X.509 certificate.
++pub fn parse_issuer_from_certificate(cert_buf: &[u8]) -> Result<Vec<u8>, Error> {
++    // Try with a 200-byte output buffer, should be enough in all but bizarre cases.
++    let mut retval = vec![0; 200];
++
++    // Safety: extractIssuerFromCertificate reads at most cert_buf.len() bytes from cert_buf and
++    // writes at most retval.len() bytes to retval.
++    let mut size = unsafe {
++        extractIssuerFromCertificate(
++            cert_buf.as_ptr(),
++            cert_buf.len(),
++            retval.as_mut_ptr(),
++            retval.len(),
++        )
++    };
++
++    if size == 0 {
++        return Err(Error::ExtractIssuerFailed);
++    }
++
++    if size < 0 {
++        // Our buffer wasn't big enough. Make one that is just the right size and try again.
++        let negated_size = usize::try_from(-size).map_err(|_e| Error::ExtractIssuerFailed)?;
++        retval = vec![0; negated_size];
++
++        // Safety: extractIssuerFromCertificate reads at most cert_buf.len() bytes from cert_buf
++        // and writes at most retval.len() bytes to retval.
++        size = unsafe {
++            extractIssuerFromCertificate(
++                cert_buf.as_ptr(),
++                cert_buf.len(),
++                retval.as_mut_ptr(),
++                retval.len(),
++            )
++        };
++
++        if size <= 0 {
++            return Err(Error::ExtractIssuerFailed);
++        }
++    }
++
++    // Reduce buffer size to the amount written.
++    let safe_size = usize::try_from(size).map_err(|_e| Error::ExtractIssuerFailed)?;
++    retval.truncate(safe_size);
++
++    Ok(retval)
++}
++
++/// Extracts patchlevels from Android attestation extension in a DER-encoded certificate.
++///
++/// Returns `(os_patchlevel, vendor_patchlevel, boot_patchlevel)`, where each field is `Some(i32)`
++/// if found, or `None` otherwise.
++pub fn extract_attestation_patchlevels(
++    cert_buf: &[u8],
++) -> (Option<i32>, Option<i32>, Option<i32>) {
++    let mut os_patchlevel = 0i32;
++    let mut vendor_patchlevel = 0i32;
++    let mut boot_patchlevel = 0i32;
++    // Safety: extractAttestationPatchLevels only reads cert_buf and conditionally writes outputs.
++    let mask = unsafe {
++        extractAttestationPatchLevels(
++            cert_buf.as_ptr(),
++            cert_buf.len(),
++            &mut os_patchlevel,
++            &mut vendor_patchlevel,
++            &mut boot_patchlevel,
++        )
++    } as u32;
++
++    let os = if (mask & 0x1) != 0 { Some(os_patchlevel) } else { None };
++    let vendor = if (mask & 0x2) != 0 { Some(vendor_patchlevel) } else { None };
++    let boot = if (mask & 0x4) != 0 { Some(boot_patchlevel) } else { None };
++    (os, vendor, boot)
++}
++
++/// Re-signs a DER-encoded leaf certificate using the provided signing key and issuer certificate.
++///
++/// `signing_key_buf` supports either PEM bytes (with BEGIN/END markers) or DER key bytes.
++pub fn resign_leaf_certificate(
++    leaf_cert_buf: &[u8],
++    signing_cert_buf: &[u8],
++    signing_key_buf: &[u8],
++) -> Result<Vec<u8>, Error> {
++    let mut retval = vec![0; 4096];
++
++    // Safety: resignLeafCertificate reads at most input lengths from inputs and writes at most
++    // retval.len() bytes to retval.
++    let mut size = unsafe {
++        resignLeafCertificate(
++            leaf_cert_buf.as_ptr(),
++            leaf_cert_buf.len(),
++            signing_cert_buf.as_ptr(),
++            signing_cert_buf.len(),
++            signing_key_buf.as_ptr(),
++            signing_key_buf.len(),
++            retval.as_mut_ptr(),
++            retval.len(),
++        )
++    };
++
++    if size == 0 {
++        return Err(Error::ResignCertificateFailed);
++    }
++
++    if size < 0 {
++        let needed_size = usize::try_from(-size).map_err(|_e| Error::ResignCertificateFailed)?;
++        retval = vec![0; needed_size];
++        // Safety: Same as above with resized output buffer.
++        size = unsafe {
++            resignLeafCertificate(
++                leaf_cert_buf.as_ptr(),
++                leaf_cert_buf.len(),
++                signing_cert_buf.as_ptr(),
++                signing_cert_buf.len(),
++                signing_key_buf.as_ptr(),
++                signing_key_buf.len(),
++                retval.as_mut_ptr(),
++                retval.len(),
++            )
++        };
++        if size <= 0 {
++            return Err(Error::ResignCertificateFailed);
++        }
++    }
++
++    let safe_size = usize::try_from(size).map_err(|_e| Error::ResignCertificateFailed)?;
++    retval.truncate(safe_size);
++    Ok(retval)
++}
++
++/// Verifies that `child_cert_buf` is signed by `parent_cert_buf`.
++pub fn verify_certificate_signed_by(child_cert_buf: &[u8], parent_cert_buf: &[u8]) -> bool {
++    // Safety: verifyCertificateSignedBy only reads the provided buffers.
++    unsafe {
++        verifyCertificateSignedBy(
++            child_cert_buf.as_ptr(),
++            child_cert_buf.len(),
++            parent_cert_buf.as_ptr(),
++            parent_cert_buf.len(),
++        )
++    }
++}
++
++/// Returns certificate signature key family:
++/// - `Some("rsa")` when certificate signature is RSA-based
++/// - `Some("ec")` when certificate signature is EC/ECDSA-based
++/// - `None` for unknown/unsupported signature family
++pub fn certificate_signature_key_family(cert_buf: &[u8]) -> Option<&'static str> {
++    // Safety: getCertificateSignatureKeyFamily only reads the provided buffer.
++    match unsafe { getCertificateSignatureKeyFamily(cert_buf.as_ptr(), cert_buf.len()) } {
++        1 => Some("rsa"),
++        2 => Some("ec"),
++        _ => None,
++    }
++}
++
++/// Returns certificate subject public key family:
++/// - `Some("rsa")` when SPKI key is RSA
++/// - `Some("ec")` when SPKI key is EC
++/// - `None` for unknown/unsupported key family
++pub fn certificate_public_key_family(cert_buf: &[u8]) -> Option<&'static str> {
++    // Safety: getCertificatePublicKeyFamily only reads the provided buffer.
++    match unsafe { getCertificatePublicKeyFamily(cert_buf.as_ptr(), cert_buf.len()) } {
++        1 => Some("rsa"),
++        2 => Some("ec"),
++        _ => None,
++    }
++}
++
++/// Returns TBSCertificate.signature key family:
++/// - `Some("rsa")` when TBS signature algorithm is RSA-based
++/// - `Some("ec")` when TBS signature algorithm is EC/ECDSA-based
++/// - `None` for unknown/unsupported algorithm family
++pub fn certificate_tbs_signature_key_family(cert_buf: &[u8]) -> Option<&'static str> {
++    // Safety: getCertificateTbsSignatureKeyFamily only reads the provided buffer.
++    match unsafe { getCertificateTbsSignatureKeyFamily(cert_buf.as_ptr(), cert_buf.len()) } {
++        1 => Some("rsa"),
++        2 => Some("ec"),
++        _ => None,
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+ 
+diff --git a/keystore2/src/lib.rs b/keystore2/src/lib.rs
+index c0eecd8..1793629 100644
+--- a/keystore2/src/lib.rs
++++ b/keystore2/src/lib.rs
+@@ -40,6 +40,7 @@ pub mod remote_provisioning;
+ pub mod security_level;
+ pub mod service;
+ pub mod shared_secret_negotiation;
++mod tee_soft_debug;
+ pub mod utils;
+ 
+ mod attestation_key_utils;
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index 744d3a8..387b0ea 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -31,6 +31,13 @@ use crate::ks_err;
+ use crate::metrics_store::log_key_creation_event_stats;
+ use crate::remote_provisioning::RemProvState;
+ use crate::super_key::{KeyBlob, SuperKeyManager};
++use crate::tee_soft_debug::{
++    mark_generated_attest_key_for_uid, maybe_override_certificate_chain_for_uid,
++    maybe_sync_patchlevel_authorizations_for_uid,
++    should_treat_external_attest_key_as_softdebug_for_uid,
++    should_force_software_generation_for_uid, should_prefer_local_attest_key_flow_for_uid,
++    uses_tracked_attest_key_for_uid,
++};
+ use crate::utils::{
+     check_device_attestation_permissions, check_key_permission,
+     check_unique_id_attestation_permissions, is_device_id_attestation_tag,
+@@ -47,9 +54,10 @@ use crate::{
+     operation::OperationDb,
+     permission::KeyPerm,
+ };
+-use crate::{globals::get_keymint_device, id_rotation::IdRotationState};
++use crate::{globals::{get_keymint_dev_by_uuid, get_keymint_device}, id_rotation::IdRotationState};
+ use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+     Algorithm::Algorithm, AttestationKey::AttestationKey, Certificate::Certificate,
++    EcCurve::EcCurve,
+     HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
+     KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat,
+     KeyMintHardwareInfo::KeyMintHardwareInfo, KeyParameter::KeyParameter,
+@@ -64,7 +72,7 @@ use android_system_keystore2::aidl::android::system::keystore2::{
+     KeyMetadata::KeyMetadata, KeyParameters::KeyParameters, ResponseCode::ResponseCode,
+ };
+ use anyhow::{anyhow, Context, Result};
+-use log::error;
++use log::{error, info, warn};
+ use postprocessor_client::process_certificate_chain;
+ use rkpd_client::store_rkpd_attestation_key;
+ use rustutils::system_properties::read_bool;
+@@ -84,6 +92,35 @@ pub struct KeystoreSecurityLevel {
+ 
+ // Blob of 32 zeroes used as empty masking key.
+ static ZERO_BLOB_32: &[u8] = &[0; 32];
++static DEFAULT_CERT_SUBJECT_DER: &[u8] = &[
++    // Name ::= SEQUENCE { RDNSequence }, CN=Android Keystore Key
++    0x30, 0x1f, 0x31, 0x1d, 0x30, 0x1b, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x14, 0x41, 0x6e,
++    0x64, 0x72, 0x6f, 0x69, 0x64, 0x20, 0x4b, 0x65, 0x79, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x20,
++    0x4b, 0x65, 0x79,
++];
++
++fn derive_ec_key_size_from_curve(params: &[KeyParameter]) -> Option<i32> {
++    let curve = params.iter().find_map(|kp| {
++        if kp.tag == Tag::EC_CURVE {
++            if let KeyParameterValue::EcCurve(c) = kp.value {
++                return Some(c);
++            }
++        }
++        None
++    })?;
++    match curve {
++        EcCurve::P_224 => Some(224),
++        EcCurve::P_256 | EcCurve::CURVE_25519 => Some(256),
++        EcCurve::P_384 => Some(384),
++        EcCurve::P_521 => Some(521),
++        _ => None,
++    }
++}
++
++struct KeymintUpgradeCtx<'a> {
++    dev: &'a dyn IKeyMintDevice,
++    version: i32,
++}
+ 
+ impl KeystoreSecurityLevel {
+     /// Creates a new security level instance wrapped in a
+@@ -508,6 +545,12 @@ impl KeystoreSecurityLevel {
+         match params.iter().find(|kp| kp.tag == Tag::ALGORITHM) {
+             Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::RSA) })
+             | Some(KeyParameter { tag: _, value: KeyParameterValue::Algorithm(Algorithm::EC) }) => {
++                if !params.iter().any(|kp| kp.tag == Tag::CERTIFICATE_SUBJECT) {
++                    result.push(KeyParameter {
++                        tag: Tag::CERTIFICATE_SUBJECT,
++                        value: KeyParameterValue::Blob(DEFAULT_CERT_SUBJECT_DER.to_vec()),
++                    })
++                }
+                 if !params.iter().any(|kp| kp.tag == Tag::CERTIFICATE_NOT_BEFORE) {
+                     result.push(KeyParameter {
+                         tag: Tag::CERTIFICATE_NOT_BEFORE,
+@@ -520,6 +563,30 @@ impl KeystoreSecurityLevel {
+                         value: KeyParameterValue::DateTime(UNDEFINED_NOT_AFTER),
+                     })
+                 }
++                if params.iter().any(|kp| {
++                    kp.tag == Tag::ALGORITHM
++                        && matches!(kp.value, KeyParameterValue::Algorithm(Algorithm::RSA))
++                }) && !params.iter().any(|kp| kp.tag == Tag::RSA_PUBLIC_EXPONENT)
++                {
++                    // Match AOSP Java-side default: RSAKeyGenParameterSpec.F4 (65537).
++                    result.push(KeyParameter {
++                        tag: Tag::RSA_PUBLIC_EXPONENT,
++                        value: KeyParameterValue::LongInteger(65537),
++                    })
++                }
++                if !params.iter().any(|kp| kp.tag == Tag::KEY_SIZE)
++                    && params.iter().any(|kp| {
++                        kp.tag == Tag::ALGORITHM
++                            && matches!(kp.value, KeyParameterValue::Algorithm(Algorithm::EC))
++                    })
++                {
++                    if let Some(size) = derive_ec_key_size_from_curve(params) {
++                        result.push(KeyParameter {
++                            tag: Tag::KEY_SIZE,
++                            value: KeyParameterValue::Integer(size),
++                        })
++                    }
++                }
+             }
+             _ => {}
+         }
+@@ -554,33 +621,121 @@ impl KeystoreSecurityLevel {
+         // Must return on error for security reasons.
+         check_key_permission(KeyPerm::Rebind, &key, &None).context(ks_err!())?;
+ 
+-        let attestation_key_info = match (key.domain, attest_key_descriptor) {
+-            (Domain::BLOB, _) => None,
+-            _ => DB
+-                .with(|db| {
+-                    get_attest_key_info(
+-                        &key,
+-                        caller_uid,
+-                        attest_key_descriptor,
+-                        params,
+-                        &self.rem_prov_state,
+-                        &mut db.borrow_mut(),
+-                    )
+-                })
+-                .context(ks_err!("Trying to get an attestation key"))?,
++        let prefer_local_attest_key_flow = should_prefer_local_attest_key_flow_for_uid(
++            caller_uid,
++            params,
++            attest_key_descriptor.is_some(),
++        );
++        let attestation_key_info = if prefer_local_attest_key_flow {
++            info!(
++                "tee soft debug: ATTEST_KEY request prefers local flow; skip attestation-key lookup for uid={:?}",
++                caller_uid
++            );
++            None
++        } else {
++            match (key.domain, attest_key_descriptor) {
++                (Domain::BLOB, _) => None,
++                _ => DB
++                    .with(|db| {
++                        get_attest_key_info(
++                            &key,
++                            caller_uid,
++                            attest_key_descriptor,
++                            params,
++                            &self.rem_prov_state,
++                            &mut db.borrow_mut(),
++                        )
++                    })
++                    .context(ks_err!("Trying to get an attestation key"))?,
++            }
+         };
+-        let params = self
++        let mut params = self
+             .add_required_parameters(caller_uid, params, &key)
+             .context(ks_err!("Trying to get aaid."))?;
+ 
+-        let creation_result = match attestation_key_info {
++        let has_external_attestation_key = attestation_key_info.is_some();
++        let uses_tracked_attest_key = uses_tracked_attest_key_for_uid(caller_uid, attest_key_descriptor)
++            || should_treat_external_attest_key_as_softdebug_for_uid(
++                caller_uid,
++                &params,
++                attest_key_descriptor,
++            );
++        let requested_software_generation = should_force_software_generation_for_uid(
++            caller_uid,
++            &params,
++            has_external_attestation_key,
++            uses_tracked_attest_key,
++        );
++        // NOTE: Many devices do not expose a usable SOFTWARE KeyMint binder service.
++        // Keep this route disabled until in-process software key generation is implemented.
++        let force_software_generation = false;
++        if requested_software_generation {
++            info!(
++                "tee soft debug: software-generation requested for uid={:?}, but system SOFTWARE KeyMint route is disabled; using original generation path",
++                caller_uid
++            );
++        }
++        let mut used_software_generation = false;
++        let software_attempt = if force_software_generation {
++            match get_keymint_device(&SecurityLevel::SOFTWARE) {
++                Ok((soft_km_dev, _, _)) => {
++                    used_software_generation = true;
++                    Some(
++                        map_km_error({
++                            let _wp = self.watch_millis(
++                                concat!(
++                                    "KeystoreSecurityLevel::generate_key (TeeSoftDebug Software): ",
++                                    "calling SOFTWARE IKeyMintDevice::generate_key",
++                                ),
++                                5000,
++                            );
++                            soft_km_dev.generateKey(&params, None)
++                        })
++                        .context(ks_err!(
++                            "While generating with SOFTWARE KeyMint for tee soft debug, params: {:?}.",
++                            log_security_safe_params(&params)
++                        )),
++                    )
++                }
++                Err(e) => {
++                    warn!(
++                        "tee soft debug: SOFTWARE KeyMint unavailable, fallback to original generation path for uid={:?}: {:?}",
++                        caller_uid, e
++                    );
++                    None
++                }
++            }
++        } else {
++            None
++        };
++
++        let mut creation_result = match software_attempt {
++            Some(result) => result,
++            None => match attestation_key_info {
+             Some(AttestationKeyInfo::UserGenerated {
+                 key_id_guard,
+                 blob,
+                 blob_metadata,
+                 issuer_subject,
+-            }) => self
+-                .upgrade_keyblob_if_required_with(
++            }) => {
++                let (attest_km_dev, attest_km_version) =
++                    if let Some(km_uuid) = blob_metadata.km_uuid().copied() {
++                        match get_keymint_dev_by_uuid(&km_uuid) {
++                            Ok((dev, hw_info)) => (dev, hw_info.versionNumber),
++                            Err(e) => {
++                                error!(
++                                    "Failed to resolve keymint by uuid {:?} for user-generated attest key, fallback to current security level: {:?}",
++                                    km_uuid, e
++                                );
++                                (self.keymint.clone(), self.hw_info.versionNumber)
++                            }
++                        }
++                    } else {
++                        (self.keymint.clone(), self.hw_info.versionNumber)
++                    };
++
++                self.upgrade_keyblob_if_required_with_dev(
++                    KeymintUpgradeCtx { dev: &*attest_km_dev, version: attest_km_version },
+                     Some(key_id_guard),
+                     &KeyBlob::Ref(&blob),
+                     blob_metadata.km_uuid().copied(),
+@@ -599,7 +754,7 @@ impl KeystoreSecurityLevel {
+                                 ),
+                                 5000, // Generate can take a little longer.
+                             );
+-                            self.keymint.generateKey(&params, attest_key.as_ref())
++                            attest_km_dev.generateKey(&params, attest_key.as_ref())
+                         })
+                     },
+                 )
+@@ -608,7 +763,8 @@ impl KeystoreSecurityLevel {
+                       attestation key, params: {:?}.",
+                     log_security_safe_params(&params)
+                 ))
+-                .map(|(result, _)| result),
++                .map(|(result, _)| result)
++            }
+             Some(AttestationKeyInfo::RkpdProvisioned { attestation_key, attestation_certs }) => {
+                 self.upgrade_rkpd_keyblob_if_required_with(&attestation_key.keyBlob, &[], |blob| {
+                     map_km_error({
+@@ -676,9 +832,29 @@ impl KeystoreSecurityLevel {
+                  attestation key and params: {:?}.",
+                 log_security_safe_params(&params)
+             )),
++        },
+         }
+         .context(ks_err!())?;
+ 
++        if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
++            maybe_override_certificate_chain_for_uid(
++                caller_uid,
++                &params,
++                has_external_attestation_key && !used_software_generation,
++                uses_tracked_attest_key,
++                key.alias.as_deref(),
++                attest_key_descriptor,
++                &mut creation_result,
++            );
++            maybe_sync_patchlevel_authorizations_for_uid(
++                caller_uid,
++                &creation_result,
++                &mut params,
++            );
++        }
++
++        mark_generated_attest_key_for_uid(caller_uid, &key, &params, used_software_generation);
++
+         let user = caller_uid.owning_user();
+         self.store_new_key(key, creation_result, user, Some(flags)).context(ks_err!())
+     }
+@@ -895,6 +1071,28 @@ impl KeystoreSecurityLevel {
+ 
+     fn upgrade_keyblob_if_required_with<T, F>(
+         &self,
++        key_id_guard: Option<KeyIdGuard>,
++        key_blob: &KeyBlob,
++        km_uuid: Option<Uuid>,
++        params: &[KeyParameter],
++        f: F,
++    ) -> Result<(T, Option<Vec<u8>>)>
++    where
++        F: Fn(&[u8]) -> Result<T, Error>,
++    {
++        self.upgrade_keyblob_if_required_with_dev(
++            KeymintUpgradeCtx { dev: &*self.keymint, version: self.hw_info.versionNumber },
++            key_id_guard,
++            key_blob,
++            km_uuid,
++            params,
++            f,
++        )
++    }
++
++    fn upgrade_keyblob_if_required_with_dev<T, F>(
++        &self,
++        km_ctx: KeymintUpgradeCtx<'_>,
+         mut key_id_guard: Option<KeyIdGuard>,
+         key_blob: &KeyBlob,
+         km_uuid: Option<Uuid>,
+@@ -905,8 +1103,8 @@ impl KeystoreSecurityLevel {
+         F: Fn(&[u8]) -> Result<T, Error>,
+     {
+         let (v, upgraded_blob) = crate::utils::upgrade_keyblob_if_required_with(
+-            &*self.keymint,
+-            self.hw_info.versionNumber,
++            km_ctx.dev,
++            km_ctx.version,
+             key_blob,
+             params,
+             f,
+diff --git a/keystore2/src/service.rs b/keystore2/src/service.rs
+index 7b8e386..5e5d4d4 100644
+--- a/keystore2/src/service.rs
++++ b/keystore2/src/service.rs
+@@ -51,8 +51,12 @@ use android_system_keystore2::aidl::android::system::keystore2::{
+ };
+ use anyhow::{Context, Result};
+ use error::Error;
++use keystore2_crypto::{
++    certificate_public_key_family, certificate_signature_key_family,
++    certificate_tbs_signature_key_family,
++};
+ use keystore2_selinux as selinux;
+-use log::error;
++use log::{error, info};
+ 
+ /// Implementation of the IKeystoreService.
+ #[derive(Default)]
+@@ -135,6 +139,70 @@ impl KeystoreService {
+         }
+     }
+ 
++    fn der_cert_total_len(buf: &[u8], offset: usize) -> Option<usize> {
++        let first = *buf.get(offset)?;
++        if first != 0x30 {
++            return None;
++        }
++        let len_byte = *buf.get(offset + 1)?;
++        if len_byte & 0x80 == 0 {
++            let content_len = usize::from(len_byte);
++            return Some(2 + content_len);
++        }
++        let len_len = usize::from(len_byte & 0x7f);
++        if len_len == 0 || len_len > 8 {
++            return None;
++        }
++        let mut content_len = 0usize;
++        for i in 0..len_len {
++            content_len = (content_len << 8) | usize::from(*buf.get(offset + 2 + i)?);
++        }
++        Some(2 + len_len + content_len)
++    }
++
++    fn split_concatenated_der_certs(buf: &[u8]) -> Vec<&[u8]> {
++        let mut out = Vec::new();
++        let mut offset = 0usize;
++        while offset < buf.len() {
++            let Some(total_len) = Self::der_cert_total_len(buf, offset) else {
++                break;
++            };
++            let end = offset.saturating_add(total_len);
++            if end > buf.len() {
++                break;
++            }
++            out.push(&buf[offset..end]);
++            offset = end;
++        }
++        out
++    }
++
++    fn summarize_exported_chain(
++        cert: Option<&[u8]>,
++        cert_chain_concat: Option<&[u8]>,
++    ) -> Vec<String> {
++        let mut certs: Vec<&[u8]> = Vec::new();
++        if let Some(leaf) = cert {
++            certs.push(leaf);
++        }
++        if let Some(chain_concat) = cert_chain_concat {
++            certs.extend(Self::split_concatenated_der_certs(chain_concat));
++        }
++        certs
++            .iter()
++            .enumerate()
++            .map(|(i, c)| {
++                format!(
++                    "#{i}:sig={:?},tbs_sig={:?},pub={:?},len={}",
++                    certificate_signature_key_family(c),
++                    certificate_tbs_signature_key_family(c),
++                    certificate_public_key_family(c),
++                    c.len()
++                )
++            })
++            .collect()
++    }
++
+     fn get_key_entry(&self, key: &KeyDescriptor) -> Result<KeyEntryResponse> {
+         let caller_uid = AppUid::calling();
+ 
+@@ -166,6 +234,17 @@ impl KeystoreService {
+             None
+         };
+ 
++        let certificate = key_entry.take_cert();
++        let certificate_chain = key_entry.take_cert_chain();
++        let exported_summary =
++            Self::summarize_exported_chain(certificate.as_deref(), certificate_chain.as_deref());
++        info!(
++            "keystore2 export: key={:?}, caller_uid={:?}, exported_chain_summary={:?}",
++            key,
++            caller_uid,
++            exported_summary
++        );
++
+         Ok(KeyEntryResponse {
+             iSecurityLevel: i_sec_level,
+             metadata: KeyMetadata {
+@@ -175,8 +254,8 @@ impl KeystoreService {
+                     ..Default::default()
+                 },
+                 keySecurityLevel: self.uuid_to_sec_level(key_entry.km_uuid()),
+-                certificate: key_entry.take_cert(),
+-                certificateChain: key_entry.take_cert_chain(),
++                certificate,
++                certificateChain: certificate_chain,
+                 modificationTimeMs: key_entry
+                     .metadata()
+                     .creation_date()
+diff --git a/src/TEE_SOFT_DEBUG_REWORK.md b/src/TEE_SOFT_DEBUG_REWORK.md
+new file mode 100644
+index 0000000..0d48d92
+--- /dev/null
++++ b/src/TEE_SOFT_DEBUG_REWORK.md
+@@ -0,0 +1,54 @@
++# TEE Soft Debug Rework Plan
++
++This document tracks the in-tree refactor of keystore2 TEE soft debug toward
++TEESimulator-equivalent outcomes (effect-level parity, not byte-level parity).
++
++## Goals
++
++1. Keep existing PATCH flow stable for target apps.
++2. Add explicit decision layer for `PATCH | GENERATE | AUTO`.
++3. Introduce ATTEST_KEY-specific path that can evolve into software key+chain generation.
++4. Preserve chain consistency and observability during migration.
++
++## Current Status
++
++- Runtime config and keybox loading are in place.
++- Chain replacement and validation are in place.
++- Export-side chain telemetry is in place.
++- Decision layer has been introduced in `tee_soft_debug.rs`:
++  - `TeeSoftDebugMode`
++  - `TeeSoftDebugAction`
++  - `decide_action(...)`
++- `GenerateSoftwareChain` action currently logs and returns (placeholder).
++
++## Phase Breakdown
++
++### Phase A: Architecture (in progress)
++
++- Centralize mode/action decision in one place.
++- Keep behavior compatible with current patch implementation.
++- Add logs that indicate which action was chosen and why.
++
++### Phase B: ATTEST_KEY software generation
++
++- Intercept ATTEST_KEY request path and provide software-generated key + cert chain.
++- Ensure the generated attest key can be referenced by later key generation.
++- Persist state with deterministic key identity mapping.
++
++### Phase C: PATCH semantic parity
++
++- Align keybox algorithm matching and leaf re-sign behavior.
++- Align attestation extension patch semantics (RoT / patch levels / IDs).
++- Ensure chain verification behavior matches client verifier expectations.
++
++### Phase D: Mode hardening
++
++- Implement AUTO strategy gates.
++- Add robust fallback policy when software generation fails.
++- Minimize debug logging and keep only actionable diagnostics.
++
++## Immediate Next Tasks
++
++1. Thread key descriptor context into soft-debug decision where needed.
++2. Implement Phase-B software generation backend for ATTEST_KEY path.
++3. Gate target-app behavior so attestation key and business key flows stay coherent.
+diff --git a/src/tee_soft_debug.rs b/src/tee_soft_debug.rs
+new file mode 100644
+index 0000000..b1f5f87
+--- /dev/null
++++ b/src/tee_soft_debug.rs
+@@ -0,0 +1,1552 @@
++// Copyright 2026, The LineageOS Project
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use crate::utils::{AndroidUserId, AppUid};
++use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
++    Certificate::Certificate, KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter,
++    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, Tag::Tag,
++};
++use anyhow::{Context, Result};
++use base64::engine::general_purpose::STANDARD;
++use base64::Engine;
++use binder::{self, Strong};
++use keystore2_crypto::{
++    certificate_public_key_family, certificate_signature_key_family,
++    certificate_tbs_signature_key_family, extract_attestation_patchlevels, parse_issuer_from_certificate,
++    parse_subject_from_certificate, resign_leaf_certificate, verify_certificate_signed_by,
++};
++use log::{info, warn};
++use packagemanager_aidl::aidl::android::content::pm::IPackageManagerNative::IPackageManagerNative;
++use std::collections::{HashMap, HashSet};
++use std::fs;
++use std::path::Path;
++use std::sync::{LazyLock, Mutex};
++use android_system_keystore2::aidl::android::system::keystore2::{
++    Domain::Domain, KeyDescriptor::KeyDescriptor,
++};
++const RUNTIME_CONFIG_PATH: &str = "/data/adbroot/tee_soft_debug/config.conf";
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++struct GeneratedAttestKeyRecord {
++    alias: String,
++    nspace: i64,
++    source: &'static str,
++}
++
++static GENERATED_ATTEST_KEYS: LazyLock<Mutex<HashMap<i64, Vec<GeneratedAttestKeyRecord>>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++static TRACKED_ATTEST_KEY_ALGORITHM: LazyLock<Mutex<HashMap<String, String>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++static TRACKED_ATTEST_KEY_MATERIAL: LazyLock<Mutex<HashMap<String, String>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++static TRACKED_ATTEST_SIGNERS: LazyLock<Mutex<HashMap<String, TrackedAttestSignerState>>> =
++    LazyLock::new(|| Mutex::new(HashMap::new()));
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum TeeSoftDebugMode {
++    Patch,
++    Generate,
++    Auto,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum TeeSoftDebugAction {
++    Skip,
++    PatchExistingChain,
++    GenerateSoftwareChain,
++}
++
++#[derive(Debug)]
++struct TeeSoftDebugConfig {
++    enabled: bool,
++    mode: TeeSoftDebugMode,
++    keybox_path: String,
++    target_packages: HashSet<String>,
++}
++
++#[derive(Clone, Debug)]
++struct KeyboxMaterial {
++    certs: Vec<Vec<u8>>,
++    signing_key: Option<Vec<u8>>,
++    algorithm: Option<String>,
++}
++
++#[derive(Clone, Debug)]
++struct TrackedAttestSignerState {
++    signer_cert: Vec<u8>,
++    signer_key: Vec<u8>,
++    algorithm: Option<String>,
++}
++
++fn parse_bool_setting(value: Option<String>) -> bool {
++    match value.as_deref() {
++        Some("1") => true,
++        Some(v) if v.eq_ignore_ascii_case("true") => true,
++        _ => false,
++    }
++}
++
++fn parse_mode_setting(value: Option<String>) -> TeeSoftDebugMode {
++    match value
++        .as_deref()
++        .map(str::trim)
++        .map(str::to_ascii_lowercase)
++        .as_deref()
++    {
++        Some("generate") => TeeSoftDebugMode::Generate,
++        Some("auto") => TeeSoftDebugMode::Auto,
++        _ => TeeSoftDebugMode::Patch,
++    }
++}
++
++fn parse_target_packages(value: Option<String>) -> HashSet<String> {
++    value
++        .unwrap_or_default()
++        .split('|')
++        .map(str::trim)
++        .filter(|s| !s.is_empty())
++        .map(ToOwned::to_owned)
++        .collect()
++}
++
++fn load_config_for_user(_user: AndroidUserId) -> Result<TeeSoftDebugConfig> {
++    load_config_from_runtime_file()
++}
++
++fn load_config_from_runtime_file() -> Result<TeeSoftDebugConfig> {
++    let content = fs::read_to_string(RUNTIME_CONFIG_PATH)
++        .with_context(|| format!("read runtime config {}", RUNTIME_CONFIG_PATH))?;
++
++    let mut enabled = false;
++    let mut mode = TeeSoftDebugMode::Patch;
++    let mut keybox_path = String::new();
++    let mut target_packages = HashSet::new();
++
++    for line in content.lines() {
++        let Some((k, v)) = line.split_once('=') else {
++            continue;
++        };
++        let value = v.trim();
++        match k.trim() {
++            "enabled" => enabled = parse_bool_setting(Some(value.to_string())),
++            "mode" => mode = parse_mode_setting(Some(value.to_string())),
++            "target_packages" => {
++                target_packages = parse_target_packages(Some(value.to_string()));
++            }
++            "keybox_path" => keybox_path = value.to_string(),
++            _ => {}
++        }
++    }
++
++    Ok(TeeSoftDebugConfig {
++        enabled,
++        mode,
++        keybox_path,
++        target_packages,
++    })
++}
++
++fn decide_action(
++    cfg: &TeeSoftDebugConfig,
++    _is_attest_key_request: bool,
++    has_original_chain: bool,
++) -> TeeSoftDebugAction {
++    if !cfg.enabled || !has_original_chain {
++        return TeeSoftDebugAction::Skip;
++    }
++
++    match cfg.mode {
++        // In Patch mode we always patch existing certificate chains.
++        // ATTEST_KEY generation is still hardware-backed for now, but its returned chain can
++        // still be patched safely when this request is not using an external attestation key.
++        TeeSoftDebugMode::Patch => TeeSoftDebugAction::PatchExistingChain,
++        TeeSoftDebugMode::Generate => TeeSoftDebugAction::GenerateSoftwareChain,
++        TeeSoftDebugMode::Auto => {
++            // Auto currently follows Patch behavior until software-generation path
++            // is fully implemented in keystore2.
++            TeeSoftDebugAction::PatchExistingChain
++        }
++    }
++}
++
++fn is_attest_key_request(params: &[KeyParameter]) -> bool {
++    params.iter().any(|p| {
++        p.tag == Tag::PURPOSE
++            && matches!(p.value, KeyParameterValue::KeyPurpose(KeyPurpose::ATTEST_KEY))
++    })
++}
++
++fn has_attestation_challenge(params: &[KeyParameter]) -> bool {
++    params.iter().any(|p| p.tag == Tag::ATTESTATION_CHALLENGE)
++}
++
++fn normalize_alias(alias: Option<&str>) -> Option<String> {
++    let value = alias.unwrap_or_default().trim();
++    if value.is_empty() { None } else { Some(value.to_string()) }
++}
++
++fn make_uid_alias_key(uid: AppUid, alias: &str) -> String {
++    format!("{}:{}", uid.0, alias)
++}
++
++pub(crate) fn mark_generated_attest_key_for_uid(
++    caller_uid: AppUid,
++    key: &KeyDescriptor,
++    creation_params: &[KeyParameter],
++    used_software_generation: bool,
++) {
++    if !is_attest_key_request(creation_params) {
++        return;
++    }
++    if key.domain != Domain::APP && key.domain != Domain::SELINUX {
++        return;
++    }
++    let Some(alias) = normalize_alias(key.alias.as_deref()) else {
++        return;
++    };
++
++    let source = if used_software_generation { "software" } else { "hardware" };
++    let record = GeneratedAttestKeyRecord { alias: alias.clone(), nspace: key.nspace, source };
++    let Ok(mut cache) = GENERATED_ATTEST_KEYS.lock() else {
++        warn!("tee soft debug: failed to lock generated-attest-key cache");
++        return;
++    };
++    let records = cache.entry(caller_uid.0).or_default();
++    if records.iter().any(|r| r.alias == alias && r.nspace == key.nspace && r.source == source) {
++        return;
++    }
++    records.push(record);
++    info!(
++        "tee soft debug: tracked ATTEST_KEY generation for uid={:?}, alias={}, nspace={}, source={}",
++        caller_uid,
++        alias,
++        key.nspace,
++        source
++    );
++}
++
++pub(crate) fn uses_tracked_attest_key_for_uid(
++    caller_uid: AppUid,
++    attest_key_descriptor: Option<&KeyDescriptor>,
++) -> bool {
++    let Some(descriptor) = attest_key_descriptor else {
++        return false;
++    };
++    let Some(alias) = normalize_alias(descriptor.alias.as_deref()) else {
++        return false;
++    };
++
++    let Ok(cache) = GENERATED_ATTEST_KEYS.lock() else {
++        warn!("tee soft debug: failed to lock generated-attest-key cache for lookup");
++        return false;
++    };
++    let Some(records) = cache.get(&caller_uid.0) else {
++        return false;
++    };
++
++    records.iter().any(|r| {
++        if descriptor.domain == Domain::APP || descriptor.domain == Domain::SELINUX {
++            r.alias == alias
++        } else {
++            r.alias == alias && r.nspace == descriptor.nspace
++        }
++    })
++}
++
++pub(crate) fn should_treat_external_attest_key_as_softdebug_for_uid(
++    caller_uid: AppUid,
++    creation_params: &[KeyParameter],
++    attest_key_descriptor: Option<&KeyDescriptor>,
++) -> bool {
++    let Some(descriptor) = attest_key_descriptor else {
++        return false;
++    };
++    if !has_attestation_challenge(creation_params) {
++        return false;
++    }
++    if normalize_alias(descriptor.alias.as_deref()).is_none() {
++        return false;
++    }
++
++    let cfg = match load_config_for_user(caller_uid.owning_user()) {
++        Ok(cfg) => cfg,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to load config while deciding external-attest soft-debug ownership for uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return false;
++        }
++    };
++    if !cfg.enabled || cfg.target_packages.is_empty() {
++        return false;
++    }
++
++    let uid_packages = match package_names_for_uid(caller_uid) {
++        Ok(v) => v,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to query packages while deciding external-attest soft-debug ownership for uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return false;
++        }
++    };
++    uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg))
++}
++
++pub(crate) fn should_force_software_generation_for_uid(
++    caller_uid: AppUid,
++    creation_params: &[KeyParameter],
++    _has_external_attestation_key: bool,
++    _uses_tracked_attest_key: bool,
++) -> bool {
++    let cfg = match load_config_for_user(caller_uid.owning_user()) {
++        Ok(cfg) => cfg,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to load config while deciding generation path for uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return false;
++        }
++    };
++
++    if !cfg.enabled || cfg.target_packages.is_empty() {
++        return false;
++    }
++
++    let uid_packages = match package_names_for_uid(caller_uid) {
++        Ok(v) => v,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to query packages while deciding generation path for uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return false;
++        }
++    };
++    let matched = uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg));
++    if !matched {
++        return false;
++    }
++
++    let has_challenge = has_attestation_challenge(creation_params);
++    if !has_challenge {
++        return false;
++    }
++
++    match cfg.mode {
++        // Keep this path limited to explicit Generate mode until full in-process
++        // software key generation is implemented.
++        TeeSoftDebugMode::Generate => true,
++        TeeSoftDebugMode::Patch | TeeSoftDebugMode::Auto => false,
++    }
++}
++
++pub(crate) fn should_prefer_local_attest_key_flow_for_uid(
++    caller_uid: AppUid,
++    creation_params: &[KeyParameter],
++    attest_key_descriptor_present: bool,
++) -> bool {
++    if !is_attest_key_request(creation_params) || attest_key_descriptor_present {
++        return false;
++    }
++
++    let cfg = match load_config_for_user(caller_uid.owning_user()) {
++        Ok(cfg) => cfg,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to load config while deciding local attest-key flow for uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return false;
++        }
++    };
++
++    if !cfg.enabled || cfg.target_packages.is_empty() {
++        return false;
++    }
++
++    let uid_packages = match package_names_for_uid(caller_uid) {
++        Ok(v) => v,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to query packages while deciding local attest-key flow for uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return false;
++        }
++    };
++
++    uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg))
++}
++
++fn track_attest_key_algorithm(uid: AppUid, alias: &str, algorithm: &str) {
++    let Ok(mut map) = TRACKED_ATTEST_KEY_ALGORITHM.lock() else {
++        warn!("tee soft debug: failed to lock tracked-attest-key algorithm map");
++        return;
++    };
++    map.insert(make_uid_alias_key(uid, alias), algorithm.to_string());
++}
++
++fn get_tracked_attest_key_algorithm(uid: AppUid, alias: &str) -> Option<String> {
++    let Ok(map) = TRACKED_ATTEST_KEY_ALGORITHM.lock() else {
++        warn!("tee soft debug: failed to lock tracked-attest-key algorithm map for lookup");
++        return None;
++    };
++    map.get(&make_uid_alias_key(uid, alias)).cloned()
++}
++
++fn track_attest_key_material(uid: AppUid, alias: &str, material_id: &str) {
++    let Ok(mut map) = TRACKED_ATTEST_KEY_MATERIAL.lock() else {
++        warn!("tee soft debug: failed to lock tracked-attest-key material map");
++        return;
++    };
++    map.insert(make_uid_alias_key(uid, alias), material_id.to_string());
++}
++
++fn get_tracked_attest_key_material(uid: AppUid, alias: &str) -> Option<String> {
++    let Ok(map) = TRACKED_ATTEST_KEY_MATERIAL.lock() else {
++        warn!("tee soft debug: failed to lock tracked-attest-key material map for lookup");
++        return None;
++    };
++    map.get(&make_uid_alias_key(uid, alias)).cloned()
++}
++
++fn track_attest_signer_state(uid: AppUid, alias: &str, state: TrackedAttestSignerState) {
++    let Ok(mut map) = TRACKED_ATTEST_SIGNERS.lock() else {
++        warn!("tee soft debug: failed to lock tracked-attest signer map");
++        return;
++    };
++    map.insert(make_uid_alias_key(uid, alias), state);
++}
++
++fn get_tracked_attest_signer_state(uid: AppUid, alias: &str) -> Option<TrackedAttestSignerState> {
++    let Ok(map) = TRACKED_ATTEST_SIGNERS.lock() else {
++        warn!("tee soft debug: failed to lock tracked-attest signer map for lookup");
++        return None;
++    };
++    map.get(&make_uid_alias_key(uid, alias)).cloned()
++}
++
++fn signer_state_from_material(material: &KeyboxMaterial) -> Option<TrackedAttestSignerState> {
++    let (Some(signer_cert), Some(signer_key)) = (material.certs.first(), material.signing_key.as_ref()) else {
++        return None;
++    };
++    Some(TrackedAttestSignerState {
++        signer_cert: signer_cert.clone(),
++        signer_key: signer_key.clone(),
++        algorithm: material.algorithm.clone(),
++    })
++}
++
++fn load_or_init_tracked_attest_signer_state(
++    uid: AppUid,
++    alias: &str,
++    cfg: &TeeSoftDebugConfig,
++) -> Option<TrackedAttestSignerState> {
++    if let Some(state) = get_tracked_attest_signer_state(uid, alias) {
++        return Some(state);
++    }
++    if cfg.keybox_path.trim().is_empty() {
++        return None;
++    }
++
++    let keybox_path = Path::new(cfg.keybox_path.trim());
++    let materials = match load_keybox_material(keybox_path) {
++        Ok(v) => v,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to load keybox while lazily initializing tracked signer state: {}: {:?}",
++                keybox_path.display(),
++                e
++            );
++            return None;
++        }
++    };
++
++    let tracked_material = get_tracked_attest_key_material(uid, alias);
++    let tracked_family = get_tracked_attest_key_algorithm(uid, alias)
++        .as_deref()
++        .and_then(|algo| normalize_algorithm_family(Some(algo)));
++
++    let selected = tracked_material
++        .as_deref()
++        .and_then(|mid| materials.iter().find(|m| material_id(m) == mid))
++        .and_then(signer_state_from_material)
++        .or_else(|| {
++            tracked_family.and_then(|family| {
++                materials
++                    .iter()
++                    .filter(|m| {
++                        normalize_algorithm_family(m.algorithm.as_deref()) == Some(family)
++                    })
++                    .find_map(signer_state_from_material)
++            })
++        })
++        .or_else(|| {
++            materials
++                .iter()
++                .filter(|m| normalize_algorithm_family(m.algorithm.as_deref()) == Some("rsa"))
++                .find_map(signer_state_from_material)
++        })
++        .or_else(|| materials.iter().find_map(signer_state_from_material));
++
++    if let Some(state) = selected {
++        track_attest_signer_state(uid, alias, state.clone());
++        return Some(state);
++    }
++    None
++}
++
++fn package_names_for_uid(uid: AppUid) -> Result<Vec<String>> {
++    let pm: Strong<dyn IPackageManagerNative> =
++        binder::get_interface("package_native").context("connect package_native")?;
++
++    let pkg_infos = pm
++        .getPackageInfoWithSigningInfoForUid(uid.0 as i32)
++        .context("get package info for uid")?
++        .unwrap_or_default();
++
++    let mut names = Vec::new();
++    for pkg_info in pkg_infos.into_iter().flatten() {
++        if !pkg_info.packageName.is_empty() {
++            names.push(pkg_info.packageName);
++        }
++    }
++    Ok(names)
++}
++
++fn upsert_integer_key_param(params: &mut Vec<KeyParameter>, tag: Tag, value: i32) {
++    if let Some(existing) = params.iter_mut().find(|p| p.tag == tag) {
++        existing.value = KeyParameterValue::Integer(value);
++    } else {
++        params.push(KeyParameter { tag, value: KeyParameterValue::Integer(value) });
++    }
++}
++
++fn remove_key_param(params: &mut Vec<KeyParameter>, tag: Tag) {
++    params.retain(|p| p.tag != tag);
++}
++
++pub(crate) fn maybe_sync_patchlevel_authorizations_for_uid(
++    caller_uid: AppUid,
++    creation_result: &KeyCreationResult,
++    key_params_for_metadata: &mut Vec<KeyParameter>,
++) {
++    let user = caller_uid.owning_user();
++    let cfg = match load_config_for_user(user) {
++        Ok(cfg) => cfg,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to load config for patchlevel authorization sync, user {:?}: {:?}",
++                user, e
++            );
++            return;
++        }
++    };
++    if !cfg.enabled || cfg.target_packages.is_empty() {
++        return;
++    }
++
++    let uid_packages = match package_names_for_uid(caller_uid) {
++        Ok(v) => v,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to query packages for patchlevel authorization sync, uid {:?}: {:?}",
++                caller_uid, e
++            );
++            return;
++        }
++    };
++    let matched = uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg));
++    if !matched {
++        return;
++    }
++
++    let Some(leaf) = creation_result.certificateChain.first() else {
++        return;
++    };
++    let (os_patchlevel, vendor_patchlevel, boot_patchlevel) =
++        extract_attestation_patchlevels(&leaf.encodedCertificate);
++    if os_patchlevel.is_none() && vendor_patchlevel.is_none() && boot_patchlevel.is_none() {
++        warn!(
++            "tee soft debug: patchlevel authorization sync skipped; attestation patchlevels unavailable for uid {:?}",
++            caller_uid
++        );
++        return;
++    }
++
++    match os_patchlevel {
++        Some(v) => upsert_integer_key_param(key_params_for_metadata, Tag::OS_PATCHLEVEL, v),
++        None => remove_key_param(key_params_for_metadata, Tag::OS_PATCHLEVEL),
++    }
++    match vendor_patchlevel {
++        Some(v) => upsert_integer_key_param(key_params_for_metadata, Tag::VENDOR_PATCHLEVEL, v),
++        None => remove_key_param(key_params_for_metadata, Tag::VENDOR_PATCHLEVEL),
++    }
++    match boot_patchlevel {
++        Some(v) => upsert_integer_key_param(key_params_for_metadata, Tag::BOOT_PATCHLEVEL, v),
++        None => remove_key_param(key_params_for_metadata, Tag::BOOT_PATCHLEVEL),
++    }
++
++    info!(
++        "tee soft debug: synchronized metadata patchlevel authorizations for uid {:?}, packages {:?}: os={:?}, vendor={:?}, boot={:?}",
++        caller_uid, uid_packages, os_patchlevel, vendor_patchlevel, boot_patchlevel
++    );
++}
++
++fn extract_tag_values<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
++    let start_tag = format!("<{tag}");
++    let end_tag = format!("</{tag}>");
++
++    let mut out = Vec::new();
++    let mut pos = 0usize;
++    while let Some(start_rel) = xml[pos..].find(&start_tag) {
++        let start = pos + start_rel;
++        // Ensure we match the exact tag boundary (e.g. "<Certificate ...>" or "<Certificate>"),
++        // not a superset tag like "<CertificateChain>".
++        let after = xml[start + start_tag.len()..].chars().next();
++        if !matches!(after, Some('>') | Some(' ') | Some('\n') | Some('\t') | Some('\r')) {
++            pos = start + start_tag.len();
++            continue;
++        }
++        let Some(gt_rel) = xml[start..].find('>') else {
++            break;
++        };
++        let body_start = start + gt_rel + 1;
++        let Some(end_rel) = xml[body_start..].find(&end_tag) else {
++            break;
++        };
++        let body_end = body_start + end_rel;
++        out.push(&xml[body_start..body_end]);
++        pos = body_end + end_tag.len();
++    }
++
++    out
++}
++
++fn pem_or_base64_to_der(raw: &str) -> Option<Vec<u8>> {
++    let cleaned = strip_xml_comments(raw);
++    let mut payload = cleaned
++        .replace("-----BEGIN CERTIFICATE-----", "")
++        .replace("-----END CERTIFICATE-----", "")
++        .replace(['\r', '\n', '\t', ' '], "");
++
++    payload = payload.trim().to_string();
++    if payload.is_empty() {
++        return None;
++    }
++
++    STANDARD.decode(payload.as_bytes()).ok()
++}
++
++fn parse_private_key_material(raw: &str) -> Option<Vec<u8>> {
++    let cleaned = strip_xml_comments(raw);
++    let trimmed = cleaned.trim();
++    if trimmed.is_empty() {
++        return None;
++    }
++
++    if trimmed.contains("-----BEGIN") {
++        return Some(trimmed.as_bytes().to_vec());
++    }
++
++    let payload = trimmed.replace(['\r', '\n', '\t', ' '], "");
++    if payload.is_empty() {
++        return None;
++    }
++    STANDARD.decode(payload.as_bytes()).ok()
++}
++
++fn strip_xml_comments(raw: &str) -> String {
++    let mut out = String::with_capacity(raw.len());
++    let mut pos = 0usize;
++    while let Some(start_rel) = raw[pos..].find("<!--") {
++        let start = pos + start_rel;
++        out.push_str(&raw[pos..start]);
++        let after_start = start + 4;
++        if let Some(end_rel) = raw[after_start..].find("-->") {
++            pos = after_start + end_rel + 3;
++        } else {
++            // Malformed comment tail: drop the rest to avoid poisoning PEM/base64 payload.
++            pos = raw.len();
++        }
++    }
++    if pos < raw.len() {
++        out.push_str(&raw[pos..]);
++    }
++    out
++}
++
++fn extract_key_blocks(xml: &str) -> Vec<&str> {
++    let mut blocks = Vec::new();
++    let mut pos = 0usize;
++    while let Some(start_rel) = xml[pos..].find("<Key") {
++        let start = pos + start_rel;
++        let after = xml[start + 4..].chars().next();
++        if !matches!(after, Some('>') | Some(' ') | Some('\n') | Some('\t') | Some('\r')) {
++            pos = start + 4;
++            continue;
++        }
++        let Some(end_rel) = xml[start..].find("</Key>") else {
++            break;
++        };
++        let end = start + end_rel + "</Key>".len();
++        blocks.push(&xml[start..end]);
++        pos = end;
++    }
++    blocks
++}
++
++fn parse_key_algorithm(block: &str) -> Option<String> {
++    let head_end = block.find('>')?;
++    let head = &block[..head_end];
++    let key = "algorithm=\"";
++    let start = head.find(key)? + key.len();
++    let remain = &head[start..];
++    let end = remain.find('"')?;
++    let value = remain[..end].trim();
++    if value.is_empty() { None } else { Some(value.to_ascii_lowercase()) }
++}
++
++fn normalize_algorithm_family(algorithm: Option<&str>) -> Option<&'static str> {
++    let algo = algorithm?;
++    let lower = algo.to_ascii_lowercase();
++    if lower.contains("rsa") {
++        Some("rsa")
++    } else if lower.contains("ec") || lower.contains("ecdsa") {
++        Some("ec")
++    } else {
++        None
++    }
++}
++
++fn parse_keybox_material_from_xml(xml: &str) -> Result<Vec<KeyboxMaterial>> {
++    let key_blocks = extract_key_blocks(xml);
++    if key_blocks.is_empty() {
++        anyhow::bail!("no <Key> entries in keybox xml");
++    }
++
++    let mut materials = Vec::new();
++    for block in key_blocks {
++        let mut certs = Vec::new();
++        for cert_text in extract_tag_values(block, "Certificate") {
++            if let Some(der) = pem_or_base64_to_der(cert_text) {
++                certs.push(der);
++            }
++        }
++        if certs.is_empty() {
++            continue;
++        }
++
++        let signing_key = extract_tag_values(block, "PrivateKey")
++            .into_iter()
++            .find_map(parse_private_key_material);
++        let mut algorithm = parse_key_algorithm(block);
++        let derived_family = certs
++            .first()
++            .and_then(|cert| certificate_public_key_family(cert))
++            .map(|family| family.to_string());
++        match (normalize_algorithm_family(algorithm.as_deref()), derived_family.as_deref()) {
++            (Some(parsed), Some(derived)) if parsed != derived => {
++                warn!(
++                    "tee soft debug: keybox algorithm tag mismatch (tag={:?}, derived_from_cert={}); overriding with derived family",
++                    algorithm,
++                    derived
++                );
++                algorithm = Some(derived.to_string());
++            }
++            (None, Some(derived)) => {
++                algorithm = Some(derived.to_string());
++            }
++            _ => {}
++        }
++        materials.push(KeyboxMaterial { certs, signing_key, algorithm });
++    }
++
++    if materials.is_empty() {
++        anyhow::bail!("no usable cert chains in keybox xml");
++    }
++    Ok(materials)
++}
++
++fn pick_plain_chain(materials: &[KeyboxMaterial]) -> Option<(Vec<Vec<u8>>, Option<String>)> {
++    let first = materials.first()?;
++    Some((first.certs.clone(), first.algorithm.clone()))
++}
++
++fn try_resign_with_material(
++    original_leaf: &[u8],
++    material: &KeyboxMaterial,
++) -> Option<Vec<Vec<u8>>> {
++    let signing_key = material.signing_key.as_ref()?;
++    let signing_cert = material.certs.first()?;
++    let resigned_leaf = resign_leaf_certificate(original_leaf, signing_cert, signing_key).ok()?;
++    let mut out = material.certs.clone();
++    out.insert(0, resigned_leaf);
++    Some(out)
++}
++
++fn material_id(material: &KeyboxMaterial) -> String {
++    let algorithm = material.algorithm.as_deref().unwrap_or("unknown");
++    let Some(first_cert) = material.certs.first() else {
++        return format!("algo={algorithm}|empty");
++    };
++    let subject = parse_subject_from_certificate(first_cert)
++        .map(|v| hex_prefix(&v, 12))
++        .unwrap_or_else(|_| "subject-parse-failed".to_string());
++    let issuer = parse_issuer_from_certificate(first_cert)
++        .map(|v| hex_prefix(&v, 12))
++        .unwrap_or_else(|_| "issuer-parse-failed".to_string());
++    format!("algo={algorithm}|subject={subject}|issuer={issuer}|len={}", first_cert.len())
++}
++
++fn validate_chain_for_keyattestation(chain: &[Vec<u8>]) -> Result<(), usize> {
++    if chain.is_empty() {
++        return Err(0);
++    }
++
++    for (i, cert) in chain.iter().enumerate() {
++        let outer_sig_family = certificate_signature_key_family(cert);
++        let tbs_sig_family = certificate_tbs_signature_key_family(cert);
++        if outer_sig_family.is_some()
++            && tbs_sig_family.is_some()
++            && outer_sig_family != tbs_sig_family
++        {
++            warn!(
++                "tee soft debug: cert self inconsistency at step {}, outer_sig_family={:?}, tbs_sig_family={:?}",
++                i,
++                outer_sig_family,
++                tbs_sig_family
++            );
++            return Err(i);
++        }
++    }
++
++    if chain.len() >= 2 {
++        for i in 0..(chain.len() - 1) {
++            let child_sig_family = certificate_signature_key_family(&chain[i]);
++            let parent_pub_family = certificate_public_key_family(&chain[i + 1]);
++            if child_sig_family.is_some()
++                && parent_pub_family.is_some()
++                && child_sig_family != parent_pub_family
++            {
++                warn!(
++                    "tee soft debug: chain family mismatch at step {}, child_sig_family={:?}, parent_pub_family={:?}",
++                    i,
++                    child_sig_family,
++                    parent_pub_family
++                );
++                return Err(i);
++            }
++            if !signature_family_compatible(&chain[i], &chain[i + 1]) {
++                return Err(i);
++            }
++            if !verify_certificate_signed_by(&chain[i], &chain[i + 1]) {
++                return Err(i);
++            }
++        }
++    }
++
++    // KeyAttestation verifies the last cert with its own public key (self-signed root).
++    let last = chain.len() - 1;
++    let root_sig_family = certificate_signature_key_family(&chain[last]);
++    let root_pub_family = certificate_public_key_family(&chain[last]);
++    if root_sig_family.is_some() && root_pub_family.is_some() && root_sig_family != root_pub_family
++    {
++        warn!(
++            "tee soft debug: root family mismatch at step {}, root_sig_family={:?}, root_pub_family={:?}",
++            last,
++            root_sig_family,
++            root_pub_family
++        );
++        return Err(last);
++    }
++    if !verify_certificate_signed_by(&chain[last], &chain[last]) {
++        return Err(last);
++    }
++
++    Ok(())
++}
++
++fn signature_family_compatible(cert: &[u8], parent: &[u8]) -> bool {
++    let cert_sig = certificate_signature_key_family(cert);
++    let parent_pub = certificate_public_key_family(parent);
++    if cert_sig.is_some() && parent_pub.is_some() && cert_sig != parent_pub {
++        return false;
++    }
++    true
++}
++
++#[derive(Clone)]
++struct CertNamePair {
++    subject: Vec<u8>,
++    issuer: Vec<u8>,
++}
++
++fn parse_name_pairs(chain: &[Vec<u8>]) -> Option<Vec<CertNamePair>> {
++    let mut out = Vec::with_capacity(chain.len());
++    for cert in chain {
++        let subject = parse_subject_from_certificate(cert).ok()?;
++        let issuer = parse_issuer_from_certificate(cert).ok()?;
++        out.push(CertNamePair { subject, issuer });
++    }
++    Some(out)
++}
++
++fn hex_prefix(bytes: &[u8], max_len: usize) -> String {
++    let mut out = String::new();
++    for b in bytes.iter().take(max_len) {
++        use std::fmt::Write as _;
++        let _ = write!(&mut out, "{:02x}", b);
++    }
++    out
++}
++
++fn chain_name_summary(chain: &[Vec<u8>]) -> Vec<String> {
++    let Some(names) = parse_name_pairs(chain) else {
++        return vec!["name-parse-failed".to_string()];
++    };
++    names
++        .iter()
++        .enumerate()
++        .map(|(i, n)| {
++            format!(
++                "#{i}:subject={},issuer={},self_issued={}",
++                hex_prefix(&n.subject, 10),
++                hex_prefix(&n.issuer, 10),
++                n.subject == n.issuer
++            )
++        })
++        .collect()
++}
++
++fn reorder_chain_like_keyattestation(chain: &[Vec<u8>]) -> Vec<Vec<u8>> {
++    if chain.len() < 2 {
++        return chain.to_vec();
++    }
++
++    let Some(names) = parse_name_pairs(chain) else {
++        // If name parsing fails, avoid mutating order unexpectedly.
++        return chain.to_vec();
++    };
++
++    // Match KeyAttestation's first pass behavior.
++    let mut okay = true;
++    let mut issuer = names[0].issuer.as_slice();
++    for name in &names {
++        if issuer == name.subject.as_slice() {
++            issuer = name.subject.as_slice();
++        } else {
++            okay = false;
++            break;
++        }
++    }
++    if okay {
++        return chain.to_vec();
++    }
++
++    let mut new_indices = Vec::new();
++    for (i, name) in names.iter().enumerate() {
++        let found = names.iter().enumerate().any(|(j, other)| j != i && other.issuer == name.subject);
++        if !found {
++            new_indices.push(i);
++        }
++    }
++    if new_indices.len() != 1 {
++        return chain.to_vec();
++    }
++
++    let mut old_indices: Vec<usize> = (0..chain.len()).collect();
++    old_indices.retain(|idx| *idx != new_indices[0]);
++
++    let mut i = 0usize;
++    while i < new_indices.len() {
++        let issuer_name = names[new_indices[i]].issuer.as_slice();
++        if let Some((pos, _)) = old_indices
++            .iter()
++            .enumerate()
++            .find(|(_, idx)| names[**idx].subject.as_slice() == issuer_name)
++        {
++            let next_idx = old_indices.remove(pos);
++            new_indices.push(next_idx);
++        }
++        i += 1;
++    }
++
++    if !old_indices.is_empty() {
++        return chain.to_vec();
++    }
++
++    new_indices.into_iter().map(|idx| chain[idx].clone()).collect()
++}
++
++fn validate_chain_in_keyattestation_view(chain: &[Vec<u8>]) -> Result<(), usize> {
++    let sorted = reorder_chain_like_keyattestation(chain);
++    validate_chain_for_keyattestation(&sorted)
++}
++
++fn keyattestation_step_summary(chain: &[Vec<u8>]) -> Vec<String> {
++    let sorted = reorder_chain_like_keyattestation(chain);
++    if sorted.is_empty() {
++        return vec!["empty-chain".to_string()];
++    }
++
++    let mut parent_idx = sorted.len() - 1;
++    let mut summary = Vec::new();
++    for i in (0..sorted.len()).rev() {
++        let ok = if signature_family_compatible(&sorted[i], &sorted[parent_idx]) {
++            verify_certificate_signed_by(&sorted[i], &sorted[parent_idx])
++        } else {
++            false
++        };
++        summary.push(format!(
++            "step cert#{i} by parent#{parent_idx}: ok={}, cert_sig={:?}, parent_pub={:?}",
++            ok,
++            certificate_signature_key_family(&sorted[i]),
++            certificate_public_key_family(&sorted[parent_idx])
++        ));
++        if i != sorted.len() - 1 {
++            parent_idx = i;
++        }
++    }
++    summary
++}
++
++fn linearize_chain_by_signature(chain: &[Vec<u8>]) -> Vec<Vec<u8>> {
++    if chain.len() < 2 {
++        return chain.to_vec();
++    }
++
++    let mut out = Vec::with_capacity(chain.len());
++    out.push(chain[0].clone());
++    let mut used = vec![false; chain.len()];
++    used[0] = true;
++    let mut current = 0usize;
++
++    loop {
++        let child = &chain[current];
++        let child_issuer = parse_issuer_from_certificate(child).ok();
++        let mut candidates: Vec<usize> = (0..chain.len())
++            .filter(|idx| !used[*idx])
++            .filter(|idx| {
++                if let Some(issuer) = child_issuer.as_ref() {
++                    parse_subject_from_certificate(&chain[*idx]).ok().as_ref() == Some(issuer)
++                } else {
++                    true
++                }
++            })
++            .collect();
++        if candidates.is_empty() {
++            break;
++        }
++
++        if child_issuer.is_none() {
++            let child_sig_family = certificate_signature_key_family(child);
++            candidates.sort_by_key(|idx| {
++                let parent_pub_family = certificate_public_key_family(&chain[*idx]);
++                if child_sig_family.is_some() && child_sig_family == parent_pub_family {
++                    0usize
++                } else {
++                    1usize
++                }
++            });
++        }
++
++        let Some(parent_idx) = candidates
++            .into_iter()
++            .find(|idx| {
++                signature_family_compatible(child, &chain[*idx])
++                    && verify_certificate_signed_by(child, &chain[*idx])
++            })
++        else {
++            break;
++        };
++        used[parent_idx] = true;
++        out.push(chain[parent_idx].clone());
++        current = parent_idx;
++
++        if signature_family_compatible(&chain[parent_idx], &chain[parent_idx])
++            && verify_certificate_signed_by(&chain[parent_idx], &chain[parent_idx])
++        {
++            break;
++        }
++    }
++
++    if out.len() >= 2 && validate_chain_for_keyattestation(&out).is_ok() {
++        out
++    } else {
++        chain.to_vec()
++    }
++}
++
++fn chain_family_summary(chain: &[Vec<u8>]) -> Vec<String> {
++    chain
++        .iter()
++        .enumerate()
++        .map(|(i, cert)| {
++            let sig = certificate_signature_key_family(cert);
++            let tbs_sig = certificate_tbs_signature_key_family(cert);
++            let pubk = certificate_public_key_family(cert);
++            format!("#{i}:sig={sig:?},tbs_sig={tbs_sig:?},pub={pubk:?}")
++        })
++        .collect()
++}
++
++fn chain_transition_score(chain: &[Vec<u8>]) -> usize {
++    let families: Vec<Option<&'static str>> =
++        chain.iter().map(|cert| certificate_signature_key_family(cert)).collect();
++    let mut transitions = 0usize;
++    let mut unknowns = 0usize;
++    for f in &families {
++        if f.is_none() {
++            unknowns += 1;
++        }
++    }
++    for pair in families.windows(2) {
++        if pair[0].is_some() && pair[1].is_some() && pair[0] != pair[1] {
++            transitions += 1;
++        }
++    }
++    transitions * 10 + unknowns
++}
++
++fn select_best_chain(
++    original_leaf: &[u8],
++    materials: &[KeyboxMaterial],
++    forced_algorithm_family: Option<&'static str>,
++) -> Option<(Vec<Vec<u8>>, Option<String>, Option<String>)> {
++    let preferred_family = forced_algorithm_family.or_else(|| certificate_signature_key_family(original_leaf));
++    if preferred_family.is_none() {
++        warn!("tee soft debug: unable to derive original leaf signature key family");
++    }
++
++    let mut best_match_chain: Option<Vec<Vec<u8>>> = None;
++    let mut best_match_algorithm: Option<String> = None;
++    let mut best_match_material_id: Option<String> = None;
++    let mut best_match_score: Option<usize> = None;
++    let mut best_other_chain: Option<Vec<Vec<u8>>> = None;
++    let mut best_other_algorithm: Option<String> = None;
++    let mut best_other_material_id: Option<String> = None;
++    let mut best_other_score: Option<usize> = None;
++
++    let mut consider_candidate =
++        |chain: Vec<Vec<u8>>, algorithm: Option<String>, material_id: Option<String>| {
++        let score = chain_transition_score(&chain);
++        let algo_family = normalize_algorithm_family(algorithm.as_deref());
++        let family_match = preferred_family.is_some() && preferred_family == algo_family;
++        if family_match {
++            let replace = match best_match_score {
++                None => true,
++                Some(current) => score < current,
++            };
++            if replace {
++                best_match_score = Some(score);
++                best_match_algorithm = algorithm;
++                best_match_material_id = material_id;
++                best_match_chain = Some(chain);
++            }
++        } else {
++            let replace = match best_other_score {
++                None => true,
++                Some(current) => score < current,
++            };
++            if replace {
++                best_other_score = Some(score);
++                best_other_algorithm = algorithm;
++                best_other_material_id = material_id;
++                best_other_chain = Some(chain);
++            }
++        }
++    };
++
++    let mut visit_material = |material: &KeyboxMaterial| {
++        let mut accepted = false;
++        let mid = material_id(material);
++        if let Some(chain) = try_resign_with_material(original_leaf, material) {
++            match validate_chain_for_keyattestation(&chain) {
++                Ok(()) => {
++                    match validate_chain_in_keyattestation_view(&chain) {
++                        Ok(()) => {
++                            accepted = true;
++                            consider_candidate(chain, material.algorithm.clone(), Some(mid.clone()))
++                        }
++                        Err(step) => {
++                            warn!(
++                                "tee soft debug: re-sign candidate failed in keyattestation sort/view at step {}, key_algorithm={:?}",
++                                step,
++                                material.algorithm
++                            );
++                        }
++                    }
++                }
++                Err(step) => {
++                    warn!(
++                        "tee soft debug: re-sign candidate chain validation failed at step {}, key_algorithm={:?}",
++                        step,
++                        material.algorithm
++                    );
++                }
++            }
++        }
++        if material.signing_key.is_some() && !accepted {
++            warn!(
++                "tee soft debug: re-sign candidate rejected, key_algorithm={:?}",
++                material.algorithm
++            );
++        }
++    };
++
++    // Prefer candidates that can successfully re-sign and self-verify in native layer.
++    let mut has_signing_key_candidate = false;
++    for material in materials.iter().filter(|m| m.signing_key.is_some()) {
++        has_signing_key_candidate = true;
++        if normalize_algorithm_family(material.algorithm.as_deref()) == preferred_family {
++            visit_material(material);
++        }
++    }
++
++    for material in materials.iter().filter(|m| m.signing_key.is_some()) {
++        let family = normalize_algorithm_family(material.algorithm.as_deref());
++        if family == preferred_family {
++            continue;
++        }
++        visit_material(material);
++    }
++    // If no key entry provides a signing key, fall back to plain keybox chain.
++    if !has_signing_key_candidate {
++        if let Some((chain, algorithm)) = pick_plain_chain(materials) {
++            match validate_chain_for_keyattestation(&chain) {
++                Ok(()) => match validate_chain_in_keyattestation_view(&chain) {
++                    Ok(()) => {
++                        let mid = materials.first().map(material_id);
++                        consider_candidate(chain, algorithm, mid)
++                    }
++                    Err(step) => {
++                        warn!(
++                            "tee soft debug: plain keybox chain failed in keyattestation sort/view at step {}, key_algorithm={:?}",
++                            step,
++                            algorithm
++                        );
++                    }
++                },
++                Err(step) => {
++                    warn!(
++                        "tee soft debug: plain keybox chain validation failed at step {}, key_algorithm={:?}",
++                        step,
++                        algorithm
++                    );
++                }
++            }
++        }
++    }
++    if let Some(chain) = best_match_chain {
++        info!(
++            "tee soft debug: selected candidate chain score={}, family_match_with_original=true",
++            best_match_score.unwrap_or_default()
++        );
++        return Some((chain, best_match_algorithm, best_match_material_id));
++    }
++
++    if let Some(chain) = best_other_chain {
++        info!(
++            "tee soft debug: selected candidate chain score={}, family_match_with_original=false",
++            best_other_score.unwrap_or_default()
++        );
++        return Some((chain, best_other_algorithm, best_other_material_id));
++    }
++
++    None
++}
++
++fn parse_keybox_material_legacy(xml: &str) -> Result<KeyboxMaterial> {
++    let mut certs = Vec::new();
++    for cert_text in extract_tag_values(xml, "Certificate") {
++        if let Some(der) = pem_or_base64_to_der(cert_text) {
++            certs.push(der);
++        }
++    }
++
++    if certs.is_empty() {
++        anyhow::bail!("no decodable <Certificate> entries in keybox xml");
++    }
++
++    let signing_key = extract_tag_values(xml, "PrivateKey")
++        .into_iter()
++        .find_map(parse_private_key_material);
++
++    let algorithm = certs
++        .first()
++        .and_then(|cert| certificate_public_key_family(cert))
++        .map(|family| family.to_string());
++    Ok(KeyboxMaterial { certs, signing_key, algorithm })
++}
++
++fn load_keybox_material(path: &Path) -> Result<Vec<KeyboxMaterial>> {
++    let xml = fs::read_to_string(path).with_context(|| format!("read keybox xml: {}", path.display()))?;
++    parse_keybox_material_from_xml(&xml).or_else(|_| parse_keybox_material_legacy(&xml).map(|m| vec![m]))
++}
++
++pub(crate) fn maybe_override_certificate_chain_for_uid(
++    caller_uid: AppUid,
++    creation_params: &[KeyParameter],
++    has_external_attestation_key: bool,
++    uses_tracked_attest_key: bool,
++    current_key_alias: Option<&str>,
++    attest_key_descriptor: Option<&KeyDescriptor>,
++    creation_result: &mut KeyCreationResult,
++) {
++    let user = caller_uid.owning_user();
++    let cfg = match load_config_for_user(user) {
++        Ok(cfg) => cfg,
++        Err(e) => {
++            warn!("tee soft debug: failed to load config for user {:?}: {:?}", user, e);
++            return;
++        }
++    };
++
++    if !cfg.enabled || cfg.target_packages.is_empty() {
++        return;
++    }
++
++    let uid_packages = match package_names_for_uid(caller_uid) {
++        Ok(v) => v,
++        Err(e) => {
++            warn!("tee soft debug: failed to query packages for uid {:?}: {:?}", caller_uid, e);
++            return;
++        }
++    };
++
++    let matched = uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg));
++    if !matched {
++        return;
++    }
++
++    if has_external_attestation_key && !uses_tracked_attest_key {
++        info!(
++            "tee soft debug: skip override because key generation used an external attestation key, uid={:?}",
++            caller_uid
++        );
++        return;
++    }
++
++    if has_external_attestation_key && uses_tracked_attest_key {
++        let alias = attest_key_descriptor.and_then(|d| normalize_alias(d.alias.as_deref()));
++        let Some(alias) = alias else {
++            info!(
++                "tee soft debug: external attestation key tracked but alias unavailable; skip override for uid={:?}",
++                caller_uid
++            );
++            return;
++        };
++        let Some(state) = load_or_init_tracked_attest_signer_state(caller_uid, &alias, &cfg) else {
++            info!(
++                "tee soft debug: external attestation key tracked but signer state missing for alias={}; skip override for uid={:?}",
++                alias, caller_uid
++            );
++            return;
++        };
++        if creation_result.certificateChain.is_empty() {
++            return;
++        }
++        let original_leaf = creation_result.certificateChain[0].encodedCertificate.clone();
++        let resigned_leaf = match resign_leaf_certificate(&original_leaf, &state.signer_cert, &state.signer_key)
++        {
++            Ok(v) => v,
++            Err(e) => {
++                warn!(
++                    "tee soft debug: tracked external attest signer failed to resign leaf for uid={:?}, alias={}, algorithm={:?}: {:?}",
++                    caller_uid, alias, state.algorithm, e
++                );
++                return;
++            }
++        };
++        if !verify_certificate_signed_by(&resigned_leaf, &state.signer_cert) {
++            warn!(
++                "tee soft debug: tracked external attest signer produced unverifiable leaf for uid={:?}, alias={}; skip override",
++                caller_uid, alias
++            );
++            return;
++        }
++        creation_result.certificateChain = vec![Certificate { encodedCertificate: resigned_leaf }];
++        info!(
++            "tee soft debug: external attestation key tracked; replaced leaf only using tracked signer for uid={:?}, alias={}, algorithm={:?}",
++            caller_uid, alias, state.algorithm
++        );
++        return;
++    }
++
++    let has_original_chain = !creation_result.certificateChain.is_empty();
++    let is_attest_key = is_attest_key_request(creation_params);
++
++    let action = decide_action(&cfg, is_attest_key, has_original_chain);
++    match action {
++        TeeSoftDebugAction::Skip => return,
++        TeeSoftDebugAction::GenerateSoftwareChain => {
++            info!(
++                "tee soft debug: software generation action requested (mode={:?}, is_attest_key={}, uid={:?}); continue with patch flow after generation",
++                cfg.mode, is_attest_key, caller_uid
++            );
++        }
++        TeeSoftDebugAction::PatchExistingChain => {}
++    }
++
++    if cfg.keybox_path.trim().is_empty() {
++        info!(
++            "tee soft debug: enabled and package matched, but no keybox configured; skip override for uid {:?}",
++            caller_uid
++        );
++        return;
++    }
++
++    let keybox_path = Path::new(cfg.keybox_path.trim());
++    let materials = match load_keybox_material(keybox_path) {
++        Ok(materials) => materials,
++        Err(e) => {
++            warn!(
++                "tee soft debug: failed to parse keybox {}: {:?}",
++                keybox_path.display(),
++                e
++            );
++            return;
++        }
++    };
++
++    let original_leaf = creation_result.certificateChain[0].encodedCertificate.clone();
++    let tracked_forced_family = attest_key_descriptor
++        .and_then(|d| normalize_alias(d.alias.as_deref()))
++        .and_then(|alias| get_tracked_attest_key_algorithm(caller_uid, &alias))
++        .as_deref()
++        .and_then(|algo| normalize_algorithm_family(Some(algo)));
++    let tracked_forced_material = attest_key_descriptor
++        .and_then(|d| normalize_alias(d.alias.as_deref()))
++        .and_then(|alias| get_tracked_attest_key_material(caller_uid, &alias));
++    let mut selected = select_best_chain(&original_leaf, &materials, tracked_forced_family);
++    if let Some(forced_mid) = tracked_forced_material.as_deref() {
++        let pinned_materials: Vec<KeyboxMaterial> = materials
++            .iter()
++            .filter(|m| material_id(m) == forced_mid)
++            .cloned()
++            .collect();
++        if !pinned_materials.is_empty() {
++            let pinned_selected = select_best_chain(&original_leaf, &pinned_materials, tracked_forced_family);
++            if pinned_selected.is_some() {
++                selected = pinned_selected;
++            }
++        }
++    }
++    if uses_tracked_attest_key {
++        if let Some((current_chain, _, _)) = selected.as_ref() {
++            if chain_transition_score(current_chain) > 0 {
++                if let Some(rsa_selected) = select_best_chain(&original_leaf, &materials, Some("rsa")) {
++                    info!(
++                        "tee soft debug: tracked external attest-key path picked mixed-family chain; switching preference to rsa-family candidate for compatibility"
++                    );
++                    selected = Some(rsa_selected);
++                }
++            }
++        }
++    }
++    if is_attest_key {
++        if let Some((current_chain, _, _)) = selected.as_ref() {
++            if chain_transition_score(current_chain) > 0 {
++                if let Some(rsa_selected) = select_best_chain(&original_leaf, &materials, Some("rsa")) {
++                    info!(
++                        "tee soft debug: ATTEST_KEY path picked mixed-family chain; switching preference to rsa-family candidate for persistent-key compatibility"
++                    );
++                    selected = Some(rsa_selected);
++                }
++            }
++        }
++    }
++    let Some((mut output_chain, selected_algorithm, selected_material)) = selected
++    else {
++        warn!("tee soft debug: no usable keybox chain selected for {}", cfg.keybox_path);
++        return;
++    };
++
++    if is_attest_key {
++        if let (Some(alias), Some(algo)) = (normalize_alias(current_key_alias), selected_algorithm.as_deref()) {
++            track_attest_key_algorithm(caller_uid, &alias, algo);
++            if let Some(mid) = selected_material.as_deref() {
++                track_attest_key_material(caller_uid, &alias, mid);
++                if let Some(material) = materials.iter().find(|m| material_id(m) == mid) {
++                    if let (Some(signer_cert), Some(signer_key)) =
++                        (material.certs.first(), material.signing_key.as_ref())
++                    {
++                        track_attest_signer_state(
++                            caller_uid,
++                            &alias,
++                            TrackedAttestSignerState {
++                                signer_cert: signer_cert.clone(),
++                                signer_key: signer_key.clone(),
++                                algorithm: material.algorithm.clone(),
++                            },
++                        );
++                    }
++                }
++            }
++            info!(
++                "tee soft debug: tracked ATTEST_KEY chain state for uid={:?}, alias={}, algorithm={:?}, material={:?}",
++                caller_uid, alias, selected_algorithm, selected_material
++            );
++        }
++
++        // For ATTEST_KEY responses, prefer returning the selected keybox native chain directly.
++        // This avoids exposing a hardware-leaf public key that may not match the software
++        // attestation-signing semantics expected by follow-up attestKeyAlias requests.
++        if let Some(mid) = selected_material.as_deref() {
++            if let Some(material) = materials.iter().find(|m| material_id(m) == mid) {
++                let native_chain = material.certs.clone();
++                if !native_chain.is_empty()
++                    && validate_chain_for_keyattestation(&native_chain).is_ok()
++                    && validate_chain_in_keyattestation_view(&native_chain).is_ok()
++                {
++                    info!(
++                        "tee soft debug: ATTEST_KEY response switched to native keybox chain for compatibility, material={}",
++                        mid
++                    );
++                    output_chain = native_chain;
++                }
++            }
++        }
++    }
++
++    let output_chain = linearize_chain_by_signature(&output_chain);
++    let chain_summary = chain_family_summary(&output_chain);
++    let chain_name_summary = chain_name_summary(&output_chain);
++    let keyattestation_steps = keyattestation_step_summary(&output_chain);
++    creation_result.certificateChain = output_chain
++        .into_iter()
++        .map(|encoded| Certificate { encodedCertificate: encoded })
++        .collect();
++
++    let algorithms: Vec<&str> = materials
++        .iter()
++        .filter_map(|m| m.algorithm.as_deref())
++        .collect();
++    info!(
++        "tee soft debug: replaced attestation chain for uid {:?}, packages {:?}, keybox_path {}, selected_algorithm {:?}, key_algorithms {:?}, chain_summary {:?}, chain_names {:?}, keyattestation_steps {:?}",
++        caller_uid,
++        uid_packages,
++        cfg.keybox_path,
++        selected_algorithm,
++        algorithms,
++        chain_summary,
++        chain_name_summary,
++        keyattestation_steps
++    );
++}
+
+project device/lineage/sepolicy/
+diff --git a/common/private/appdomain.te b/common/private/appdomain.te
+index 72760a6..de66073 100644
+--- a/common/private/appdomain.te
++++ b/common/private/appdomain.te
+@@ -1 +1,2 @@
+ get_prop(appdomain, vendor_persist_camera_prop)
++get_prop(appdomain, nhoverride_prop)
+diff --git a/common/private/property.te b/common/private/property.te
+index 1829933..4095e65 100644
+--- a/common/private/property.te
++++ b/common/private/property.te
+@@ -10,3 +10,6 @@ system_internal_prop(custom_version_prop)
+ 
+ # Recovery update
+ system_internal_prop(recovery_update_prop)
++
++# nhoverride global state
++system_public_prop(nhoverride_prop)
+diff --git a/common/private/property_contexts b/common/private/property_contexts
+index bd93f59..e738d0d 100644
+--- a/common/private/property_contexts
++++ b/common/private/property_contexts
+@@ -17,7 +17,8 @@ ro.lineage.version                     u:object_r:custom_version_prop:s0
+ ro.lineage.display.version             u:object_r:custom_version_prop:s0
+ ro.lineage.build.version               u:object_r:custom_version_prop:s0
+ ro.lineage.releasetype                 u:object_r:custom_version_prop:s0
+-ro.lineage.device                      u:object_r:custom_version_prop:s0
++ro.lineage.device                      u:object_r:custom_version_prop:s0 exact string
++sys.lineage_settings_system_version    u:object_r:custom_version_prop:s0 exact string
+ 
+ # NFC
+ persist.vendor.nfc.config_file_name    u:object_r:vendor_persist_nfc_prop:s0 exact string
+@@ -41,6 +42,9 @@ persist.vendor.recovery_update         u:object_r:recovery_update_prop:s0
+ # xtra-daemon control
+ persist.sys.xtra-daemon.enabled        u:object_r:xtra_control_prop:s0 exact bool
+ 
++# nhoverride global state
++persist.sys.nhoverride                 u:object_r:nhoverride_prop:s0 exact bool
++
+ # Screen mirroring disablement
+ persist.sysui.disable_mirroring_confirmation_dialog u:object_r:hdmi_config_prop:s0
+ 
+diff --git a/common/private/shell.te b/common/private/shell.te
+index 680ff78..89a5440 100644
+--- a/common/private/shell.te
++++ b/common/private/shell.te
+@@ -1 +1,2 @@
+ get_prop(shell, custom_version_prop)
++get_prop(shell, nhoverride_prop)
+diff --git a/common/private/keystore.te b/common/private/keystore.te
+new file mode 100644
+index 0000000..265ae73
+--- /dev/null
++++ b/common/private/keystore.te
+@@ -0,0 +1,4 @@
++# TEE soft debug support in keystore2:
++# - Read user-provided keybox XML and runtime config from /data/adbroot.
++allow keystore adbroot_data_file:dir search;
++allow keystore adbroot_data_file:file r_file_perms;
+diff --git a/common/private/tee_soft_emulate_app_access.te b/common/private/tee_soft_emulate_app_access.te
+new file mode 100644
+index 0000000..577b81b
+--- /dev/null
++++ b/common/private/tee_soft_emulate_app_access.te
+@@ -0,0 +1,9 @@
++# TEE soft emulate runtime files under /data/adbroot.
++allow platform_app adbroot_data_file:dir create_dir_perms;
++allow platform_app adbroot_data_file:file create_file_perms;
++allow system_app adbroot_data_file:dir create_dir_perms;
++allow system_app adbroot_data_file:file create_file_perms;
++
++# Keep nhoverride global switch in sync with TEE soft emulate toggle.
++set_prop(platform_app, nhoverride_prop)
++set_prop(system_app, nhoverride_prop)
