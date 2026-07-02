@@ -1,0 +1,134 @@
+From bf5c86b59dda69ae3afaf37a12bec3b58c72d38e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 10:29:19 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu] Add runtime sproof on
+ Bootloader Props
+
+Whether to merge this feature depends on how you weight between "reboot to take effect" and code intrusiveness
+
+for less code intrusiveness, check [AVIUM UI's solution](https://github.com/AviumUI/android_system_core/blob/202f54380091906fafe35681b0a68ec2fe3c1a4d/init/property_service.cpp#L1424)
+
+Change-Id: I133b7face925ac9e96e33848f48fc9c6ad5efcb7
+---
+ .../system_properties/system_properties.h     |  2 +
+ libc/system_properties/system_properties.cpp  | 62 +++++++++++++++++++
+ 2 files changed, 64 insertions(+)
+
+diff --git a/libc/system_properties/include/system_properties/system_properties.h b/libc/system_properties/include/system_properties/system_properties.h
+index ea4f339..6626c6f 100644
+--- a/libc/system_properties/include/system_properties/system_properties.h
++++ b/libc/system_properties/include/system_properties/system_properties.h
+@@ -73,6 +73,8 @@ class SystemProperties {
+ 
+  private:
+   uint32_t ReadMutablePropertyValue(const prop_info* pi, char* value);
++  bool IsNhOverrideEnabled();
++  const char* GetNhOverrideValueForName(const char* name);
+ 
+   // We don't want to use new or malloc in properties (b/31659220), and we don't want to waste a
+   // full page by using mmap(), so we set aside enough space to create any context of the three
+diff --git a/libc/system_properties/system_properties.cpp b/libc/system_properties/system_properties.cpp
+index 6924ff1..89a6e0a 100644
+--- a/libc/system_properties/system_properties.cpp
++++ b/libc/system_properties/system_properties.cpp
+@@ -32,6 +32,7 @@
+ #include <private/android_filesystem_config.h>
+ #include <stdatomic.h>
+ #include <stdlib.h>
++#include <strings.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -53,6 +54,16 @@
+ #define SERIAL_VALUE_LEN(serial) ((serial) >> 24)
+ #define APPCOMPAT_PREFIX "ro.appcompat_override."
+ 
++static constexpr const char* kNhOverrideFlagProp = "persist.sys.nhoverride";
++static constexpr const char* kNhOverrideVerifiedBootStateProp = "ro.boot.verifiedbootstate";
++static constexpr const char* kNhOverrideDeviceStateProp = "ro.boot.vbmeta.device_state";
++
++static bool IsNhOverrideTruthy(const char* value) {
++  if (value == nullptr || value[0] == '\0') return false;
++  return !strcasecmp(value, "1") || !strcasecmp(value, "true") || !strcasecmp(value, "y") ||
++         !strcasecmp(value, "yes") || !strcasecmp(value, "on");
++}
++
+ static bool is_dir(const char* pathname) {
+   struct stat info;
+   if (stat(pathname, &info) == -1) {
+@@ -212,7 +223,47 @@ uint32_t SystemProperties::ReadMutablePropertyValue(const prop_info* pi, char* v
+   return serial;
+ }
+ 
++bool SystemProperties::IsNhOverrideEnabled() {
++  if (!initialized_) return false;
++
++  prop_area* pa = contexts_->GetPropAreaForName(kNhOverrideFlagProp);
++  if (pa == nullptr) return false;
++
++  const prop_info* pi = pa->find(kNhOverrideFlagProp);
++  if (pi == nullptr) return false;
++
++  char value_buf[PROP_VALUE_MAX];
++  if (is_read_only(pi->name)) {
++    if (pi->is_long()) {
++      return IsNhOverrideTruthy(pi->long_value());
++    }
++    return IsNhOverrideTruthy(pi->value);
++  }
++
++  ReadMutablePropertyValue(pi, value_buf);
++  return IsNhOverrideTruthy(value_buf);
++}
++
++const char* SystemProperties::GetNhOverrideValueForName(const char* name) {
++  if (name == nullptr) return nullptr;
++  if (strcmp(name, kNhOverrideVerifiedBootStateProp) && strcmp(name, kNhOverrideDeviceStateProp)) {
++    return nullptr;
++  }
++  if (!IsNhOverrideEnabled()) return nullptr;
++  if (!strcmp(name, kNhOverrideVerifiedBootStateProp)) return "green";
++  if (!strcmp(name, kNhOverrideDeviceStateProp)) return "locked";
++  return nullptr;
++}
++
+ int SystemProperties::Read(const prop_info* pi, char* name, char* value) {
++  if (const char* override = GetNhOverrideValueForName(pi->name); override != nullptr) {
++    size_t len = strlcpy(value, override, PROP_VALUE_MAX);
++    if (name != nullptr) {
++      strlcpy(name, pi->name, PROP_NAME_MAX);
++    }
++    return static_cast<int>(len);
++  }
++
+   uint32_t serial = ReadMutablePropertyValue(pi, value);
+   if (name != nullptr) {
+     size_t namelen = strlcpy(name, pi->name, PROP_NAME_MAX);
+@@ -239,6 +290,12 @@ void SystemProperties::ReadCallback(const prop_info* pi,
+                                     void (*callback)(void* cookie, const char* name,
+                                                      const char* value, uint32_t serial),
+                                     void* cookie) {
++  if (const char* override = GetNhOverrideValueForName(pi->name); override != nullptr) {
++    uint32_t serial = load_const_atomic(&pi->serial, memory_order_relaxed);
++    callback(cookie, pi->name, override, serial);
++    return;
++  }
++
+   // Read only properties don't need to copy the value to a temporary buffer, since it can never
+   // change.  We use relaxed memory order on the serial load for the same reason.
+   if (is_read_only(pi->name)) {
+@@ -257,6 +314,11 @@ void SystemProperties::ReadCallback(const prop_info* pi,
+ }
+ 
+ int SystemProperties::Get(const char* name, char* value) {
++  if (const char* override = GetNhOverrideValueForName(name); override != nullptr) {
++    size_t len = strlcpy(value, override, PROP_VALUE_MAX);
++    return static_cast<int>(len);
++  }
++
+   const prop_info* pi = Find(name);
+ 
+   if (pi != nullptr) {
+-- 
+2.43.0
+

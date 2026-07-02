@@ -1,0 +1,56 @@
+From 204e9545d41c939e794b4e2b5cc33553dc9d3cf5 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 15:26:45 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu] Add sepolicy allow to read
+ prop config on runtime sproof on Bootloader Props
+
+Change-Id: I9b64946c48878513b8e0a5d03ad1f464aaae655c
+---
+ common/private/appdomain.te      | 1 +
+ common/private/property.te       | 3 +++
+ common/private/property_contexts | 3 +++
+ common/private/shell.te          | 1 +
+ 4 files changed, 8 insertions(+)
+
+diff --git a/common/private/appdomain.te b/common/private/appdomain.te
+index 72760a6..de66073 100644
+--- a/common/private/appdomain.te
++++ b/common/private/appdomain.te
+@@ -1 +1,2 @@
+ get_prop(appdomain, vendor_persist_camera_prop)
++get_prop(appdomain, nhoverride_prop)
+diff --git a/common/private/property.te b/common/private/property.te
+index 1829933..4095e65 100644
+--- a/common/private/property.te
++++ b/common/private/property.te
+@@ -10,3 +10,6 @@ system_internal_prop(custom_version_prop)
+ 
+ # Recovery update
+ system_internal_prop(recovery_update_prop)
++
++# nhoverride global state
++system_public_prop(nhoverride_prop)
+diff --git a/common/private/property_contexts b/common/private/property_contexts
+index 9bdd72f..50a7006 100644
+--- a/common/private/property_contexts
++++ b/common/private/property_contexts
+@@ -44,6 +44,9 @@ persist.vendor.recovery_update         u:object_r:recovery_update_prop:s0
+ # xtra-daemon control
+ persist.sys.xtra-daemon.enabled        u:object_r:xtra_control_prop:s0 exact bool
+ 
++# nhoverride global state
++persist.sys.nhoverride                 u:object_r:nhoverride_prop:s0 exact bool
++
+ # Screen mirroring disablement
+ persist.sysui.disable_mirroring_confirmation_dialog u:object_r:hdmi_config_prop:s0
+ 
+diff --git a/common/private/shell.te b/common/private/shell.te
+index 680ff78..89a5440 100644
+--- a/common/private/shell.te
++++ b/common/private/shell.te
+@@ -1 +1,2 @@
+ get_prop(shell, custom_version_prop)
++get_prop(shell, nhoverride_prop)
+-- 
+2.43.0
+

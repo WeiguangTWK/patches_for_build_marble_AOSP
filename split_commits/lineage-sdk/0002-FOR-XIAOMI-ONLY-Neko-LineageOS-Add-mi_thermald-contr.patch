@@ -1,0 +1,375 @@
+From 283cb2c4b37563b7674b85b37cd4db0e409ef979 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 13:09:51 +0800
+Subject: [PATCH] [FOR XIAOMI ONLY] Neko LineageOS: Add mi_thermald control UI
+
+THIS FEATURE IS STILL WORK IN PROGRESS
+
+This feature allows user to temporaryarily replace thermal profile & restart mi_thermald to achieve faster charge
+
+This is the SDK Part
+
+TODO: This feature will soon be renamed to express "temporaryarily maximum performance"
+Change-Id: Iac00991ac6e6e508be5671ee35f2709221085cd5
+---
+ .../internal/health/FastChargeController.java | 161 ++++++++++++++++--
+ .../health/HealthInterfaceService.java        |  15 ++
+ .../lineageos/health/HealthInterface.java     |  46 +++++
+ .../lineageos/health/IHealthInterface.aidl    |   3 +
+ .../lineageos/providers/LineageSettings.java  |   9 +
+ 5 files changed, 216 insertions(+), 18 deletions(-)
+
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java
+index 5bb7008..548fd7a 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java
+@@ -5,9 +5,13 @@
+ 
+ package org.lineageos.platform.internal.health;
+ 
+-import android.content.res.Resources;
++import android.content.BroadcastReceiver;
+ import android.content.ContentResolver;
++import android.content.res.Resources;
+ import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.os.BatteryManager;
+ import android.net.Uri;
+ import android.os.Handler;
+ import android.os.RemoteException;
+@@ -25,19 +29,21 @@ import vendor.lineage.health.FastChargeMode;
+ import vendor.lineage.health.IFastCharge;
+ 
+ import java.io.PrintWriter;
++import java.util.Arrays;
+ import java.util.stream.IntStream;
+ import java.util.stream.Stream;
+-import java.util.ArrayList;
+-import java.util.List;
+ 
+ public class FastChargeController extends LineageHealthFeature {
+     private final int[] mChargingSpeedValues;
+     private final ContentResolver mContentResolver;
+     private final IFastCharge mFastCharge;
++    private BroadcastReceiver mBatteryReceiver;
+ 
+     // Settings uris
+     private final Uri MODE_URI = LineageSettings.System.getUriFor(
+             LineageSettings.System.FAST_CHARGE_MODE);
++    private final Uri SESSION_MODE_URI = LineageSettings.System.getUriFor(
++            LineageSettings.System.FAST_CHARGE_SESSION_MODE);
+ 
+     public FastChargeController(Context context, Handler handler) {
+         super(context, handler);
+@@ -45,7 +51,7 @@ public class FastChargeController extends LineageHealthFeature {
+         mContentResolver = mContext.getContentResolver();
+         mFastCharge = IFastCharge.Stub.asInterface(
+                 ServiceManager.waitForDeclaredService(
+-                        IFastCharge.DESCRIPTOR + "/default"));
++                        "vendor.system.health.IFastCharge/default"));
+ 
+         Resources res = mContext.getResources();
+         mChargingSpeedValues = Stream.of(res.getStringArray(R.array.charging_speed_values))
+@@ -80,40 +86,52 @@ public class FastChargeController extends LineageHealthFeature {
+     }
+ 
+     public int getFastChargeMode() {
+-        int[] supportedFastChargeModes = getSupportedFastChargeModes();
+-        int defaultMode = supportedFastChargeModes[supportedFastChargeModes.length - 1];
++        return sanitizePersistentMode(readPersistentFastChargeMode());
++    }
+ 
+-        int mode = LineageSettings.System.getInt(mContentResolver,
+-                LineageSettings.System.FAST_CHARGE_MODE,
+-                defaultMode);
+-        if (mode != defaultMode && !ArrayUtils.contains(supportedFastChargeModes, mode)) {
+-            return defaultMode;
++    public boolean setFastChargeMode(int mode) {
++        if (!supportsPersistentFastChargeMode()) {
++            return false;
+         }
+ 
+-        return mode;
++        putInt(LineageSettings.System.FAST_CHARGE_MODE, sanitizePersistentMode(mode));
++        return true;
+     }
+ 
+-    public boolean setFastChargeMode(int mode) {
+-        putInt(LineageSettings.System.FAST_CHARGE_MODE, mode);
++    public int getSessionFastChargeMode() {
++        return sanitizeSessionMode(LineageSettings.System.getInt(mContentResolver,
++                LineageSettings.System.FAST_CHARGE_SESSION_MODE,
++                FastChargeMode.NONE));
++    }
++
++    public boolean setSessionFastChargeMode(int mode) {
++        putInt(LineageSettings.System.FAST_CHARGE_SESSION_MODE, sanitizeSessionMode(mode));
+         return true;
+     }
+ 
++    public boolean resetSessionFastChargeMode() {
++        return setSessionFastChargeMode(FastChargeMode.NONE);
++    }
++
+     @Override
+     public void onStart() {
+         if (mFastCharge == null) {
+             return;
+         }
+ 
+-        // Register setting observer
+-        registerSettings(MODE_URI);
++        resetSessionFastChargeMode();
++
++        registerSettings(MODE_URI, SESSION_MODE_URI);
++        registerBatteryReceiver();
+ 
+         handleSettingChange();
+     }
+ 
+     private void handleSettingChange() {
+         try {
+-            mFastCharge.setFastChargeMode(getFastChargeMode());
++            mFastCharge.setFastChargeMode(getEffectiveFastChargeMode());
+         } catch (Exception e) {
++            Log.w(TAG, "Failed to update fast charge mode", e);
+         }
+     }
+ 
+@@ -122,11 +140,118 @@ public class FastChargeController extends LineageHealthFeature {
+         handleSettingChange();
+     }
+ 
++    private void registerBatteryReceiver() {
++        if (mBatteryReceiver != null) {
++            mContext.unregisterReceiver(mBatteryReceiver);
++        }
++
++        mBatteryReceiver = new BroadcastReceiver() {
++            @Override
++            public void onReceive(Context context, Intent intent) {
++                handleBatteryStateChanged(intent);
++            }
++        };
++
++        IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
++        Intent stickyIntent = mContext.registerReceiver(mBatteryReceiver, filter);
++        if (stickyIntent != null) {
++            handleBatteryStateChanged(stickyIntent);
++        }
++    }
++
++    private void handleBatteryStateChanged(Intent intent) {
++        final int status = intent.getIntExtra(BatteryManager.EXTRA_STATUS,
++                BatteryManager.BATTERY_STATUS_UNKNOWN);
++
++        if (status == BatteryManager.BATTERY_STATUS_CHARGING
++                || status == BatteryManager.BATTERY_STATUS_FULL) {
++            return;
++        }
++
++        if (getSessionFastChargeMode() != FastChargeMode.NONE) {
++            Log.i(TAG, "Charge session ended, clearing fast charge session override");
++            resetSessionFastChargeMode();
++        } else {
++            handleSettingChange();
++        }
++    }
++
++    private int getEffectiveFastChargeMode() {
++        final int sessionMode = getSessionFastChargeMode();
++        return sessionMode != FastChargeMode.NONE ? sessionMode : getFastChargeMode();
++    }
++
++    private int readPersistentFastChargeMode() {
++        if (!supportsPersistentFastChargeMode()) {
++            return FastChargeMode.NONE;
++        }
++
++        final int[] supportedFastChargeModes = getSupportedFastChargeModes();
++        if (supportedFastChargeModes.length == 0) {
++            return FastChargeMode.NONE;
++        }
++
++        final int defaultMode = supportedFastChargeModes[supportedFastChargeModes.length - 1];
++        final int mode = LineageSettings.System.getInt(mContentResolver,
++                LineageSettings.System.FAST_CHARGE_MODE, defaultMode);
++        if (mode != defaultMode && !ArrayUtils.contains(supportedFastChargeModes, mode)) {
++            return defaultMode;
++        }
++
++        return mode;
++    }
++
++    private boolean supportsPersistentFastChargeMode() {
++        return getSupportedFastChargeModes().length > 1;
++    }
++
++    private int sanitizePersistentMode(int mode) {
++        if (!supportsPersistentFastChargeMode()) {
++            return FastChargeMode.NONE;
++        }
++
++        if (mode == FastChargeMode.NONE) {
++            return mode;
++        }
++
++        final int[] supportedFastChargeModes = getSupportedFastChargeModes();
++        if (supportedFastChargeModes.length == 0) {
++            return FastChargeMode.NONE;
++        }
++
++        if (ArrayUtils.contains(supportedFastChargeModes, mode)) {
++            return mode;
++        }
++
++        return supportedFastChargeModes[supportedFastChargeModes.length - 1];
++    }
++
++    private int sanitizeSessionMode(int mode) {
++        if (mode == FastChargeMode.NONE) {
++            return mode;
++        }
++
++        final int[] supportedFastChargeModes = getSupportedFastChargeModes();
++        if (supportedFastChargeModes.length == 0) {
++            return FastChargeMode.NONE;
++        }
++
++        if (ArrayUtils.contains(supportedFastChargeModes, mode)) {
++            return mode;
++        }
++
++        return supportedFastChargeModes[0];
++    }
++
+     @Override
+     public void dump(PrintWriter pw) {
+         pw.println();
+         pw.println("FastChargeController Configuration:");
+-        pw.println("  Mode: " + getFastChargeMode());
++        pw.println("  Supported Modes: " + Arrays.toString(getSupportedFastChargeModes()));
++        pw.println("  Persistent Mode Supported: " + supportsPersistentFastChargeMode());
++        pw.println("  Persistent Mode: " + getFastChargeMode());
++        pw.println("  Session Mode: " + getSessionFastChargeMode());
++        pw.println("  Effective Mode: " + getEffectiveFastChargeMode());
+         pw.println();
+     }
+ }
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java
+index cd9be6d..81506c9 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java
+@@ -181,6 +181,21 @@ public class HealthInterfaceService extends LineageSystemService {
+             return mFCC.setFastChargeMode(mode);
+         }
+ 
++        @Override
++        public int getSessionFastChargeMode() {
++            return mFCC.getSessionFastChargeMode();
++        }
++
++        @Override
++        public boolean setSessionFastChargeMode(int mode) {
++            return mFCC.setSessionFastChargeMode(mode);
++        }
++
++        @Override
++        public boolean resetSessionFastChargeMode() {
++            return mFCC.resetSessionFastChargeMode();
++        }
++
+         @Override
+         public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+             mContext.enforceCallingOrSelfPermission(Manifest.permission.DUMP, TAG);
+diff --git a/sdk/src/java/lineageos/health/HealthInterface.java b/sdk/src/java/lineageos/health/HealthInterface.java
+index 06eae35..38a6288 100644
+--- a/sdk/src/java/lineageos/health/HealthInterface.java
++++ b/sdk/src/java/lineageos/health/HealthInterface.java
+@@ -344,4 +344,50 @@ public class HealthInterface {
+ 
+         return false;
+     }
++
++    /**
++     * Gets the current session-only fast charge mode.
++     *
++     * @return current session fast charge mode
++     */
++    public int getSessionFastChargeMode() {
++        try {
++            return checkService() ? sService.getSessionFastChargeMode() : 0;
++        } catch (RemoteException e) {
++            Log.e(TAG, e.getLocalizedMessage(), e);
++        }
++
++        return 0;
++    }
++
++    /**
++     * Sets the current session-only fast charge mode.
++     *
++     * @param mode the fast charge mode override for the current charge session
++     * @return true if the session fast charge mode was set
++     */
++    public boolean setSessionFastChargeMode(int mode) {
++        try {
++            return checkService() && sService.setSessionFastChargeMode(mode);
++        } catch (RemoteException e) {
++            Log.e(TAG, e.getLocalizedMessage(), e);
++        }
++
++        return false;
++    }
++
++    /**
++     * Clears the current session-only fast charge mode.
++     *
++     * @return true if the session fast charge mode was reset
++     */
++    public boolean resetSessionFastChargeMode() {
++        try {
++            return checkService() && sService.resetSessionFastChargeMode();
++        } catch (RemoteException e) {
++            Log.e(TAG, e.getLocalizedMessage(), e);
++        }
++
++        return false;
++    }
+ }
+diff --git a/sdk/src/java/lineageos/health/IHealthInterface.aidl b/sdk/src/java/lineageos/health/IHealthInterface.aidl
+index 5991278..4ff6df4 100644
+--- a/sdk/src/java/lineageos/health/IHealthInterface.aidl
++++ b/sdk/src/java/lineageos/health/IHealthInterface.aidl
+@@ -31,4 +31,7 @@ interface IHealthInterface {
+     int[] getSupportedFastChargeModes();
+     int getFastChargeMode();
+     boolean setFastChargeMode(int mode);
++    int getSessionFastChargeMode();
++    boolean setSessionFastChargeMode(int mode);
++    boolean resetSessionFastChargeMode();
+ }
+diff --git a/sdk/src/java/lineageos/providers/LineageSettings.java b/sdk/src/java/lineageos/providers/LineageSettings.java
+index f52b422..63764ad 100644
+--- a/sdk/src/java/lineageos/providers/LineageSettings.java
++++ b/sdk/src/java/lineageos/providers/LineageSettings.java
+@@ -1419,6 +1419,15 @@ public final class LineageSettings {
+                         String.valueOf(FastChargeMode.SUPER_FAST_CHARGE),
+                 });
+ 
++        /**
++         * Session-only fast charging mode override.
++         */
++        public static final String FAST_CHARGE_SESSION_MODE = "fast_charge_session_mode";
++
++        /** @hide */
++        public static final Validator FAST_CHARGE_SESSION_MODE_VALIDATOR =
++                FAST_CHARGE_MODE_VALIDATOR;
++
+         /**
+          * Whether the battery light should be enabled (if hardware supports it)
+          * The value is boolean (1 or 0).
+-- 
+2.43.0
+

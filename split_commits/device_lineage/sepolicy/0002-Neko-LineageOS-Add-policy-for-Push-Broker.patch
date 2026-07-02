@@ -1,0 +1,51 @@
+From fe539967d79b395710ec4e11d09e3d92c89e93b1 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 1 Jul 2026 15:38:27 +0800
+Subject: [PATCH] Neko LineageOS: Add policy for Push Broker
+
+[important] Make sure you have 0001 Patch applied or you have to adapt on your own
+
+Change-Id: I2784b9aaac05108c00c6d70071bc3235515b2c8b
+---
+ common/private/service.te       | 1 +
+ common/private/service_contexts | 3 +--
+ common/private/system_server.te | 2 ++
+ 3 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/common/private/service.te b/common/private/service.te
+index 86f6e4c..d20f193 100644
+--- a/common/private/service.te
++++ b/common/private/service.te
+@@ -4,4 +4,5 @@ type lineage_health_interface_service, system_api_service, system_server_service
+ type lineage_globalactions_service, system_api_service, system_server_service, service_manager_type;
+ type lineage_livedisplay_service, system_api_service, system_server_service, service_manager_type;
+ type lineage_profile_service, system_api_service, system_server_service, service_manager_type;
++type lineage_pushbroker_service, system_api_service, system_server_service, service_manager_type;
+ type lineage_trust_service, system_api_service, system_server_service, service_manager_type;
+diff --git a/common/private/service_contexts b/common/private/service_contexts
+index cd984cb..22d6ec1 100644
+--- a/common/private/service_contexts
++++ b/common/private/service_contexts
+@@ -4,5 +4,4 @@ lineagehealth                             u:object_r:lineage_health_interface_se
+ lineagelivedisplay                        u:object_r:lineage_livedisplay_service:s0
+ lineagetrust                              u:object_r:lineage_trust_service:s0
+ profile                                   u:object_r:lineage_profile_service:s0
+-
+-adbroot_service                           u:object_r:adbroot_service:s0
++pushbroker                                u:object_r:lineage_pushbroker_service:s0
+diff --git a/common/private/system_server.te b/common/private/system_server.te
+index 9768f36..fdb6e23 100644
+--- a/common/private/system_server.te
++++ b/common/private/system_server.te
+@@ -3,6 +3,8 @@ allow system_server storage_stub_file:dir getattr;
+ # Allow SystemConfig/permission parsing to read relabeled Lineage permission XMLs.
+ allow system_server lineage_permission_file:file r_file_perms;
+ 
++add_service(system_server, lineage_pushbroker_service)
++
+ # Use HALs
+ hal_client_domain(system_server, hal_lineage_health)
+ hal_client_domain(system_server, hal_lineage_livedisplay)
+-- 
+2.43.0
+

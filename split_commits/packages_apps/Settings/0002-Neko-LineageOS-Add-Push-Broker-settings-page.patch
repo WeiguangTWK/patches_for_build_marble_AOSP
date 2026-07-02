@@ -1,0 +1,92 @@
+From c7f4e8bca341713ae7e7501e25be2cc5ffe2e53f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 1 Jul 2026 14:44:13 +0800
+Subject: [PATCH] Neko LineageOS: Add Push Broker settings page
+
+This commit only add a entrance to the page, check LineageParts for more
+
+Change-Id: Ie40cb4f065d8e8baac625206a0ef4595cd12a9a3
+---
+ AndroidManifest.xml                         | 1 +
+ res/values-zh-rCN/strings.xml               | 2 ++
+ res/values-zh-rTW/strings.xml               | 2 ++
+ res/values/strings.xml                      | 2 ++
+ res/xml/configure_notification_settings.xml | 8 +++++++-
+ 5 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index f4691b4..44b48a4 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -25,6 +25,7 @@
+     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
++    <uses-permission android:name="lineageos.permission.MANAGE_PUSH_BROKER" />
+     <uses-permission android:name="android.permission.DEVICE_POWER" />
+     <uses-permission android:name="android.permission.CHANGE_CONFIGURATION" />
+     <uses-permission android:name="android.permission.CONTROL_UI_TRACING" />
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index c5c0bad..a64bf77 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -4042,6 +4042,8 @@
+     <string name="notifications_sent_never" msgid="9081278709126812062">"永不"</string>
+     <string name="manage_notification_access_title" msgid="4154723216570646451">"读取、回复和控制通知"</string>
+     <string name="manage_notification_access_summary" msgid="2907135226478903997">"控制哪些应用和设备能够读取通知"</string>
++    <string name="third_party_notification_push_provider_title">第三方通知推送提供方</string>
++    <string name="third_party_notification_push_provider_summary">选择并管理可插拔的推送提供方</string>
+     <string name="work_profile_notification_access_blocked_summary" msgid="8643809206612366067">"已禁止访问工作资料通知"</string>
+     <string name="notification_assistant_title" msgid="5889201903272393099">"增强型通知"</string>
+     <string name="notification_assistant_summary" msgid="1957783114840908887">"接收建议的操作、回复等内容"</string>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index 4be4f16..1b4eb7d 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -4042,6 +4042,8 @@
+     <string name="notifications_sent_never" msgid="9081278709126812062">"永遠不要"</string>
+     <string name="manage_notification_access_title" msgid="4154723216570646451">"閱讀、回覆及控制通知"</string>
+     <string name="manage_notification_access_summary" msgid="2907135226478903997">"管理可讀取通知的應用程式和裝置"</string>
++    <string name="third_party_notification_push_provider_title">第三方通知推送提供方</string>
++    <string name="third_party_notification_push_provider_summary">選擇並管理可插拔的推送提供方</string>
+     <string name="work_profile_notification_access_blocked_summary" msgid="8643809206612366067">"管理員已禁止存取工作資料夾通知"</string>
+     <string name="notification_assistant_title" msgid="5889201903272393099">"進階通知"</string>
+     <string name="notification_assistant_summary" msgid="1957783114840908887">"接收建議的操作、回覆等內容"</string>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 1984c9b..61408fa 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -9768,6 +9768,8 @@
+     <!-- Summary of Notification Assistant provided features [CHAR LIMIT=NONE]-->
+     <string name="notification_assistant_summary">Get suggested actions, replies, and more</string>
+ 
++    <string name="third_party_notification_push_provider_title">Third-party notification push provider</string>
++    <string name="third_party_notification_push_provider_summary">Choose and manage a pluggable push provider</string>
+     <!-- Label for no NotificationAssistantService [CHAR_LIMIT=NONE] -->
+     <string name="no_notification_assistant">None</string>
+ 
+diff --git a/res/xml/configure_notification_settings.xml b/res/xml/configure_notification_settings.xml
+index 159656c..23394cb 100644
+--- a/res/xml/configure_notification_settings.xml
++++ b/res/xml/configure_notification_settings.xml
+@@ -233,10 +233,16 @@
+             android:summary="@string/notification_assistant_summary"
+             settings:controller="com.android.settings.notification.NotificationAssistantPreferenceController"/>
+ 
++        <lineageos.preference.LineagePartsPreference
++            android:key="third_party_notification_push_provider"
++            android:order="30"
++            android:title="@string/third_party_notification_push_provider_title"
++            android:summary="@string/third_party_notification_push_provider_summary" />
++
+         <!-- Heads up -->
+         <lineageos.preference.GlobalSettingSwitchPreference
+             android:key="heads_up_notifications_enabled"
+-            android:order="30"
++            android:order="31"
+             android:title="@string/heads_up_notifications_enabled_title"
+             android:summary="@string/heads_up_notifications_enabled_summary" />
+ 
+-- 
+2.43.0
+

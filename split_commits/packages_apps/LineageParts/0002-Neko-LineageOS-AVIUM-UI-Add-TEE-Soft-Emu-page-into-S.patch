@@ -1,0 +1,931 @@
+From f70a73c2643cec88591b326d6aaeeaca1a744383 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 1 Jul 2026 17:01:39 +0800
+Subject: [PATCH] Neko LineageOS & AVIUM UI: Add TEE Soft Emu page into
+ Settings
+
+Change-Id: I886bc3a666b8acc91e19d0ac22637f6af071e12a
+---
+ AndroidManifest.xml                           |  33 +
+ res/values-zh-rCN/strings.xml                 |  21 +
+ res/values-zh-rTW/strings.xml                 |  21 +
+ res/values/arrays.xml                         |  13 +
+ res/values/strings.xml                        |  24 +
+ res/xml/parts_catalog.xml                     |   6 +
+ res/xml/tee_soft_debug_settings.xml           |  45 ++
+ .../teedebug/TeeSoftDebugSettings.java        | 570 ++++++++++++++++++
+ .../widget/PackageListAdapter.java            |  46 +-
+ 9 files changed, 775 insertions(+), 4 deletions(-)
+ create mode 100644 res/xml/tee_soft_debug_settings.xml
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 67dd1f9..daa68bb 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -167,6 +167,39 @@
+                 android:resource="@string/summary_empty" />
+         </activity-alias>
+ 
++
++        <!-- TEE soft debug settings (System category) -->
++        <activity-alias
++            android:name=".teedebug.TeeSoftDebugSettings"
++            android:exported="true"
++            android:label="@string/tee_soft_debug_title"
++            android:targetActivity="PartsActivity">
++            <intent-filter>
++                <action android:name="com.android.settings.action.IA_SETTINGS" />
++                <action android:name="org.lineageos.lineageparts.TEE_SOFT_DEBUG_SETTINGS" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++
++            <meta-data
++                android:name="com.android.settings.category"
++                android:value="com.android.settings.category.ia.system" />
++            <meta-data
++                android:name="com.android.settings.icon"
++                android:resource="@drawable/ic_add_24dp" />
++            <meta-data
++                android:name="com.android.settings.icon_tintable"
++                android:value="true" />
++            <meta-data
++                android:name="com.android.settings.order"
++                android:value="-255" />
++            <meta-data
++                android:name="com.android.settings.profile"
++                android:value="primary_profile_only" />
++            <meta-data
++                android:name="com.android.settings.summary"
++                android:resource="@string/tee_soft_debug_summary" />
++        </activity-alias>
++
+         <activity android:name=".gestures.KeyHandler" />
+ 
+         <!-- Profiles settings (System category) -->
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index 27a2f0c..f290fad 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -540,4 +540,25 @@
+     <string name="sms_security_check_limit_summary">应用在 1 分钟内发送不超过 %s 条短信无需确认</string>
+     <string name="sms_security_check_limit_summary_none">应用在发送任何短信前必须获得您的确认</string>
+     <string name="sms_security_check_limit_always_confirm">始终确认</string>
++    <string name="tee_soft_debug_title">TEE 软模拟</string>
++    <string name="tee_soft_debug_summary">对指定App开启KeyAttestation模拟</string>
++    <string name="tee_soft_debug_enable_title">启用 TEE 软模拟</string>
++    <string name="tee_soft_debug_mode_title">运行模式</string>
++    <string name="tee_soft_debug_mode_patch">修补</string>
++    <string name="tee_soft_debug_mode_auto">自动</string>
++    <string name="tee_soft_debug_mode_generate">生成</string>
++    <string name="tee_soft_debug_keybox_path_title">自定义 keybox XML 路径</string>
++    <string name="tee_soft_debug_keybox_path_summary">尚未导入 keybox。点按以选择用于证明调试的 keybox.xml</string>
++    <string name="tee_soft_debug_keybox_pick_success">Keybox 已复制：%1$s</string>
++    <string name="tee_soft_debug_keybox_pick_failed">无法导入所选 keybox XML</string>
++    <string name="tee_soft_debug_applications_title">目标应用</string>
++    <string name="tee_soft_debug_show_system_apps_title">显示系统应用</string>
++    <string name="tee_soft_debug_show_system_apps_summary">在应用选择器中包含预装系统软件</string>
++    <string name="tee_soft_debug_applications_empty">尚未选择目标应用。点按“添加”以加入应用。</string>
++    <string name="tee_soft_debug_remove_app_message">将 %1$s 从 TEE 软模拟目标中移除？</string>
++    <string name="tee_soft_debug_enabled_no_apps">已启用（未选择应用）</string>
++    <string name="tee_soft_debug_enabled_no_keybox">已启用（未导入 keybox）</string>
++    <plurals name="tee_soft_debug_enabled_with_apps">
++        <item quantity="other">已为 %d 个应用启用</item>
++    </plurals>
+ </resources>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index c70692c..6220206 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -527,4 +527,25 @@
+     <string name="sms_security_check_limit_summary">在使用者認可之前，應用程式在 1 分鐘內只能傳送 %s 則訊息</string>
+     <string name="sms_security_check_limit_summary_none">未經確認的應用程式不允許傳送任何訊息</string>
+     <string name="sms_security_check_limit_always_confirm">一律確認</string>
++    <string name="tee_soft_debug_title">TEE 軟模擬</string>
++    <string name="tee_soft_debug_summary">依應用程式控制證明模擬與 keybox 覆寫</string>
++    <string name="tee_soft_debug_enable_title">啟用 TEE 軟模擬</string>
++    <string name="tee_soft_debug_mode_title">操作模式</string>
++    <string name="tee_soft_debug_mode_patch">修補</string>
++    <string name="tee_soft_debug_mode_auto">自動</string>
++    <string name="tee_soft_debug_mode_generate">產生</string>
++    <string name="tee_soft_debug_keybox_path_title">自訂 keybox XML 路徑</string>
++    <string name="tee_soft_debug_keybox_path_summary">尚未匯入 keybox。點一下以選擇用於證明偵錯的 keybox.xml</string>
++    <string name="tee_soft_debug_keybox_pick_success">Keybox 已複製：%1$s</string>
++    <string name="tee_soft_debug_keybox_pick_failed">無法匯入所選的 keybox XML</string>
++    <string name="tee_soft_debug_applications_title">目標應用程式</string>
++    <string name="tee_soft_debug_show_system_apps_title">顯示系統應用程式</string>
++    <string name="tee_soft_debug_show_system_apps_summary">在應用程式選擇器中包含預載系統軟體</string>
++    <string name="tee_soft_debug_applications_empty">尚未選擇目標應用程式。點一下「新增」即可加入。</string>
++    <string name="tee_soft_debug_remove_app_message">要將 %1$s 從 TEE 軟模擬目標中移除嗎？</string>
++    <string name="tee_soft_debug_enabled_no_apps">已啟用（未選擇應用程式）</string>
++    <string name="tee_soft_debug_enabled_no_keybox">已啟用（未匯入 keybox）</string>
++    <plurals name="tee_soft_debug_enabled_with_apps">
++        <item quantity="other">已為 %d 個應用程式啟用</item>
++    </plurals>
+ </resources>
+diff --git a/res/values/arrays.xml b/res/values/arrays.xml
+index fb22fc6..af8ae6b 100644
+--- a/res/values/arrays.xml
++++ b/res/values/arrays.xml
+@@ -507,4 +507,17 @@
+         <item>1</item>
+         <item>0</item>
+     </string-array>
++
++    <!-- TEE soft debug -->
++    <string-array name="tee_soft_debug_mode_entries" translatable="false">
++        <item>@string/tee_soft_debug_mode_patch</item>
++        <item>@string/tee_soft_debug_mode_auto</item>
++        <item>@string/tee_soft_debug_mode_generate</item>
++    </string-array>
++
++    <string-array name="tee_soft_debug_mode_values" translatable="false">
++        <item>patch</item>
++        <item>auto</item>
++        <item>generate</item>
++    </string-array>
+ </resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index a4aa858..cf67699 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -741,4 +741,28 @@
+     <string name="sms_security_check_limit_summary">Apps can send %s messages in 1 minute before requiring confirmation</string>
+     <string name="sms_security_check_limit_summary_none">Apps are not allowed to send any messages without confirmation</string>
+     <string name="sms_security_check_limit_always_confirm">Always confirm</string>
++
++    <!-- TEE soft emulate -->
++    <string name="tee_soft_debug_title">TEE Soft Emulate</string>
++    <string name="tee_soft_debug_summary">Per-app attestation emulation controls and keybox override</string>
++    <string name="tee_soft_debug_enable_title">Enable TEE Soft Emulate</string>
++    <string name="tee_soft_debug_mode_title">Operation mode</string>
++    <string name="tee_soft_debug_mode_patch">Patch</string>
++    <string name="tee_soft_debug_mode_auto">Auto</string>
++    <string name="tee_soft_debug_mode_generate">Generate</string>
++    <string name="tee_soft_debug_keybox_path_title">Custom keybox XML path</string>
++    <string name="tee_soft_debug_keybox_path_summary">No keybox imported. Tap to choose keybox.xml for attestation debugging</string>
++    <string name="tee_soft_debug_keybox_pick_success">Keybox copied: %1$s</string>
++    <string name="tee_soft_debug_keybox_pick_failed">Unable to import selected keybox XML</string>
++    <string name="tee_soft_debug_applications_title">Target applications</string>
++    <string name="tee_soft_debug_show_system_apps_title">Show system apps</string>
++    <string name="tee_soft_debug_show_system_apps_summary">Include preinstalled system software in the app picker</string>
++    <string name="tee_soft_debug_applications_empty">No target apps selected. Tap Add to include one.</string>
++    <string name="tee_soft_debug_remove_app_message">Remove %1$s from TEE Soft Emulate targets?</string>
++    <string name="tee_soft_debug_enabled_no_apps">Enabled (no apps selected)</string>
++    <string name="tee_soft_debug_enabled_no_keybox">Enabled (no keybox imported)</string>
++    <plurals name="tee_soft_debug_enabled_with_apps">
++        <item quantity="one">Enabled for %d app</item>
++        <item quantity="other">Enabled for %d apps</item>
++    </plurals>
+ </resources>
+diff --git a/res/xml/parts_catalog.xml b/res/xml/parts_catalog.xml
+index 71a7fd0..ef1a159 100644
+--- a/res/xml/parts_catalog.xml
++++ b/res/xml/parts_catalog.xml
+@@ -33,6 +33,12 @@
+           android:fragment="org.lineageos.lineageparts.input.ButtonSettings"
+           lineage:xmlRes="@xml/button_settings" />
+ 
++    <part android:key="tee_soft_debug"
++          android:title="@string/tee_soft_debug_title"
++          android:summary="@string/tee_soft_debug_summary"
++          android:fragment="org.lineageos.lineageparts.teedebug.TeeSoftDebugSettings"
++          lineage:xmlRes="@xml/tee_soft_debug_settings" />
++
+     <part android:key="contributors"
+           android:title="@string/contributors_cloud_fragment_title"
+           android:fragment="org.lineageos.lineageparts.contributors.ContributorsCloudFragment"
+diff --git a/res/xml/tee_soft_debug_settings.xml b/res/xml/tee_soft_debug_settings.xml
+new file mode 100644
+index 0000000..49b07f3
+--- /dev/null
++++ b/res/xml/tee_soft_debug_settings.xml
+@@ -0,0 +1,45 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 Neko LineageOS & AVIUM UI
++     SPDX-License-Identifier: Apache-2.0
++-->
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    android:key="tee_soft_debug"
++    android:title="@string/tee_soft_debug_title">
++
++    <androidx.preference.SwitchPreferenceCompat
++        android:key="tee_soft_debug_enabled"
++        android:title="@string/tee_soft_debug_enable_title" />
++
++    <ListPreference
++        android:key="tee_soft_debug_mode"
++        android:title="@string/tee_soft_debug_mode_title"
++        android:entries="@array/tee_soft_debug_mode_entries"
++        android:entryValues="@array/tee_soft_debug_mode_values"
++        android:defaultValue="patch"
++        android:dependency="tee_soft_debug_enabled" />
++
++    <Preference
++        android:key="tee_soft_debug_keybox_path"
++        android:title="@string/tee_soft_debug_keybox_path_title"
++        android:summary="@string/tee_soft_debug_keybox_path_summary"
++        android:dependency="tee_soft_debug_enabled" />
++
++    <PreferenceCategory
++        android:key="tee_soft_debug_applications"
++        android:title="@string/tee_soft_debug_applications_title"
++        android:dependency="tee_soft_debug_enabled">
++
++        <androidx.preference.SwitchPreferenceCompat
++            android:key="tee_soft_debug_show_system_apps"
++            android:title="@string/tee_soft_debug_show_system_apps_title"
++            android:summary="@string/tee_soft_debug_show_system_apps_summary" />
++
++        <Preference
++            android:key="tee_soft_debug_add_app"
++            android:title="@string/add"
++            android:icon="@drawable/ic_add_24dp" />
++
++    </PreferenceCategory>
++
++</PreferenceScreen>
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+new file mode 100644
+index 0000000..5fea96c
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+@@ -0,0 +1,570 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Neko LineageOS & AVIUM UI
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package org.lineageos.lineageparts.teedebug;
++
++import android.app.Activity;
++import android.app.Dialog;
++import android.content.ContentResolver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageManager;
++import android.net.Uri;
++import android.os.SystemProperties;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.text.TextUtils;
++import android.util.ArraySet;
++import android.util.Log;
++import android.widget.ListView;
++import android.widget.Toast;
++
++import androidx.activity.result.ActivityResultLauncher;
++import androidx.activity.result.contract.ActivityResultContracts;
++import androidx.appcompat.app.AlertDialog;
++import androidx.preference.ListPreference;
++import androidx.preference.Preference;
++import androidx.preference.PreferenceGroup;
++import androidx.preference.PreferenceScreen;
++import androidx.preference.SwitchPreferenceCompat;
++
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++import org.lineageos.lineageparts.search.BaseSearchIndexProvider;
++import org.lineageos.lineageparts.search.Searchable;
++import org.lineageos.lineageparts.widget.PackageListAdapter;
++import org.lineageos.lineageparts.widget.PackageListAdapter.PackageItem;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
++        Preference.OnPreferenceChangeListener, Searchable {
++    private static final String TAG = "TeeSoftDebugSettings";
++
++    private static final String KEY_ENABLED = "tee_soft_debug_enabled";
++    private static final String KEY_MODE = "tee_soft_debug_mode";
++    private static final String KEY_KEYBOX_PATH = "tee_soft_debug_keybox_path";
++    private static final String KEY_APPLICATIONS = "tee_soft_debug_applications";
++    private static final String KEY_SHOW_SYSTEM_APPS = "tee_soft_debug_show_system_apps";
++    private static final String KEY_ADD_APP = "tee_soft_debug_add_app";
++    private static final String MODE_PATCH = "patch";
++    private static final String MODE_AUTO = "auto";
++    private static final String MODE_GENERATE = "generate";
++
++    private static final int DIALOG_ADD_APPS = 0;
++    private static final String KEYBOX_STORE_DIR = "/data/adbroot/tee_soft_debug";
++    private static final String KEYBOX_STORE_FILE = "keybox.xml";
++    private static final String RUNTIME_CONFIG_FILE = "config.conf";
++    private static final String PROP_NH_OVERRIDE = "persist.sys.nhoverride";
++    private static final int MODE_DIR_WORLD_RX_OWNER_W = 0755;
++    private static final int MODE_FILE_WORLD_R_OWNER_W = 0644;
++
++    private SwitchPreferenceCompat mEnabledPref;
++    private ListPreference mModePref;
++    private Preference mKeyboxPathPref;
++    private PreferenceGroup mApplicationsPrefList;
++    private SwitchPreferenceCompat mShowSystemAppsPref;
++    private PackageListAdapter mPackageAdapter;
++
++    private boolean mEnabled;
++    private String mMode = MODE_PATCH;
++    private String mKeyboxPath = "";
++    private boolean mShowSystemApps = false;
++    private final Set<String> mTargetPackages = new ArraySet<>();
++    private final ActivityResultLauncher<Intent> mDocumentPickerLauncher =
++            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
++                    result -> {
++                        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
++                            return;
++                        }
++                        final Uri uri = result.getData().getData();
++                        if (uri == null) {
++                            return;
++                        }
++                        onKeyboxSelected(uri);
++                    });
++
++    @Override
++    public void onActivityCreated(android.os.Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++
++        addPreferencesFromResource(R.xml.tee_soft_debug_settings);
++        if (requireActivity().getActionBar() != null) {
++            requireActivity().getActionBar().setTitle(R.string.tee_soft_debug_title);
++        }
++
++        final PreferenceScreen prefSet = getPreferenceScreen();
++
++        mEnabledPref = prefSet.findPreference(KEY_ENABLED);
++        mEnabledPref.setPersistent(false);
++        mEnabledPref.setOnPreferenceChangeListener(this);
++
++        mModePref = prefSet.findPreference(KEY_MODE);
++        mModePref.setPersistent(false);
++        mModePref.setOnPreferenceChangeListener(this);
++
++        mKeyboxPathPref = prefSet.findPreference(KEY_KEYBOX_PATH);
++        mKeyboxPathPref.setOnPreferenceClickListener(pref -> {
++            launchDocumentPicker();
++            return true;
++        });
++
++        mApplicationsPrefList = prefSet.findPreference(KEY_APPLICATIONS);
++        mApplicationsPrefList.setOrderingAsAdded(false);
++        mShowSystemAppsPref = prefSet.findPreference(KEY_SHOW_SYSTEM_APPS);
++        mShowSystemAppsPref.setPersistent(false);
++        mShowSystemAppsPref.setOnPreferenceChangeListener(this);
++
++        mPackageAdapter = new PackageListAdapter(getActivity());
++
++        final Preference addPreference = prefSet.findPreference(KEY_ADD_APP);
++        addPreference.setOnPreferenceClickListener(preference -> {
++            showDialog(DIALOG_ADD_APPS);
++            return true;
++        });
++
++        loadRuntimeConfigIntoState();
++        applyStateToUi();
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        loadRuntimeConfigIntoState();
++        applyStateToUi();
++    }
++
++    @Override
++    public boolean onPreferenceChange(Preference preference, Object newValue) {
++        if (preference == mEnabledPref) {
++            mEnabled = (Boolean) newValue;
++            persistRuntimeConfig();
++            refreshKeyboxPathSummary();
++            return true;
++        }
++        if (preference == mModePref) {
++            mMode = normalizeMode(String.valueOf(newValue));
++            mModePref.setValue(mMode);
++            persistRuntimeConfig();
++            refreshModeSummary();
++            return true;
++        }
++        if (preference == mShowSystemAppsPref) {
++            mShowSystemApps = (Boolean) newValue;
++            mPackageAdapter.setIncludeSystemApps(mShowSystemApps);
++            persistRuntimeConfig();
++            return true;
++        }
++        return false;
++    }
++
++    @Override
++    public Dialog onCreateDialog(int id) {
++        if (id != DIALOG_ADD_APPS) {
++            return null;
++        }
++
++        final AlertDialog.Builder builder = new AlertDialog.Builder(requireActivity());
++        final ListView list = new ListView(requireActivity());
++        list.setAdapter(mPackageAdapter);
++        list.setDivider(null);
++
++        builder.setTitle(R.string.choose_app);
++        builder.setView(list);
++
++        final Dialog dialog = builder.create();
++        list.setOnItemClickListener((parent, view, position, itemId) -> {
++            final PackageItem info = (PackageItem) parent.getItemAtPosition(position);
++            addTargetPackage(info.packageName);
++            dialog.dismiss();
++        });
++        return dialog;
++    }
++
++    private void applyStateToUi() {
++        mEnabledPref.setChecked(mEnabled);
++        mModePref.setValue(mMode);
++        mShowSystemAppsPref.setChecked(mShowSystemApps);
++        mPackageAdapter.setIncludeSystemApps(mShowSystemApps);
++        refreshModeSummary();
++        refreshKeyboxPathSummary();
++        refreshTargetApplicationPrefs();
++    }
++
++    private void refreshModeSummary() {
++        final CharSequence modeEntry = mModePref.getEntry();
++        if (!TextUtils.isEmpty(modeEntry)) {
++            mModePref.setSummary(modeEntry);
++        }
++    }
++
++    private void refreshKeyboxPathSummary() {
++        if (TextUtils.isEmpty(mKeyboxPath)) {
++            mKeyboxPathPref.setSummary(getString(R.string.tee_soft_debug_keybox_path_summary));
++        } else {
++            mKeyboxPathPref.setSummary(mKeyboxPath);
++        }
++    }
++
++    private void refreshTargetApplicationPrefs() {
++        for (int i = 0; i < mApplicationsPrefList.getPreferenceCount();) {
++            final Preference pref = mApplicationsPrefList.getPreference(i);
++            if (KEY_ADD_APP.equals(pref.getKey()) || KEY_SHOW_SYSTEM_APPS.equals(pref.getKey())) {
++                i++;
++                continue;
++            }
++            mApplicationsPrefList.removePreference(pref);
++        }
++
++        final PackageManager pm = getPackageManager();
++        final List<String> sortedPkgs = new ArrayList<>(mTargetPackages);
++        sortedPkgs.sort(String::compareToIgnoreCase);
++
++        for (String packageName : sortedPkgs) {
++            final Preference pref = new Preference(requireContext());
++            pref.setKey(packageName);
++            pref.setSummary(packageName);
++            pref.setPersistent(false);
++
++            try {
++                final ApplicationInfo info = pm.getApplicationInfo(packageName,
++                        PackageManager.ApplicationInfoFlags.of(0));
++                pref.setTitle(info.loadLabel(pm));
++                pref.setIcon(info.loadIcon(pm));
++            } catch (PackageManager.NameNotFoundException e) {
++                pref.setTitle(packageName);
++            }
++
++            pref.setOnPreferenceClickListener(clicked -> {
++                confirmRemoveTargetPackage(packageName);
++                return true;
++            });
++            mApplicationsPrefList.addPreference(pref);
++        }
++
++        maybeShowEmptyHint();
++        mPackageAdapter.setExcludedPackages(new HashSet<>(mTargetPackages));
++    }
++
++    private void maybeShowEmptyHint() {
++        if (mApplicationsPrefList.getPreferenceCount() == 2) {
++            final Preference hint = new Preference(requireContext());
++            hint.setSummary(R.string.tee_soft_debug_applications_empty);
++            hint.setEnabled(false);
++            mApplicationsPrefList.addPreference(hint);
++        }
++    }
++
++    private void addTargetPackage(String packageName) {
++        if (mTargetPackages.add(packageName)) {
++            persistRuntimeConfig();
++            refreshTargetApplicationPrefs();
++        }
++    }
++
++    private void removeTargetPackage(String packageName) {
++        if (mTargetPackages.remove(packageName)) {
++            persistRuntimeConfig();
++            refreshTargetApplicationPrefs();
++        }
++    }
++
++    private void confirmRemoveTargetPackage(String packageName) {
++        new AlertDialog.Builder(requireActivity())
++                .setTitle(R.string.dialog_delete_title)
++                .setMessage(getString(R.string.tee_soft_debug_remove_app_message, packageName))
++                .setPositiveButton(android.R.string.ok,
++                        (dialog, which) -> removeTargetPackage(packageName))
++                .setNegativeButton(android.R.string.cancel, null)
++                .show();
++    }
++
++    private void launchDocumentPicker() {
++        final Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++        intent.addCategory(Intent.CATEGORY_OPENABLE);
++        intent.setType("text/xml");
++        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
++        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
++        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"text/xml", "application/xml"});
++        mDocumentPickerLauncher.launch(intent);
++    }
++
++    private void onKeyboxSelected(Uri uri) {
++        try {
++            final int takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION;
++            requireActivity().getContentResolver().takePersistableUriPermission(uri, takeFlags);
++        } catch (SecurityException e) {
++            Log.w(TAG, "Unable to persist URI permission for " + uri, e);
++        }
++
++        try {
++            final String keyboxXml = readTextFromUri(uri);
++            if (TextUtils.isEmpty(keyboxXml)) {
++                Log.e(TAG, "Selected keybox XML is empty.");
++                Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
++                        Toast.LENGTH_LONG).show();
++                return;
++            }
++
++            final String copiedPath = copyKeyboxToDataDir(uri);
++            if (TextUtils.isEmpty(copiedPath)) {
++                Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
++                        Toast.LENGTH_LONG).show();
++                return;
++            }
++
++            mKeyboxPath = copiedPath;
++            persistRuntimeConfig();
++            refreshKeyboxPathSummary();
++            Toast.makeText(requireContext(),
++                    getString(R.string.tee_soft_debug_keybox_pick_success, copiedPath),
++                    Toast.LENGTH_LONG).show();
++        } catch (IOException e) {
++            Log.e(TAG, "Failed to import keybox XML from URI: " + uri, e);
++            Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
++                    Toast.LENGTH_LONG).show();
++        }
++    }
++
++    private String copyKeyboxToDataDir(Uri uri) throws IOException {
++        final ContentResolver resolver = requireActivity().getContentResolver();
++        final File targetDir = new File(KEYBOX_STORE_DIR);
++        if (!targetDir.exists() && !targetDir.mkdirs()) {
++            Log.w(TAG, "Unable to create keybox dir: " + targetDir);
++            return null;
++        }
++        ensurePathPermissions(targetDir.getAbsolutePath(), MODE_DIR_WORLD_RX_OWNER_W);
++
++        final File target = new File(targetDir, KEYBOX_STORE_FILE);
++        try (InputStream in = resolver.openInputStream(uri);
++             FileOutputStream out = new FileOutputStream(target, false)) {
++            if (in == null) {
++                return null;
++            }
++            final byte[] buffer = new byte[8192];
++            int read;
++            while ((read = in.read(buffer)) != -1) {
++                out.write(buffer, 0, read);
++            }
++            out.flush();
++        }
++        ensurePathPermissions(target.getAbsolutePath(), MODE_FILE_WORLD_R_OWNER_W);
++        return target.getAbsolutePath();
++    }
++
++    private String readTextFromUri(Uri uri) throws IOException {
++        final ContentResolver resolver = requireActivity().getContentResolver();
++        try (InputStream in = resolver.openInputStream(uri)) {
++            if (in == null) {
++                return null;
++            }
++            final byte[] data = in.readAllBytes();
++            return new String(data, StandardCharsets.UTF_8);
++        }
++    }
++
++    private void loadRuntimeConfigIntoState() {
++        mEnabled = false;
++        mMode = MODE_PATCH;
++        mKeyboxPath = "";
++        mShowSystemApps = false;
++        mTargetPackages.clear();
++
++        final File config = new File(KEYBOX_STORE_DIR, RUNTIME_CONFIG_FILE);
++        if (!config.exists()) {
++            return;
++        }
++
++        final String content;
++        try (InputStream in = new FileInputStream(config)) {
++            final byte[] data = in.readAllBytes();
++            content = new String(data, StandardCharsets.UTF_8);
++        } catch (IOException e) {
++            Log.w(TAG, "Failed to read runtime config: " + config, e);
++            return;
++        }
++
++        for (String line : content.split("\\R")) {
++            final int sep = line.indexOf('=');
++            if (sep <= 0) {
++                continue;
++            }
++            final String key = line.substring(0, sep).trim();
++            final String value = line.substring(sep + 1).trim();
++            switch (key) {
++                case "enabled":
++                    mEnabled = "1".equals(value) || "true".equalsIgnoreCase(value);
++                    break;
++                case "target_packages":
++                    parseTargetPackages(value, mTargetPackages);
++                    break;
++                case "mode":
++                    mMode = normalizeMode(value);
++                    break;
++                case "keybox_path":
++                    mKeyboxPath = value;
++                    break;
++                case "show_system_apps":
++                    mShowSystemApps = "1".equals(value) || "true".equalsIgnoreCase(value);
++                    break;
++                default:
++                    break;
++            }
++        }
++    }
++
++    private void persistRuntimeConfig() {
++        final File dir = new File(KEYBOX_STORE_DIR);
++        if (!dir.exists() && !dir.mkdirs()) {
++            Log.w(TAG, "Unable to create runtime config dir: " + dir);
++            return;
++        }
++        ensurePathPermissions(dir.getAbsolutePath(), MODE_DIR_WORLD_RX_OWNER_W);
++
++        final File config = new File(dir, RUNTIME_CONFIG_FILE);
++        final List<String> sortedPkgs = new ArrayList<>(mTargetPackages);
++        sortedPkgs.sort(String::compareToIgnoreCase);
++        final String payload =
++                "enabled=" + (mEnabled ? 1 : 0) + "\n"
++                        + "mode=" + normalizeMode(mMode) + "\n"
++                        + "target_packages=" + TextUtils.join("|", sortedPkgs) + "\n"
++                        + "keybox_path=" + (mKeyboxPath == null ? "" : mKeyboxPath) + "\n"
++                        + "show_system_apps=" + (mShowSystemApps ? 1 : 0) + "\n";
++        try (FileOutputStream out = new FileOutputStream(config, false)) {
++            out.write(payload.getBytes(StandardCharsets.UTF_8));
++            out.flush();
++            ensurePathPermissions(config.getAbsolutePath(), MODE_FILE_WORLD_R_OWNER_W);
++            syncNhOverrideProperty();
++        } catch (IOException e) {
++            Log.w(TAG, "Failed to write runtime config: " + config, e);
++        }
++    }
++
++    private void syncNhOverrideProperty() {
++        try {
++            SystemProperties.set(PROP_NH_OVERRIDE, mEnabled ? "1" : "0");
++        } catch (RuntimeException e) {
++            Log.w(TAG, "Failed to update nhoverride property", e);
++        }
++    }
++
++    private void ensurePathPermissions(String path, int mode) {
++        try {
++            Os.chmod(path, mode);
++        } catch (ErrnoException e) {
++            Log.w(TAG, "Failed to chmod " + path + " to " + Integer.toOctalString(mode), e);
++        }
++    }
++
++    private static void parseTargetPackages(String raw, Set<String> out) {
++        out.clear();
++        if (TextUtils.isEmpty(raw)) {
++            return;
++        }
++        final String[] entries = TextUtils.split(raw, "\\|");
++        for (String entry : entries) {
++            if (!TextUtils.isEmpty(entry)) {
++                out.add(entry);
++            }
++        }
++    }
++
++    private static String normalizeMode(String raw) {
++        if (TextUtils.isEmpty(raw)) {
++            return MODE_PATCH;
++        }
++        switch (raw.trim().toLowerCase()) {
++            case MODE_AUTO:
++                return MODE_AUTO;
++            case MODE_GENERATE:
++                return MODE_GENERATE;
++            default:
++                return MODE_PATCH;
++        }
++    }
++
++    private static RuntimeConfigSnapshot loadRuntimeConfigSnapshot() {
++        final RuntimeConfigSnapshot snapshot = new RuntimeConfigSnapshot();
++        final File config = new File(KEYBOX_STORE_DIR, RUNTIME_CONFIG_FILE);
++        if (!config.exists()) {
++            return snapshot;
++        }
++
++        final String content;
++        try (InputStream in = new FileInputStream(config)) {
++            final byte[] data = in.readAllBytes();
++            content = new String(data, StandardCharsets.UTF_8);
++        } catch (IOException e) {
++            return snapshot;
++        }
++
++        String targets = "";
++        for (String line : content.split("\\R")) {
++            final int sep = line.indexOf('=');
++            if (sep <= 0) {
++                continue;
++            }
++            final String key = line.substring(0, sep).trim();
++            final String value = line.substring(sep + 1).trim();
++            switch (key) {
++                case "enabled":
++                    snapshot.enabled = "1".equals(value) || "true".equalsIgnoreCase(value);
++                    break;
++                case "target_packages":
++                    targets = value;
++                    break;
++                case "keybox_path":
++                    snapshot.keyboxPath = value;
++                    break;
++                default:
++                    break;
++            }
++        }
++        snapshot.packageCount = TextUtils.isEmpty(targets) ? 0 : TextUtils.split(targets, "\\|").length;
++        return snapshot;
++    }
++
++    private static final class RuntimeConfigSnapshot {
++        boolean enabled;
++        int packageCount;
++        String keyboxPath = "";
++    }
++
++    public static final SummaryProvider SUMMARY_PROVIDER = (context, key) -> {
++        final RuntimeConfigSnapshot snapshot = loadRuntimeConfigSnapshot();
++        if (!snapshot.enabled) {
++            return context.getString(R.string.disabled);
++        }
++
++        if (TextUtils.isEmpty(snapshot.keyboxPath)) {
++            return context.getString(R.string.tee_soft_debug_enabled_no_keybox);
++        }
++
++        if (snapshot.packageCount <= 0) {
++            return context.getString(R.string.tee_soft_debug_enabled_no_apps);
++        }
++
++        return context.getResources().getQuantityString(
++                R.plurals.tee_soft_debug_enabled_with_apps, snapshot.packageCount, snapshot.packageCount);
++    };
++
++    public static final Searchable.SearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
++            new BaseSearchIndexProvider() {
++                @Override
++                public Set<String> getNonIndexableKeys(Context context) {
++                    return null;
++                }
++            };
++}
+diff --git a/src/org/lineageos/lineageparts/widget/PackageListAdapter.java b/src/org/lineageos/lineageparts/widget/PackageListAdapter.java
+index c5b300c..f7ffdf5 100644
+--- a/src/org/lineageos/lineageparts/widget/PackageListAdapter.java
++++ b/src/org/lineageos/lineageparts/widget/PackageListAdapter.java
+@@ -26,9 +26,11 @@ import android.widget.TextView;
+ import org.lineageos.lineageparts.R;
+ 
+ import java.util.Collections;
++import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.LinkedList;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.TreeSet;
+ 
+@@ -37,6 +39,7 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+     private final LayoutInflater mInflater;
+     private final List<PackageItem> mInstalledPackages = new LinkedList<>();
+     private Set<String> mExcludedPackages = new HashSet<>();
++    private volatile boolean mIncludeSystemApps = false;
+ 
+     // Packages which don't have launcher icons, but which we want to show nevertheless
+     private static final String[] PACKAGE_WHITELIST = new String[] {
+@@ -152,6 +155,7 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+         mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+         List<ResolveInfo> installedAppsInfo = mPm.queryIntentActivities(mainIntent,
+                 PackageManager.ResolveInfoFlags.of(0));
++        final Map<String, PackageItem> packageItemMap = new HashMap<>();
+ 
+         for (ResolveInfo info : installedAppsInfo) {
+             ApplicationInfo appInfo = info.activityInfo.applicationInfo;
+@@ -159,26 +163,47 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+                 continue;
+             }
+ 
+-            final PackageItem item = new PackageItem(appInfo.packageName,
+-                    appInfo.loadLabel(mPm), appInfo.loadIcon(mPm));
++            final PackageItem item = packageItemMap.computeIfAbsent(appInfo.packageName, packageName ->
++                    new PackageItem(packageName, appInfo.loadLabel(mPm), appInfo.loadIcon(mPm)));
+             item.activityTitles.add(info.loadLabel(mPm));
+-            mHandler.obtainMessage(0, item).sendToTarget();
+         }
+ 
+         for (String packageName : PACKAGE_WHITELIST) {
+             if (mExcludedPackages.contains(packageName)) {
+                 continue;
+             }
++            if (packageItemMap.containsKey(packageName)) {
++                continue;
++            }
+             try {
+                 ApplicationInfo appInfo = mPm.getApplicationInfo(packageName,
+                         PackageManager.ApplicationInfoFlags.of(0));
+                 final PackageItem item = new PackageItem(appInfo.packageName,
+                         appInfo.loadLabel(mPm), appInfo.loadIcon(mPm));
+-                mHandler.obtainMessage(0, item).sendToTarget();
++                packageItemMap.put(packageName, item);
+             } catch (PackageManager.NameNotFoundException ignored) {
+                 // package not present, so nothing to add -> ignore it
+             }
+         }
++
++        if (mIncludeSystemApps) {
++            final List<ApplicationInfo> installedApps = mPm.getInstalledApplications(
++                    PackageManager.ApplicationInfoFlags.of(0));
++            for (ApplicationInfo appInfo : installedApps) {
++                if (mExcludedPackages.contains(appInfo.packageName)
++                        || packageItemMap.containsKey(appInfo.packageName)
++                        || !isSystemApp(appInfo)) {
++                    continue;
++                }
++                final PackageItem item = new PackageItem(appInfo.packageName,
++                        appInfo.loadLabel(mPm), appInfo.loadIcon(mPm));
++                packageItemMap.put(appInfo.packageName, item);
++            }
++        }
++
++        for (PackageItem item : packageItemMap.values()) {
++            mHandler.obtainMessage(0, item).sendToTarget();
++        }
+     }
+ 
+     public void setExcludedPackages(HashSet<String> packages) {
+@@ -186,6 +211,19 @@ public class PackageListAdapter extends BaseAdapter implements Runnable {
+         reloadList();
+     }
+ 
++    public void setIncludeSystemApps(boolean includeSystemApps) {
++        if (mIncludeSystemApps == includeSystemApps) {
++            return;
++        }
++        mIncludeSystemApps = includeSystemApps;
++        reloadList();
++    }
++
++    private static boolean isSystemApp(ApplicationInfo appInfo) {
++        return (appInfo.flags & (ApplicationInfo.FLAG_SYSTEM
++                | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
++    }
++
+     private static class ViewHolder {
+         TextView title;
+         TextView summary;
+-- 
+2.43.0
+

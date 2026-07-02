@@ -1,0 +1,539 @@
+From fa67086d51c37bbd992d71c76f00187cd1aaced5 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 1 Jul 2026 13:23:29 +0800
+Subject: [PATCH] Neko LineageOS: Add Broker Compatibility API signature spoof
+ part [WIP]
+
+In some cases, Push Provider or push component needs to be patched (e.g. HMS Core) inorder to work wothout XPosed.
+This feature offered by Broker Compatibility API will enable application get the expected signature of modified push
+component when the feature is enabled and user permitted
+
+Change-Id: I65c55745e767b466a0a1cd2988cc9e1e025998ae
+---
+ .../com/android/server/pm/ComputerEngine.java | 134 ++++++-
+ .../pm/LineageCompatibilitySigningPolicy.java | 326 ++++++++++++++++++
+ 2 files changed, 458 insertions(+), 2 deletions(-)
+ create mode 100644 services/core/java/com/android/server/pm/LineageCompatibilitySigningPolicy.java
+
+diff --git a/services/core/java/com/android/server/pm/ComputerEngine.java b/services/core/java/com/android/server/pm/ComputerEngine.java
+index 26deb6ccd..78a73435e 100644
+--- a/services/core/java/com/android/server/pm/ComputerEngine.java
++++ b/services/core/java/com/android/server/pm/ComputerEngine.java
+@@ -181,6 +181,8 @@ import java.util.Optional;
+ import java.util.Set;
+ import java.util.UUID;
+ 
++import lineageos.push.PushBrokerConstants;
++
+ /**
+  * This class contains the implementation of the Computer functions.  It
+  * is entirely self-contained - it has no implicit access to
+@@ -412,6 +414,7 @@ public class ComputerEngine implements Computer {
+     // The following are not cloned since changes to these have never
+     // been guarded by the PMS lock.
+     private final Context mContext;
++    private volatile LineageCompatibilitySigningPolicy mLineageCompatibilitySigningPolicy;
+     private final UserManagerService mUserManager;
+     private final PermissionManagerServiceInternal mPermissionManager;
+     private final ApexManager mApexManager;
+@@ -1606,6 +1609,9 @@ public class ComputerEngine implements Computer {
+                 }
+             });
+ 
++            maybeApplyCompatibilitySignatureSpoofToPackageInfo(packageInfo, ps.getPackageName(),
++                    callingUid, userId, flags);
++
+             return packageInfo;
+         } else if ((flags & (MATCH_UNINSTALLED_PACKAGES | MATCH_ARCHIVED_PACKAGES)) != 0
+                 && PackageUserStateUtils.isAvailable(state, flags)) {
+@@ -1635,6 +1641,8 @@ public class ComputerEngine implements Computer {
+             if (state.getArchiveState() != null) {
+                 pi.setArchiveTimeMillis(state.getArchiveState().getArchiveTimeMillis());
+             }
++            maybeApplyCompatibilitySignatureSpoofToPackageInfo(pi, ps.getPackageName(),
++                    callingUid, userId, flags);
+ 
+             if (DEBUG_PACKAGE_INFO) {
+                 Log.v(TAG, "ps.pkg is n/a for ["
+@@ -4235,7 +4243,15 @@ public class ComputerEngine implements Computer {
+                 || shouldFilterApplicationIncludingUninstalled(ps2, callingUid, userId)) {
+             return PackageManager.SIGNATURE_UNKNOWN_PACKAGE;
+         }
+-        return checkSignaturesInternal(p1.getSigningDetails(), p2.getSigningDetails());
++        final String[] callingPackages = getPackagesForUidInternal(callingUid, callingUid);
++        final int callingUserId = UserHandle.getUserId(callingUid);
++        final SigningDetails p1SigningDetails = maybeGetCompatibilitySpoofedSigningDetails(
++                callingPackages, callingUserId, pkg2, pkg1, p1.getSigningDetails(),
++                PushBrokerConstants.COMPAT_QUERY_SURFACE_CHECK_SIGNATURES);
++        final SigningDetails p2SigningDetails = maybeGetCompatibilitySpoofedSigningDetails(
++                callingPackages, callingUserId, pkg1, pkg2, p2.getSigningDetails(),
++                PushBrokerConstants.COMPAT_QUERY_SURFACE_CHECK_SIGNATURES);
++        return checkSignaturesInternal(p1SigningDetails, p2SigningDetails);
+     }
+ 
+     @Override
+@@ -4249,7 +4265,18 @@ public class ComputerEngine implements Computer {
+         if (p1SigningDetails == null || p2SigningDetails == null) {
+             return PackageManager.SIGNATURE_UNKNOWN_PACKAGE;
+         }
+-        return checkSignaturesInternal(p1SigningDetails, p2SigningDetails);
++        final String[] uid1Packages = getPackagesForUidInternal(uid1, callingUid);
++        final String[] uid2Packages = getPackagesForUidInternal(uid2, callingUid);
++        final String[] callingPackages = getPackagesForUidInternal(callingUid, callingUid);
++        final SigningDetails effectiveUid1SigningDetails =
++                maybeGetCompatibilitySpoofedSigningDetailsForUidComparison(callingPackages,
++                        callingUserId, uid1Packages, uid2Packages, p1SigningDetails,
++                        PushBrokerConstants.COMPAT_QUERY_SURFACE_CHECK_SIGNATURES);
++        final SigningDetails effectiveUid2SigningDetails =
++                maybeGetCompatibilitySpoofedSigningDetailsForUidComparison(callingPackages,
++                        callingUserId, uid2Packages, uid1Packages, p2SigningDetails,
++                        PushBrokerConstants.COMPAT_QUERY_SURFACE_CHECK_SIGNATURES);
++        return checkSignaturesInternal(effectiveUid1SigningDetails, effectiveUid2SigningDetails);
+     }
+ 
+     @Override
+@@ -4294,6 +4321,109 @@ public class ComputerEngine implements Computer {
+         return null;
+     }
+ 
++    private void maybeApplyCompatibilitySignatureSpoofToPackageInfo(PackageInfo packageInfo,
++            String queriedPackage, int callingUid, int userId, long flags) {
++        if (packageInfo == null || queriedPackage == null || queriedPackage.isBlank()) {
++            return;
++        }
++        final int callingUserId = UserHandle.getUserId(callingUid);
++        final String[] callingPackages = getPackagesForUidInternal(callingUid, callingUid);
++        final boolean requestedDeprecatedSignatures =
++                (flags & PackageManager.GET_SIGNATURES) != 0;
++        final boolean requestedSigningInfo =
++                (flags & PackageManager.GET_SIGNING_CERTIFICATES) != 0;
++
++        if (requestedDeprecatedSignatures) {
++            final SigningDetails deprecatedSigningDetails =
++                    getLineageCompatibilitySigningPolicy().getSpoofedSigningDetails(callingPackages,
++                            callingUserId, queriedPackage,
++                            PushBrokerConstants.COMPAT_QUERY_SURFACE_PACKAGE_INFO_SIGNATURES);
++            if (deprecatedSigningDetails != null) {
++                packageInfo.signatures = getDeprecatedSignatures(deprecatedSigningDetails, flags);
++            }
++        }
++        if (requestedSigningInfo) {
++            final SigningDetails signingInfoSigningDetails =
++                    getLineageCompatibilitySigningPolicy().getSpoofedSigningDetails(callingPackages,
++                            callingUserId, queriedPackage,
++                            PushBrokerConstants.COMPAT_QUERY_SURFACE_PACKAGE_INFO_SIGNING_INFO);
++            if (signingInfoSigningDetails != null) {
++                packageInfo.signingInfo = new SigningInfo(signingInfoSigningDetails);
++            }
++        }
++    }
++
++    private SigningDetails maybeGetCompatibilitySpoofedSigningDetails(String[] callingPackages,
++            int callingUserId, String selfPackage, String queriedPackage,
++            SigningDetails originalSigningDetails, String querySurface) {
++        if (originalSigningDetails == null
++                || queriedPackage == null || queriedPackage.isBlank()
++                || isPackageOwnedByCaller(callingPackages, queriedPackage)
++                || !isPackageOwnedByCaller(callingPackages, selfPackage)) {
++            return originalSigningDetails;
++        }
++        final SigningDetails spoofedSigningDetails =
++                getLineageCompatibilitySigningPolicy().getSpoofedSigningDetails(callingPackages,
++                        callingUserId, queriedPackage, querySurface);
++        return spoofedSigningDetails != null ? spoofedSigningDetails : originalSigningDetails;
++    }
++
++    private SigningDetails maybeGetCompatibilitySpoofedSigningDetailsForUidComparison(
++            String[] callingPackages, int callingUserId, String[] selfPackages,
++            String[] queriedPackages, SigningDetails originalSigningDetails, String querySurface) {
++        if (originalSigningDetails == null
++                || queriedPackages == null || queriedPackages.length == 0
++                || !containsCallerOwnedPackage(callingPackages, selfPackages)) {
++            return originalSigningDetails;
++        }
++        for (String queriedPackage : queriedPackages) {
++            if (queriedPackage == null || queriedPackage.isBlank()
++                    || isPackageOwnedByCaller(callingPackages, queriedPackage)) {
++                continue;
++            }
++            final SigningDetails spoofedSigningDetails =
++                    getLineageCompatibilitySigningPolicy().getSpoofedSigningDetails(callingPackages,
++                            callingUserId, queriedPackage, querySurface);
++            if (spoofedSigningDetails != null) {
++                return spoofedSigningDetails;
++            }
++        }
++        return originalSigningDetails;
++    }
++
++    private LineageCompatibilitySigningPolicy getLineageCompatibilitySigningPolicy() {
++        LineageCompatibilitySigningPolicy policy = mLineageCompatibilitySigningPolicy;
++        if (policy == null) {
++            policy = LineageCompatibilitySigningPolicy.getInstance(mContext);
++            mLineageCompatibilitySigningPolicy = policy;
++        }
++        return policy;
++    }
++
++    private boolean containsCallerOwnedPackage(String[] callingPackages, String[] candidatePackages) {
++        if (candidatePackages == null || candidatePackages.length == 0) {
++            return false;
++        }
++        for (String candidatePackage : candidatePackages) {
++            if (isPackageOwnedByCaller(callingPackages, candidatePackage)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private boolean isPackageOwnedByCaller(String[] callingPackages, String packageName) {
++        if (callingPackages == null || packageName == null || packageName.isBlank()) {
++            return false;
++        }
++        for (String callingPackage : callingPackages) {
++            if (packageName.equals(callingPackage)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private int checkSignaturesInternal(SigningDetails p1SigningDetails,
+             SigningDetails p2SigningDetails) {
+         if (p1SigningDetails == null) {
+diff --git a/services/core/java/com/android/server/pm/LineageCompatibilitySigningPolicy.java b/services/core/java/com/android/server/pm/LineageCompatibilitySigningPolicy.java
+new file mode 100644
+index 000000000..66c7188ce
+--- /dev/null
++++ b/services/core/java/com/android/server/pm/LineageCompatibilitySigningPolicy.java
+@@ -0,0 +1,326 @@
++/*
++ * Copyright (C) 2026 Neko-LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.pm;
++
++import android.content.Context;
++import android.content.pm.Signature;
++import android.content.pm.SigningDetails;
++import android.database.ContentObserver;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.UserHandle;
++import android.os.UserManager;
++import android.provider.Settings;
++import android.util.ArrayMap;
++import android.util.ArraySet;
++import android.util.Base64;
++import android.util.Slog;
++import android.util.SparseArray;
++
++import org.json.JSONArray;
++import org.json.JSONException;
++import org.json.JSONObject;
++
++import java.security.cert.CertificateException;
++
++import lineageos.push.PushBrokerConstants;
++
++public final class LineageCompatibilitySigningPolicy {
++    private static final String TAG = "LineageCompatSign";
++
++    private static volatile LineageCompatibilitySigningPolicy sInstance;
++
++    private final Context mContext;
++    private final ContentObserver mObserver;
++    private final Object mInitLock = new Object();
++    private volatile boolean mObserverRegistered;
++    private volatile SparseArray<ArrayMap<String, AppPolicy>> mPoliciesByUser = new SparseArray<>();
++
++    static LineageCompatibilitySigningPolicy getInstance(Context context) {
++        if (sInstance == null) {
++            synchronized (LineageCompatibilitySigningPolicy.class) {
++                if (sInstance == null) {
++                    sInstance = new LineageCompatibilitySigningPolicy(
++                            context.getApplicationContext());
++                }
++            }
++        }
++        return sInstance;
++    }
++
++    private LineageCompatibilitySigningPolicy(Context context) {
++        mContext = context;
++        mObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
++            @Override
++            public void onChange(boolean selfChange) {
++                refreshFromSettings();
++            }
++        };
++    }
++
++    SigningDetails getSpoofedSigningDetails(String[] callingPackages, int callingUserId,
++            String queriedPackage, String querySurface) {
++        maybeInitialize();
++        if (!mObserverRegistered) {
++            return null;
++        }
++        if (callingPackages == null || callingPackages.length == 0
++                || queriedPackage == null || queriedPackage.isBlank()
++                || querySurface == null || querySurface.isBlank()) {
++            return null;
++        }
++        final SparseArray<ArrayMap<String, AppPolicy>> policiesByUser = mPoliciesByUser;
++        final ArrayMap<String, AppPolicy> userPolicies = policiesByUser.get(callingUserId);
++        if (userPolicies == null || userPolicies.isEmpty()) {
++            return null;
++        }
++        for (String callingPackage : callingPackages) {
++            if (callingPackage == null || callingPackage.isBlank()) {
++                continue;
++            }
++            final AppPolicy appPolicy = userPolicies.get(callingPackage);
++            if (appPolicy == null) {
++                continue;
++            }
++            final SigningRule rule = appPolicy.rulesByQueriedPackage.get(queriedPackage);
++            if (rule == null || !rule.allowedQuerySurfaces.contains(querySurface)) {
++                continue;
++            }
++            return new SigningDetails(rule.signingDetails);
++        }
++        return null;
++    }
++
++    private void maybeInitialize() {
++        if (mObserverRegistered || !isSystemUserUnlocked()) {
++            return;
++        }
++        initializeForSystemUserUnlocked();
++    }
++
++    private boolean isSystemUserUnlocked() {
++        final UserManager userManager = mContext.getSystemService(UserManager.class);
++        return userManager != null && userManager.isUserUnlocked(UserHandle.SYSTEM);
++    }
++
++    private void initializeForSystemUserUnlocked() {
++        if (mObserverRegistered) {
++            return;
++        }
++        synchronized (mInitLock) {
++            if (mObserverRegistered) {
++                return;
++            }
++            try {
++                mContext.getContentResolver().registerContentObserver(
++                        Settings.Global.getUriFor(
++                                PushBrokerConstants.SETTING_COMPAT_SIGNATURE_SPOOF_POLICY),
++                        false, mObserver, android.os.UserHandle.USER_SYSTEM);
++                mObserverRegistered = true;
++            } catch (NullPointerException | SecurityException e) {
++                Slog.i(TAG, "Compatibility signing policy observer unavailable", e);
++                return;
++            }
++            refreshFromSettings();
++        }
++    }
++
++    private void refreshFromSettings() {
++        try {
++            final String rawPolicy = Settings.Global.getString(mContext.getContentResolver(),
++                    PushBrokerConstants.SETTING_COMPAT_SIGNATURE_SPOOF_POLICY);
++            mPoliciesByUser = parse(rawPolicy);
++        } catch (NullPointerException | SecurityException e) {
++            Slog.i(TAG, "Compatibility signing policy unavailable", e);
++            mPoliciesByUser = new SparseArray<>();
++        }
++    }
++
++    private SparseArray<ArrayMap<String, AppPolicy>> parse(String rawPolicy) {
++        final SparseArray<ArrayMap<String, AppPolicy>> parsed = new SparseArray<>();
++        if (rawPolicy == null || rawPolicy.isBlank()) {
++            return parsed;
++        }
++        try {
++            final JSONObject root = new JSONObject(rawPolicy);
++            final JSONArray apps = root.optJSONArray("apps");
++            if (apps == null) {
++                return parsed;
++            }
++            for (int i = 0; i < apps.length(); i++) {
++                final JSONObject appObject = apps.optJSONObject(i);
++                if (appObject == null) {
++                    continue;
++                }
++                final String packageName = appObject.optString(
++                        PushBrokerConstants.COMPAT_APP_PACKAGE_NAME, null);
++                final int userId = appObject.optInt(PushBrokerConstants.COMPAT_APP_USER_ID, -1);
++                if (packageName == null || packageName.isBlank() || userId < 0) {
++                    continue;
++                }
++                final ArrayMap<String, SigningDetails> identities = parseIdentities(
++                        appObject.optJSONArray(PushBrokerConstants.COMPAT_SIG_SPOOF_IDENTITIES));
++                if (identities.isEmpty()) {
++                    continue;
++                }
++                final ArrayMap<String, SigningRule> rules = parseRules(
++                        appObject.optJSONArray(PushBrokerConstants.COMPAT_SIG_SPOOF_ENTRIES),
++                        identities);
++                if (rules.isEmpty()) {
++                    continue;
++                }
++                ArrayMap<String, AppPolicy> userPolicies = parsed.get(userId);
++                if (userPolicies == null) {
++                    userPolicies = new ArrayMap<>();
++                    parsed.put(userId, userPolicies);
++                }
++                userPolicies.put(packageName, new AppPolicy(rules));
++            }
++        } catch (JSONException e) {
++            Slog.w(TAG, "Failed to parse compatibility signing policy", e);
++        }
++        return parsed;
++    }
++
++    private ArrayMap<String, SigningDetails> parseIdentities(JSONArray identitiesArray) {
++        final ArrayMap<String, SigningDetails> identities = new ArrayMap<>();
++        if (identitiesArray == null) {
++            return identities;
++        }
++        for (int i = 0; i < identitiesArray.length(); i++) {
++            final JSONObject identityObject = identitiesArray.optJSONObject(i);
++            if (identityObject == null) {
++                continue;
++            }
++            final String identityId = identityObject.optString(
++                    PushBrokerConstants.COMPAT_SIG_SPOOF_IDENTITY_ID, null);
++            if (identityId == null || identityId.isBlank() || identities.containsKey(identityId)) {
++                continue;
++            }
++            final JSONArray certificatesArray = identityObject.optJSONArray(
++                    PushBrokerConstants.COMPAT_SIG_SPOOF_CERTIFICATE_BASE64S);
++            final SigningDetails signingDetails = parseSigningDetails(certificatesArray);
++            if (signingDetails == null) {
++                continue;
++            }
++            identities.put(identityId, signingDetails);
++        }
++        return identities;
++    }
++
++    private ArrayMap<String, SigningRule> parseRules(JSONArray entriesArray,
++            ArrayMap<String, SigningDetails> identities) {
++        final ArrayMap<String, SigningRule> rules = new ArrayMap<>();
++        if (entriesArray == null || identities == null || identities.isEmpty()) {
++            return rules;
++        }
++        for (int i = 0; i < entriesArray.length(); i++) {
++            final JSONObject entryObject = entriesArray.optJSONObject(i);
++            if (entryObject == null) {
++                continue;
++            }
++            final String queriedPackage = entryObject.optString(
++                    PushBrokerConstants.COMPAT_SIG_SPOOF_QUERIED_PACKAGE, null);
++            final String identityId = entryObject.optString(
++                    PushBrokerConstants.COMPAT_SIG_SPOOF_IDENTITY_ID, null);
++            if (queriedPackage == null || queriedPackage.isBlank()
++                    || identityId == null || identityId.isBlank()
++                    || rules.containsKey(queriedPackage)) {
++                continue;
++            }
++            final SigningDetails signingDetails = identities.get(identityId);
++            if (signingDetails == null) {
++                continue;
++            }
++            final JSONArray surfacesArray = entryObject.optJSONArray(
++                    PushBrokerConstants.COMPAT_SIG_SPOOF_ALLOWED_QUERY_SURFACES);
++            final ArraySet<String> allowedQuerySurfaces = parseAllowedQuerySurfaces(surfacesArray);
++            if (allowedQuerySurfaces.isEmpty()) {
++                continue;
++            }
++            rules.put(queriedPackage, new SigningRule(signingDetails, allowedQuerySurfaces));
++        }
++        return rules;
++    }
++
++    private ArraySet<String> parseAllowedQuerySurfaces(JSONArray surfacesArray) {
++        final ArraySet<String> surfaces = new ArraySet<>();
++        if (surfacesArray == null) {
++            return surfaces;
++        }
++        for (int i = 0; i < surfacesArray.length(); i++) {
++            final String surface = surfacesArray.optString(i, null);
++            if (PushBrokerConstants.COMPAT_QUERY_SURFACE_PACKAGE_INFO_SIGNATURES.equals(surface)
++                    || PushBrokerConstants.COMPAT_QUERY_SURFACE_PACKAGE_INFO_SIGNING_INFO.equals(
++                            surface)
++                    || PushBrokerConstants.COMPAT_QUERY_SURFACE_CHECK_SIGNATURES.equals(surface)) {
++                surfaces.add(surface);
++            }
++        }
++        return surfaces;
++    }
++
++    private SigningDetails parseSigningDetails(JSONArray certificatesArray) {
++        if (certificatesArray == null || certificatesArray.length() == 0) {
++            return null;
++        }
++        final Signature[] signatures = new Signature[certificatesArray.length()];
++        int signatureCount = 0;
++        for (int i = 0; i < certificatesArray.length(); i++) {
++            final String certificateBase64 = certificatesArray.optString(i, null);
++            if (certificateBase64 == null || certificateBase64.isBlank()) {
++                continue;
++            }
++            try {
++                signatures[signatureCount++] = new Signature(Base64.decode(certificateBase64,
++                        Base64.DEFAULT));
++            } catch (IllegalArgumentException e) {
++                Slog.w(TAG, "Ignoring invalid compatibility signing certificate", e);
++            }
++        }
++        if (signatureCount == 0) {
++            return null;
++        }
++        final Signature[] exactSignatures = signatureCount == signatures.length
++                ? signatures
++                : java.util.Arrays.copyOf(signatures, signatureCount);
++        try {
++            return new SigningDetails(exactSignatures, SigningDetails.SignatureSchemeVersion.UNKNOWN);
++        } catch (CertificateException e) {
++            Slog.w(TAG, "Failed to build compatibility signing details", e);
++            return null;
++        }
++    }
++
++    private static final class AppPolicy {
++        final ArrayMap<String, SigningRule> rulesByQueriedPackage;
++
++        AppPolicy(ArrayMap<String, SigningRule> rulesByQueriedPackage) {
++            this.rulesByQueriedPackage = rulesByQueriedPackage;
++        }
++    }
++
++    private static final class SigningRule {
++        final SigningDetails signingDetails;
++        final ArraySet<String> allowedQuerySurfaces;
++
++        SigningRule(SigningDetails signingDetails, ArraySet<String> allowedQuerySurfaces) {
++            this.signingDetails = signingDetails;
++            this.allowedQuerySurfaces = allowedQuerySurfaces;
++        }
++    }
++}
+-- 
+2.43.0
+

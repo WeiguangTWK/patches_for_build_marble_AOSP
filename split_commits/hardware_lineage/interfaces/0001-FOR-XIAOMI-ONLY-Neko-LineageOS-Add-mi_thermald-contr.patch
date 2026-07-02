@@ -1,0 +1,691 @@
+From 94003e86a309a26d34687d0071e5a3980e5f91be Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 14:42:06 +0800
+Subject: [PATCH] [FOR XIAOMI ONLY] Neko LineageOS: Add mi_thermald control and
+ profile write
+
+THIS FEATURE IS STILL WORK IN PROGRESS
+
+Temporaryarily replace thermal profile & restart mi_thermald to achieve faster charge
+
+This is the backend Part
+
+Change-Id: I3104c5d5c8513188d6701ad1a35f023386f4bc17
+---
+ health/aidl/default/Android.bp     |   1 +
+ health/aidl/default/FastCharge.cpp | 528 +++++++++++++++++++++++++++--
+ health/aidl/default/FastCharge.h   |  38 ++-
+ 3 files changed, 541 insertions(+), 26 deletions(-)
+
+diff --git a/health/aidl/default/Android.bp b/health/aidl/default/Android.bp
+index 420a196..785f074 100644
+--- a/health/aidl/default/Android.bp
++++ b/health/aidl/default/Android.bp
+@@ -114,6 +114,7 @@ cc_binary {
+     shared_libs: [
+         "libbase",
+         "libbinder_ndk",
++        "libcutils",
+         "vendor.lineage.health-V2-ndk",
+     ],
+ }
+diff --git a/health/aidl/default/FastCharge.cpp b/health/aidl/default/FastCharge.cpp
+index 7b97f7a..0fa44fc 100644
+--- a/health/aidl/default/FastCharge.cpp
++++ b/health/aidl/default/FastCharge.cpp
+@@ -8,8 +8,22 @@
+ 
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
++#include <android-base/properties.h>
+ #include <android-base/strings.h>
+-#include <map>
++#include <cutils/uevent.h>
++#include <sys/epoll.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <chrono>
++#include <cctype>
++#include <cstring>
++#include <array>
++#include <string_view>
++#include <thread>
++#include <vector>
+ 
+ #define LOG_TAG "vendor.lineage.health-service.default"
+ 
+@@ -18,61 +32,527 @@ namespace vendor {
+ namespace lineage {
+ namespace health {
+ 
++namespace {
++
++constexpr const char kBatteryStatusPath[] = "/sys/class/power_supply/battery/status";
++constexpr const char kMarbleThermalConfigDir[] = "/data/vendor/thermal/config";
++constexpr const char kMarbleThermalNormalPath[] =
++        "/data/vendor/thermal/config/thermal-normal.conf";
++constexpr const char kMarbleThermalHpNormalPath[] =
++        "/data/vendor/thermal/config/thermal-hp-normal.conf";
++constexpr const char kMarbleThermalPerNormalPath[] =
++        "/data/vendor/thermal/config/thermal-per-normal.conf";
++constexpr const char kMarbleThermalMapPath[] = "/data/vendor/thermal/config/thermal-map.conf";
++constexpr const char kMarbleThermalOdmMapPath[] =
++        "/data/vendor/thermal/config/thermal-odm-map.conf";
++constexpr const char kMarbleConstantChargeCurrentPath[] =
++        "/sys/class/power_supply/battery/constant_charge_current";
++constexpr const char kMarbleFastChargeCurrentValue[] = "22000000";
++constexpr const char kMarbleThermalDaemonService[] = "mi_thermald";
++constexpr int64_t kMarbleSupportedModes = static_cast<int64_t>(FastChargeMode::FAST_CHARGE);
++
++constexpr std::string_view kMarbleSceneNormalHex = R"(6e8160ae0e20bed702cc43ac7ed8e5720e4ec46018cfada0081b616cfbe1e5187422117fbea44fb5d94ef6a460d4af81362106af088a26fa942e6830c3cf3b5d1e899c44814c8dc37ca22fc11f564e7d42169fef666f85fa1abedcf9ca61da403e1a9745baab3b412e13c2ba2d2871ad0e351f168ea853c70563b8ed32fa78bc2d69ff06a8cc6dc94950d914832ec9b5d5afda775a47b5bc165814f0ba9e2fc538c55f4f29bd72feaf4fcf7345af181951704a476e520b94f69aa7a6afa7c28489c908a59352b304afd0c84083d88cdda8c4d9a30b58bdd0eade9b2040c824e78acde4432b1904af3534b6242c359087f249c47e427b81d0313bad974612df5ea51b87ae8f1233595cb8481e7eec6c9b95dae2b9932499cd84bcafc0b4272a9b24d872e138d963f970b41be7cbf009c9)";
++constexpr std::string_view kMarbleScenePerNormalHex = R"(6e8160ae0e20bed702cc43ac7ed8e5720e4ec46018cfada0081b616cfbe1e5187422117fbea44fb5d94ef6a460d4af81362106af088a26fa942e6830c3cf3b5d1e899c44814c8dc37ca22fc11f564e7d42169fef666f85fa1abedcf9ca61da403e1a9745baab3b412e13c2ba2d2871ad0e351f168ea853c70563b8ed32fa78bc2d69ff06a8cc6dc94950d914832ec9b5d5afda775a47b5bc165814f0ba9e2fc538c55f4f29bd72feaf4fcf7345af181951704a476e520b94f69aa7a6afa7c28489c908a59352b304afd0c84083d88cdda8c4d9a30b58bdd0eade9b2040c824e78acde4432b1904af3534b6242c359087f249c47e427b81d0313bad974612df5ea51b87ae8f1233595cb8481e7eec6c9b95dae2b9932499cd84bcafc0b4272a9b7a104825cb3e188e7de2aedc438a5e0328e64e9d0e8ccb7f226267a7523e170512befa27ea9f43aa1ba231deeccd665aa4d6d6023bfdc71ed29a2c07455d14bed70a651ab6f13fc278f60d14f19a2fe38c227b84f1d7fe880e69828a7289752f827d4946ff318518596617f3bb868c9038718a366c7a0d0e78ac0fcb5a316fc80929cab45d68e504e76217cdf91e078e9fc4b194e77a774bc86ebb9d813f12d884500cf7eac7912173e94ea63fce6681e8759be4978730b6ffc2bf9517415bf3)";
++constexpr std::string_view kMarbleScenePlaceholderHex = R"(0cfaeb7ad8a3e367c88e7aec75e98153)";
++
++struct MarbleOverrideEntry {
++    const char* path;
++    std::string_view payloadHex;
++};
++
++constexpr std::array<MarbleOverrideEntry, 24> kMarbleSceneOverrides = {{
++        {"/data/vendor/thermal/config/thermal-4k.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-camera.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-cclassvideo.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-cgame.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-class0.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-dolbyvision.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-hp-mgame.conf", kMarbleScenePlaceholderHex},
++        {kMarbleThermalHpNormalPath, kMarbleSceneNormalHex},
++        {"/data/vendor/thermal/config/thermal-huanji.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-mgame.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-navigation.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-nolimits.conf", kMarbleScenePlaceholderHex},
++        {kMarbleThermalNormalPath, kMarbleSceneNormalHex},
++        {"/data/vendor/thermal/config/thermal-per-cclassvideo.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-per-cgame.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-per-class0.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-per-navigation.conf", kMarbleScenePlaceholderHex},
++        {kMarbleThermalPerNormalPath, kMarbleScenePerNormalHex},
++        {"/data/vendor/thermal/config/thermal-per-video.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-phone.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-tgame.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-video.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-videochat.conf", kMarbleScenePlaceholderHex},
++        {"/data/vendor/thermal/config/thermal-yuanshen.conf", kMarbleScenePlaceholderHex},
++}};
++
++bool isChargingStatus(const std::string& status) {
++    return status == "Charging" || status == "Full";
++}
++
++bool pathExists(const char* path) {
++    return access(path, F_OK) == 0;
++}
++
++bool ensureDirExists(const char* path) {
++    if (mkdir(path, 0771) == 0 || errno == EEXIST) {
++        return true;
++    }
++
++    PLOG(ERROR) << "mkdir failed for " << path;
++    return false;
++}
++
++std::optional<std::vector<uint8_t>> decodeHex(std::string_view input) {
++    std::vector<uint8_t> output;
++    output.reserve(input.size() / 2);
++
++    int highNibble = -1;
++    for (char ch : input) {
++        if (std::isspace(static_cast<unsigned char>(ch))) {
++            continue;
++        }
++
++        int nibble = 0;
++        if (ch >= '0' && ch <= '9') {
++            nibble = ch - '0';
++        } else if (ch >= 'a' && ch <= 'f') {
++            nibble = ch - 'a' + 10;
++        } else if (ch >= 'A' && ch <= 'F') {
++            nibble = ch - 'A' + 10;
++        } else {
++            LOG(ERROR) << "Invalid hex character: " << ch;
++            return {};
++        }
++
++        if (highNibble < 0) {
++            highNibble = nibble;
++            continue;
++        }
++
++        output.push_back(static_cast<uint8_t>((highNibble << 4) | nibble));
++        highNibble = -1;
++    }
++
++    if (highNibble >= 0) {
++        LOG(ERROR) << "Odd-length hex payload";
++        return {};
++    }
++
++    return output;
++}
++
++bool writeBlobAtomically(const char* path, const std::vector<uint8_t>& payload) {
++    std::string tempPath(path);
++    tempPath += ".tmp";
++
++    std::string content(reinterpret_cast<const char*>(payload.data()), payload.size());
++    if (!android::base::WriteStringToFile(content, tempPath)) {
++        PLOG(ERROR) << "Failed to write temporary file " << tempPath;
++        unlink(tempPath.c_str());
++        return false;
++    }
++
++    if (rename(tempPath.c_str(), path) < 0) {
++        PLOG(ERROR) << "rename failed for " << path;
++        unlink(tempPath.c_str());
++        return false;
++    }
++
++    return true;
++}
++
++bool deleteFileIfPresent(const char* path) {
++    if (unlink(path) == 0 || errno == ENOENT) {
++        return true;
++    }
++
++    PLOG(ERROR) << "unlink failed for " << path;
++    return false;
++}
++
++}  // namespace
++
++FastCharge::FastCharge() : mBackend(detectBackend()) {
++    if (getSupportedModes() == 0) {
++        return;
++    }
++
++    mAppliedMode = readAppliedMode();
++    if (mBackend == FastChargeBackend::NODE && mAppliedMode) {
++        mRequestedMode = *mAppliedMode;
++    }
++
++    {
++        std::lock_guard lock(mLock);
++        reconcileLocked();
++    }
++
++    std::thread(&FastCharge::monitorUevents, this).detach();
++}
++
+ ndk::ScopedAStatus FastCharge::getSupportedFastChargeModes(int64_t* _aidl_return) {
+-    *_aidl_return = fastChargeConfig.supportedModes;
++    *_aidl_return = getSupportedModes();
+ 
+     return ndk::ScopedAStatus::ok();
+ }
+ 
+ ndk::ScopedAStatus FastCharge::getFastChargeMode(FastChargeMode* _aidl_return) {
+-    if (fastChargeConfig.supportedModes == 0) {
++    if (getSupportedModes() == 0) {
+         LOG(ERROR) << "Fast charge not supported";
+         return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+     }
+ 
+-    std::string content;
+-    if (!android::base::ReadFileToString(*fastChargeConfig.node, &content, true)) {
+-        LOG(ERROR) << "Failed to read current fast charging value";
+-        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+-    }
+-    content = android::base::Trim(content);
++    std::lock_guard lock(mLock);
++    *_aidl_return = mRequestedMode;
++    return ndk::ScopedAStatus::ok();
++}
+ 
+-    auto mode = fastChargeConfig.modeToValue(content);
+-    if (!mode) {
+-        LOG(ERROR) << "Failed to parse current fast charging value: " << content;
++ndk::ScopedAStatus FastCharge::setFastChargeMode(FastChargeMode in_mode,
++                                                 FastChargeMode* _aidl_return) {
++    if ((getSupportedModes() & static_cast<int64_t>(in_mode)) == 0 &&
++            in_mode != FastChargeMode::NONE) {
++        LOG(ERROR) << "Unsupported fast charge mode: " << static_cast<int>(in_mode);
+         return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+     }
+ 
+-    *_aidl_return = *mode;
++    {
++        std::lock_guard lock(mLock);
++        mRequestedMode = in_mode;
++        if (!reconcileLocked()) {
++            return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++        }
++        *_aidl_return = mRequestedMode;
++    }
+ 
+     return ndk::ScopedAStatus::ok();
+ }
+ 
+-ndk::ScopedAStatus FastCharge::setFastChargeMode(FastChargeMode in_mode,
+-                                                 FastChargeMode* _aidl_return) {
+-    auto value = fastChargeConfig.valueToMode(in_mode);
++std::optional<FastChargeMode> FastCharge::readAppliedMode() const {
++    switch (mBackend) {
++        case FastChargeBackend::NODE: {
++            std::string content;
++            if (!android::base::ReadFileToString(*fastChargeConfig.node, &content, true)) {
++                LOG(ERROR) << "Failed to read current fast charging value";
++                return {};
++            }
++            content = android::base::Trim(content);
++
++            auto mode = fastChargeConfig.modeToValue(content);
++            if (!mode) {
++                LOG(ERROR) << "Failed to parse current fast charging value: " << content;
++            }
++            return mode;
++        }
++        case FastChargeBackend::MARBLE_THERMAL:
++            return pathExists(kMarbleThermalNormalPath) ? FastChargeMode::FAST_CHARGE
++                                                        : FastChargeMode::NONE;
++        case FastChargeBackend::NONE:
++        default:
++            return {};
++    }
++}
++
++std::optional<std::string> FastCharge::readBatteryStatus() const {
++    std::string content;
++    if (!android::base::ReadFileToString(kBatteryStatusPath, &content, true)) {
++        PLOG(ERROR) << "Failed to read battery status";
++        return {};
++    }
++    return android::base::Trim(content);
++}
++
++bool FastCharge::isChargeSessionActive() const {
++    auto batteryStatus = readBatteryStatus();
++    return batteryStatus && isChargingStatus(*batteryStatus);
++}
++
++bool FastCharge::isBatteryPowerSupplyEvent(const char* msg, ssize_t len) const {
++    bool isPowerSupply = false;
++    bool isBattery = false;
++    const char* end = msg + len;
++
++    for (const char* entry = msg; entry < end && *entry != '\0'; entry += std::strlen(entry) + 1) {
++        std::string_view value(entry);
++        if (value == "SUBSYSTEM=power_supply") {
++            isPowerSupply = true;
++        } else if (value == "POWER_SUPPLY_NAME=battery" ||
++                   value.find("/power_supply/battery") != std::string_view::npos) {
++            isBattery = true;
++        }
++    }
++
++    return isPowerSupply && isBattery;
++}
++
++bool FastCharge::applyModeLocked(FastChargeMode mode) {
++    switch (mBackend) {
++        case FastChargeBackend::NODE:
++            return applyNodeModeLocked(mode);
++        case FastChargeBackend::MARBLE_THERMAL:
++            return applyMarbleModeLocked(mode);
++        case FastChargeBackend::NONE:
++        default:
++            return false;
++    }
++}
++
++bool FastCharge::reconcileLocked() {
++    const FastChargeMode targetMode =
++            isChargeSessionActive() ? mRequestedMode : FastChargeMode::NONE;
++    return applyModeLocked(targetMode);
++}
++
++FastChargeBackend FastCharge::detectBackend() const {
++    if (fastChargeConfig.supportedModes != 0) {
++        return FastChargeBackend::NODE;
++    }
++
++    if (pathExists("/system/vendor/bin/mi_thermald")) {
++        return FastChargeBackend::MARBLE_THERMAL;
++    }
++
++    return FastChargeBackend::NONE;
++}
++
++int64_t FastCharge::getSupportedModes() const {
++    switch (mBackend) {
++        case FastChargeBackend::NODE:
++            return fastChargeConfig.supportedModes;
++        case FastChargeBackend::MARBLE_THERMAL:
++            return kMarbleSupportedModes;
++        case FastChargeBackend::NONE:
++        default:
++            return 0;
++    }
++}
++
++bool FastCharge::applyNodeModeLocked(FastChargeMode mode) {
++    if (mAppliedMode && *mAppliedMode == mode) {
++        return true;
++    }
++
++    auto value = fastChargeConfig.valueToMode(mode);
+     if (!value) {
+-        LOG(ERROR) << "Unsupported fast charge mode: " << static_cast<int>(in_mode);
+-        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++        LOG(ERROR) << "Unsupported fast charge mode: " << static_cast<int>(mode);
++        return false;
+     }
+ 
+     if (!android::base::WriteStringToFile(*value, *fastChargeConfig.node)) {
+-        LOG(ERROR) << "Failed to write to fast charge node: " << strerror(errno);
+-        return ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
++        PLOG(ERROR) << "Failed to write fast charge mode";
++        return false;
+     }
+ 
+-    return getFastChargeMode(_aidl_return);
++    mAppliedMode = mode;
++    return true;
++}
++
++bool FastCharge::applyMarbleModeLocked(FastChargeMode mode) {
++    if (mode == FastChargeMode::NONE) {
++        return restoreMarbleDefaultLocked();
++    }
++
++    if (mode != FastChargeMode::FAST_CHARGE) {
++        LOG(ERROR) << "Unsupported marble fast charge mode: " << static_cast<int>(mode);
++        return false;
++    }
++
++    if (mAppliedMode && *mAppliedMode == mode) {
++        return true;
++    }
++
++    if (!writeMarbleThermalOverrideLocked()) {
++        return false;
++    }
++
++    if (!restartMarbleThermalDaemonLocked()) {
++        LOG(WARNING) << "Marble thermal override applied without daemon restart";
++    }
++
++    if (!kickMarbleChargeCurrentLimitLocked()) {
++        LOG(WARNING) << "Marble thermal override applied without FCC kick";
++    }
++
++    mAppliedMode = mode;
++    return true;
++}
++
++bool FastCharge::restoreMarbleDefaultLocked() {
++    bool ok = true;
++
++    for (const auto& entry : kMarbleSceneOverrides) {
++        ok = deleteFileIfPresent(entry.path) && ok;
++    }
++
++    // Clean up legacy marble overrides from the previous implementation.
++    ok = deleteFileIfPresent(kMarbleThermalMapPath) && ok;
++    ok = deleteFileIfPresent(kMarbleThermalOdmMapPath) && ok;
++
++    if (!ok) {
++        return false;
++    }
++
++    if (!restartMarbleThermalDaemonLocked()) {
++        LOG(WARNING) << "Marble thermal override removed without daemon restart";
++    }
++
++    mAppliedMode = FastChargeMode::NONE;
++    return true;
++}
++
++bool FastCharge::writeMarbleThermalOverrideLocked() {
++    if (!ensureDirExists("/data/vendor/thermal") || !ensureDirExists(kMarbleThermalConfigDir)) {
++        return false;
++    }
++
++    bool ok = true;
++    for (const auto& entry : kMarbleSceneOverrides) {
++        auto payload = decodeHex(entry.payloadHex);
++        if (!payload) {
++            LOG(ERROR) << "Failed to decode marble scene payload for " << entry.path;
++            return false;
++        }
++        ok = writeBlobAtomically(entry.path, *payload) && ok;
++    }
++
++    return ok;
++}
++
++bool FastCharge::restartMarbleThermalDaemonLocked() {
++    if (!android::base::SetProperty("ctl.stop", kMarbleThermalDaemonService)) {
++        LOG(WARNING) << "Failed to stop " << kMarbleThermalDaemonService;
++        return false;
++    }
++
++    std::this_thread::sleep_for(std::chrono::seconds(1));
++
++    if (!android::base::SetProperty("ctl.start", kMarbleThermalDaemonService)) {
++        LOG(WARNING) << "Failed to start " << kMarbleThermalDaemonService;
++        return false;
++    }
++
++    std::this_thread::sleep_for(std::chrono::seconds(1));
++    LOG(INFO) << "Restarted " << kMarbleThermalDaemonService;
++    return true;
++}
++
++bool FastCharge::kickMarbleChargeCurrentLimitLocked() {
++    if (!pathExists(kMarbleConstantChargeCurrentPath)) {
++        LOG(WARNING) << "Marble FCC kick node missing: " << kMarbleConstantChargeCurrentPath;
++        return false;
++    }
++
++    if (!android::base::WriteStringToFile(kMarbleFastChargeCurrentValue,
++                                          kMarbleConstantChargeCurrentPath)) {
++        PLOG(WARNING) << "Failed to kick marble FCC override";
++        return false;
++    }
++
++    LOG(INFO) << "Requested marble FCC override: " << kMarbleFastChargeCurrentValue;
++    return true;
++}
++
++std::optional<std::string> FastCharge::readMarbleChargeCurrentLimit() const {
++    if (!pathExists(kMarbleConstantChargeCurrentPath)) {
++        return {};
++    }
++
++    std::string content;
++    if (!android::base::ReadFileToString(kMarbleConstantChargeCurrentPath, &content, true)) {
++        PLOG(WARNING) << "Failed to read marble FCC override node";
++        return {};
++    }
++
++    return android::base::Trim(content);
++}
++
++void FastCharge::monitorUevents() {
++    int ueventFd = uevent_open_socket(64 * 1024, true);
++    if (ueventFd < 0) {
++        PLOG(ERROR) << "uevent_open_socket failed";
++        return;
++    }
++
++    int epollFd = epoll_create1(EPOLL_CLOEXEC);
++    if (epollFd < 0) {
++        PLOG(ERROR) << "epoll_create1 failed";
++        close(ueventFd);
++        return;
++    }
++
++    epoll_event event = {
++            .events = EPOLLIN,
++            .data = {.fd = ueventFd},
++    };
++    if (epoll_ctl(epollFd, EPOLL_CTL_ADD, ueventFd, &event) < 0) {
++        PLOG(ERROR) << "epoll_ctl failed";
++        close(epollFd);
++        close(ueventFd);
++        return;
++    }
++
++    while (true) {
++        epoll_event events[1];
++        int eventCount = epoll_wait(epollFd, events, 1, -1);
++        if (eventCount < 0) {
++            if (errno == EINTR) {
++                continue;
++            }
++            PLOG(ERROR) << "epoll_wait failed";
++            break;
++        }
++
++        char msg[4096 + 2] = {};
++        ssize_t len = recv(ueventFd, msg, sizeof(msg), 0);
++        if (len <= 0) {
++            if (errno != EINTR) {
++                PLOG(ERROR) << "recv failed";
++            }
++            continue;
++        }
++
++        if (!isBatteryPowerSupplyEvent(msg, len)) {
++            continue;
++        }
++
++        std::lock_guard lock(mLock);
++        reconcileLocked();
++    }
++
++    close(epollFd);
++    close(ueventFd);
+ }
+ 
+ binder_status_t FastCharge::dump(int fd, const char** args, uint32_t numArgs) {
+     int64_t supportedFastChargeModes;
+     getSupportedFastChargeModes(&supportedFastChargeModes);
+ 
+-    FastChargeMode fastChargeMode;
+-    getFastChargeMode(&fastChargeMode);
++    FastChargeMode requestedMode;
++    getFastChargeMode(&requestedMode);
++
++    auto appliedMode = readAppliedMode();
++    auto batteryStatus = readBatteryStatus();
++    auto marbleChargeCurrent = readMarbleChargeCurrentLimit();
++    size_t marbleOverrideCount = 0;
++    for (const auto& entry : kMarbleSceneOverrides) {
++        marbleOverrideCount += pathExists(entry.path) ? 1 : 0;
++    }
+ 
++    dprintf(fd, "Fast charge backend: %d\n", static_cast<int>(mBackend));
+     dprintf(fd, "Fast charge supported modes: %ld\n", supportedFastChargeModes);
+-    dprintf(fd, "Fast charge mode: %d\n", fastChargeMode);
++    dprintf(fd, "Requested fast charge mode: %d\n", static_cast<int>(requestedMode));
++    dprintf(fd, "Applied fast charge mode: %d\n",
++            static_cast<int>(appliedMode.value_or(FastChargeMode::NONE)));
++    dprintf(fd, "Battery status: %s\n", batteryStatus ? batteryStatus->c_str() : "unknown");
++    if (mBackend == FastChargeBackend::MARBLE_THERMAL) {
++        dprintf(fd, "Marble thermal override active: %s\n",
++                pathExists(kMarbleThermalNormalPath) ? "true" : "false");
++        dprintf(fd, "Marble thermal override files: %zu/%zu\n", marbleOverrideCount,
++                kMarbleSceneOverrides.size());
++        dprintf(fd, "Marble FCC node value: %s\n",
++                marbleChargeCurrent ? marbleChargeCurrent->c_str() : "unavailable");
++    }
+ 
+     return STATUS_OK;
+ }
+diff --git a/health/aidl/default/FastCharge.h b/health/aidl/default/FastCharge.h
+index de8bf7b..23e9e92 100644
+--- a/health/aidl/default/FastCharge.h
++++ b/health/aidl/default/FastCharge.h
+@@ -8,14 +8,25 @@
+ 
+ #include <aidl/vendor/lineage/health/BnFastCharge.h>
+ 
++#include <mutex>
++#include <optional>
++#include <string>
++#include <sys/types.h>
++
+ namespace aidl {
+ namespace vendor {
+ namespace lineage {
+ namespace health {
+ 
++enum class FastChargeBackend {
++    NONE,
++    NODE,
++    MARBLE_THERMAL,
++};
++
+ class FastChargeConfig {
+   public:
+-    FastChargeConfig() : supportedModes(supportedModesInternal()) {}
++    FastChargeConfig() : supportedModes(nodeSupportedModesInternal()) {}
+ 
+     std::optional<FastChargeMode> modeToValue(const std::string& value) const {
+         if (value == valueNone) return FastChargeMode::NONE;
+@@ -44,7 +55,7 @@ class FastChargeConfig {
+     int64_t supportedModes;
+ 
+   private:
+-    int64_t supportedModesInternal() const {
++    int64_t nodeSupportedModesInternal() const {
+         int64_t ret = 0;
+ 
+         if (node) {
+@@ -59,6 +70,8 @@ class FastChargeConfig {
+ 
+ class FastCharge : public BnFastCharge {
+   public:
++    FastCharge();
++
+     ndk::ScopedAStatus getSupportedFastChargeModes(int64_t* _aidl_return) override;
+     ndk::ScopedAStatus getFastChargeMode(FastChargeMode* _aidl_return) override;
+     ndk::ScopedAStatus setFastChargeMode(FastChargeMode in_mode,
+@@ -67,7 +80,28 @@ class FastCharge : public BnFastCharge {
+     binder_status_t dump(int fd, const char** args, uint32_t numArgs) override;
+ 
+   private:
++    std::optional<FastChargeMode> readAppliedMode() const;
++    std::optional<std::string> readBatteryStatus() const;
++    bool isChargeSessionActive() const;
++    bool isBatteryPowerSupplyEvent(const char* msg, ssize_t len) const;
++    bool applyModeLocked(FastChargeMode mode);
++    bool reconcileLocked();
++    void monitorUevents();
++    FastChargeBackend detectBackend() const;
++    int64_t getSupportedModes() const;
++    bool applyNodeModeLocked(FastChargeMode mode);
++    bool applyMarbleModeLocked(FastChargeMode mode);
++    bool restoreMarbleDefaultLocked();
++    bool writeMarbleThermalOverrideLocked();
++    bool restartMarbleThermalDaemonLocked();
++    bool kickMarbleChargeCurrentLimitLocked();
++    std::optional<std::string> readMarbleChargeCurrentLimit() const;
++
+     const FastChargeConfig fastChargeConfig;
++    const FastChargeBackend mBackend;
++    mutable std::mutex mLock;
++    FastChargeMode mRequestedMode = FastChargeMode::NONE;
++    std::optional<FastChargeMode> mAppliedMode;
+ };
+ 
+ }  // namespace health
+-- 
+2.43.0
+
