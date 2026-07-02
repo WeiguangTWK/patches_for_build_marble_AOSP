@@ -1,0 +1,29 @@
+From 1b474754f1d59e3613b0b02b8bfb1c7b091d6139 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 16:21:21 +0800
+Subject: [PATCH] Neko LineageOS: Fix up! Compatibility Matrix breaks compile
+
+If you use Dolby Atoms app from CrDroid then it is needed to stop it from injecting Compatibility Matrix
+---
+ dolby.mk | 5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/dolby.mk b/dolby.mk
+index fa5d719..b9758c8 100644
+--- a/dolby.mk
++++ b/dolby.mk
+@@ -27,11 +27,6 @@ AUDIO_FEATURE_ENABLED_DS2_DOLBY_DAP := true
+ # SEPolicy
+ BOARD_VENDOR_SEPOLICY_DIRS += $(DOLBY_PATH)/sepolicy/vendor
+ 
+-# HIDL
+-DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE += $(DOLBY_PATH)/dolby_framework_matrix.xml
+-DEVICE_MANIFEST_FILE += $(DOLBY_PATH)/vendor.dolby.hardware.dms@2.0-service.xml
+-DEVICE_MANIFEST_FILE += $(DOLBY_PATH)/vendor.dolby.media.c2.xml
+-    
+ # Configs
+ PRODUCT_COPY_FILES += \
+     $(DOLBY_PATH)/configs/dax-default.xml:$(TARGET_COPY_OUT_VENDOR)/etc/dolby/dax-default.xml \
+-- 
+2.43.0
+
