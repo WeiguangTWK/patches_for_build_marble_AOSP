@@ -1,0 +1,202 @@
+From d39383d81f8b5a3602b7dd86b7a01e9d14a9facb Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 17:05:49 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Migrate adb_root service to
+ DEBUG build only and migrate corresponding SELinux rule
+
+Normally speaking users of user build have no access to adb_root feature (and don't need it), but SELinux rule
+for it still exist, causing detection
+
+Change-Id: Ie914fa04c969511a3bc9cb2fc8778805c4584f80
+---
+ build/soong/service_fuzzer_bindings.go        | 1 +
+ contexts/file_contexts_test_data              | 3 +++
+ prebuilts/api/202504/private/adbd.te          | 2 ++
+ prebuilts/api/202504/private/file_contexts    | 1 +
+ prebuilts/api/202504/private/platform_app.te  | 1 +
+ prebuilts/api/202504/private/service.te       | 1 +
+ prebuilts/api/202504/private/service_contexts | 1 +
+ prebuilts/api/202504/private/system_server.te | 1 +
+ private/adbd.te                               | 2 ++
+ private/file_contexts                         | 1 +
+ private/platform_app.te                       | 1 +
+ private/service.te                            | 1 +
+ private/service_contexts                      | 1 +
+ private/system_server.te                      | 1 +
+ 14 files changed, 18 insertions(+)
+
+diff --git a/build/soong/service_fuzzer_bindings.go b/build/soong/service_fuzzer_bindings.go
+index cb5e61f..b644aaa 100644
+--- a/build/soong/service_fuzzer_bindings.go
++++ b/build/soong/service_fuzzer_bindings.go
+@@ -23,6 +23,7 @@ var EXCEPTION_NO_FUZZER = []string{}
+ 
+ var (
+ 	ServiceFuzzerBindings = map[string][]string{
++		"adbroot_service":                                                                   EXCEPTION_NO_FUZZER,
+ 		"android.hardware.audio.core.IConfig/default":                                        EXCEPTION_NO_FUZZER,
+ 		"android.hardware.audio.core.IModule/default":                                        EXCEPTION_NO_FUZZER,
+ 		"android.hardware.audio.core.IModule/a2dp":                                           EXCEPTION_NO_FUZZER,
+diff --git a/contexts/file_contexts_test_data b/contexts/file_contexts_test_data
+index 54c6c92..f2e971d 100644
+--- a/contexts/file_contexts_test_data
++++ b/contexts/file_contexts_test_data
+@@ -793,6 +793,9 @@
+ /system_ext/bin/hw/android.hidl.allocator@1.0-service             hal_allocator_default_exec
+ /system/system_ext/bin/hw/android.hidl.allocator@1.0-service      hal_allocator_default_exec
+ 
++/system_ext/bin/adb_root                                          adbroot_exec
++/system/system_ext/bin/adb_root                                   adbroot_exec
++
+ /system_ext/bin/rkp_cert_processor                                rkp_cert_processor_exec
+ /system/system_ext/bin/rkp_cert_processor                         rkp_cert_processor_exec
+ 
+diff --git a/prebuilts/api/202504/private/adbd.te b/prebuilts/api/202504/private/adbd.te
+index 138c8f5..5f8ef67 100644
+--- a/prebuilts/api/202504/private/adbd.te
++++ b/prebuilts/api/202504/private/adbd.te
+@@ -14,6 +14,8 @@ allow adbd adbd_tradeinmode:process dyntransition;
+ 
+ userdebug_or_eng(`
+   allow adbd su:process dyntransition;
++  allow adbd adbroot:binder call;
++  allow adbd adbroot_service:service_manager find;
+ ')
+ 
+ # When 'adb shell' is executed in recovery mode, adbd explicitly
+diff --git a/prebuilts/api/202504/private/file_contexts b/prebuilts/api/202504/private/file_contexts
+index 01479b6..4d8e8fa 100644
+--- a/prebuilts/api/202504/private/file_contexts
++++ b/prebuilts/api/202504/private/file_contexts
+@@ -543,6 +543,7 @@
+ 
+ /(system_ext|system/system_ext)/bin/aidl_lazy_test_server    u:object_r:aidl_lazy_test_server_exec:s0
+ /(system_ext|system/system_ext)/bin/aidl_lazy_cb_test_server u:object_r:aidl_lazy_test_server_exec:s0
++/(system_ext|system/system_ext)/bin/adb_root                u:object_r:adbroot_exec:s0
+ /(system_ext|system/system_ext)/bin/hidl_lazy_test_server    u:object_r:hidl_lazy_test_server_exec:s0
+ /(system_ext|system/system_ext)/bin/hidl_lazy_cb_test_server u:object_r:hidl_lazy_test_server_exec:s0
+ /(system_ext|system/system_ext)/bin/hwservicemanager         u:object_r:hwservicemanager_exec:s0
+diff --git a/prebuilts/api/202504/private/platform_app.te b/prebuilts/api/202504/private/platform_app.te
+index 38339da..0a7a5f4 100644
+--- a/prebuilts/api/202504/private/platform_app.te
++++ b/prebuilts/api/202504/private/platform_app.te
+@@ -100,6 +100,7 @@ allow platform_app system_api_service:service_manager find;
+ allow platform_app vr_manager_service:service_manager find;
+ allow platform_app stats_service:service_manager find;
+ allow platform_app tradeinmode_service:service_manager find;
++userdebug_or_eng(`allow platform_app adbroot_service:service_manager find;')
+ 
+ # Allow platform apps to log via statsd.
+ binder_call(platform_app, statsd)
+diff --git a/prebuilts/api/202504/private/service.te b/prebuilts/api/202504/private/service.te
+index 96f208d..78b667b 100644
+--- a/prebuilts/api/202504/private/service.te
++++ b/prebuilts/api/202504/private/service.te
+@@ -6,6 +6,7 @@ until_board_api(202504, `
+     type app_function_service, app_api_service, system_server_service, service_manager_type;
+ ')
+ type attention_service,              system_server_service, service_manager_type;
++type adbroot_service,                service_manager_type;
+ type bg_install_control_service,     system_api_service, system_server_service, service_manager_type;
+ type compos_service,                 service_manager_type;
+ type communal_service,               app_api_service, system_server_service, service_manager_type;
+diff --git a/prebuilts/api/202504/private/service_contexts b/prebuilts/api/202504/private/service_contexts
+index ad41229..b32eab8 100644
+--- a/prebuilts/api/202504/private/service_contexts
++++ b/prebuilts/api/202504/private/service_contexts
+@@ -151,6 +151,7 @@ accessibility                             u:object_r:accessibility_service:s0
+ account                                   u:object_r:account_service:s0
+ activity                                  u:object_r:activity_service:s0
+ activity_task                             u:object_r:activity_task_service:s0
++adbroot_service                           u:object_r:adbroot_service:s0
+ adb                                       u:object_r:adb_service:s0
+ adservices_manager                        u:object_r:adservices_manager_service:s0
+ advanced_protection                       u:object_r:advanced_protection_service:s0
+diff --git a/prebuilts/api/202504/private/system_server.te b/prebuilts/api/202504/private/system_server.te
+index 4e5112e..0ffe0ec 100644
+--- a/prebuilts/api/202504/private/system_server.te
++++ b/prebuilts/api/202504/private/system_server.te
+@@ -10,6 +10,7 @@ typeattribute system_server scheduler_service_server;
+ typeattribute system_server sensor_service_server;
+ typeattribute system_server stats_service_server;
+ typeattribute system_server bpfdomain;
++userdebug_or_eng(`allow system_server adbroot_service:service_manager find;')
+ 
+ # Define a type for tmpfs-backed ashmem regions.
+ tmpfs_domain(system_server)
+diff --git a/private/adbd.te b/private/adbd.te
+index 6bef6f8..f0c15af 100644
+--- a/private/adbd.te
++++ b/private/adbd.te
+@@ -17,6 +17,8 @@ allow adbd adbd_tradeinmode:process dyntransition;
+ 
+ userdebug_or_eng(`
+   allow adbd su:process dyntransition;
++  allow adbd adbroot:binder call;
++  allow adbd adbroot_service:service_manager find;
+ ')
+ 
+ # When 'adb shell' is executed in recovery mode, adbd explicitly
+diff --git a/private/file_contexts b/private/file_contexts
+index 0f2d238..a82ea18 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -545,6 +545,7 @@
+ 
+ /(system_ext|system/system_ext)/bin/aidl_lazy_test_server    u:object_r:aidl_lazy_test_server_exec:s0
+ /(system_ext|system/system_ext)/bin/aidl_lazy_cb_test_server u:object_r:aidl_lazy_test_server_exec:s0
++/(system_ext|system/system_ext)/bin/adb_root                u:object_r:adbroot_exec:s0
+ /(system_ext|system/system_ext)/bin/hidl_lazy_test_server    u:object_r:hidl_lazy_test_server_exec:s0
+ /(system_ext|system/system_ext)/bin/hidl_lazy_cb_test_server u:object_r:hidl_lazy_test_server_exec:s0
+ /(system_ext|system/system_ext)/bin/hwservicemanager         u:object_r:hwservicemanager_exec:s0
+diff --git a/private/platform_app.te b/private/platform_app.te
+index 9e859f4..ea5e19d 100644
+--- a/private/platform_app.te
++++ b/private/platform_app.te
+@@ -101,6 +101,7 @@ allow platform_app system_api_service:service_manager find;
+ allow platform_app vr_manager_service:service_manager find;
+ allow platform_app stats_service:service_manager find;
+ allow platform_app tradeinmode_service:service_manager find;
++userdebug_or_eng(`allow platform_app adbroot_service:service_manager find;')
+ 
+ # Allow platform apps to log via statsd.
+ binder_call(platform_app, statsd)
+diff --git a/private/service.te b/private/service.te
+index 101a969..def58bf 100644
+--- a/private/service.te
++++ b/private/service.te
+@@ -3,6 +3,7 @@ type ambient_context_service,        app_api_service, system_server_service, ser
+ type authentication_policy_service,  app_api_service, system_api_service, system_server_service, service_manager_type;
+ 
+ type attention_service,              system_server_service, service_manager_type;
++type adbroot_service,                service_manager_type;
+ type bg_install_control_service,     system_api_service, system_server_service, service_manager_type;
+ type binder_stats_consumer_service,  system_server_service, service_manager_type;
+ type compos_service,                 service_manager_type;
+diff --git a/private/service_contexts b/private/service_contexts
+index 84304c0..ad7fa84 100644
+--- a/private/service_contexts
++++ b/private/service_contexts
+@@ -157,6 +157,7 @@ account                                   u:object_r:account_service:s0
+ activity                                  u:object_r:activity_service:s0
+ activity_structured                       u:object_r:activity_structured_service:s0
+ activity_task                             u:object_r:activity_task_service:s0
++adbroot_service                           u:object_r:adbroot_service:s0
+ adb                                       u:object_r:adb_service:s0
+ adservices_manager                        u:object_r:adservices_manager_service:s0
+ advanced_protection                       u:object_r:advanced_protection_service:s0
+diff --git a/private/system_server.te b/private/system_server.te
+index d85caed..229fdc7 100644
+--- a/private/system_server.te
++++ b/private/system_server.te
+@@ -10,6 +10,7 @@ typeattribute system_server scheduler_service_server;
+ typeattribute system_server sensor_service_server;
+ typeattribute system_server stats_service_server;
+ typeattribute system_server bpfdomain;
++userdebug_or_eng(`allow system_server adbroot_service:service_manager find;')
+ 
+ # Define a type for tmpfs-backed ashmem regions.
+ tmpfs_domain(system_server)
+-- 
+2.43.0
+

@@ -1,0 +1,135 @@
+From c5b7bf791664128dcc15c4a6a979851a358039e5 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 16:51:17 +0800
+Subject: [PATCH] Neko LineageOS: Allow TEE Soft Emu to read its data folder
+
+The path/name of /data/adbroot can be changed according your requirement
+
+TODO: Change the path into one which is not likely misunderstanded as a part of adb_root service
+Change-Id: Iae0f19d4b195641056eca79d1ddc263c2b3be53d
+---
+ contexts/file_contexts_test_data           |  2 ++
+ prebuilts/api/202504/private/adbroot.te    | 17 +++++++++++++++++
+ prebuilts/api/202504/private/file.te       |  3 +++
+ prebuilts/api/202504/private/file_contexts |  1 +
+ private/adbroot.te                         | 17 +++++++++++++++++
+ private/file.te                            |  3 +++
+ private/file_contexts                      |  1 +
+ 7 files changed, 44 insertions(+)
+ create mode 100644 prebuilts/api/202504/private/adbroot.te
+ create mode 100644 private/adbroot.te
+
+diff --git a/contexts/file_contexts_test_data b/contexts/file_contexts_test_data
+index 5974570..54c6c92 100644
+--- a/contexts/file_contexts_test_data
++++ b/contexts/file_contexts_test_data
+@@ -877,6 +877,8 @@
+ /data/ota_package/test                                            ota_package_file
+ /data/adb                                                         adb_data_file
+ /data/adb/test                                                    adb_data_file
++/data/adbroot                                                     adbroot_data_file
++/data/adbroot/test                                                adbroot_data_file
+ /data/anr                                                         anr_data_file
+ /data/anr/test                                                    anr_data_file
+ /data/apex                                                        apex_data_file
+diff --git a/prebuilts/api/202504/private/adbroot.te b/prebuilts/api/202504/private/adbroot.te
+new file mode 100644
+index 0000000..828ce90
+--- /dev/null
++++ b/prebuilts/api/202504/private/adbroot.te
+@@ -0,0 +1,17 @@
++type adbroot, domain, coredomain;
++type adbroot_exec, exec_type, file_type, system_file_type;
++
++init_daemon_domain(adbroot)
++
++binder_use(adbroot)
++binder_service(adbroot)
++add_service(adbroot, adbroot_service)
++
++allow adbroot package_native_service:service_manager find;
++binder_call(adbroot, system_server)
++
++allow adbroot adbroot_data_file:dir rw_dir_perms;
++allow adbroot adbroot_data_file:file create_file_perms;
++
++set_prop(adbroot, shell_prop)
++set_prop(adbroot, ctl_adbd_prop)
+diff --git a/prebuilts/api/202504/private/file.te b/prebuilts/api/202504/private/file.te
+index 6bdcc39..e44c073 100644
+--- a/prebuilts/api/202504/private/file.te
++++ b/prebuilts/api/202504/private/file.te
+@@ -14,6 +14,9 @@ type fs_bpf_loader, fs_type, bpffs_type;
+ type fs_bpf_uprobestats, fs_type, bpffs_type;
+ type fs_bpf_memevents, fs_type, bpffs_type;
+ 
++# /data/adbroot
++type adbroot_data_file, file_type, data_file_type, core_data_file_type;
++
+ # /data/misc/storaged
+ type storaged_data_file, file_type, data_file_type, core_data_file_type;
+ 
+diff --git a/prebuilts/api/202504/private/file_contexts b/prebuilts/api/202504/private/file_contexts
+index 0b3e7f4..01479b6 100644
+--- a/prebuilts/api/202504/private/file_contexts
++++ b/prebuilts/api/202504/private/file_contexts
+@@ -599,6 +599,7 @@
+ /data/dalvik-cache(/.*)? u:object_r:dalvikcache_data_file:s0
+ /data/ota(/.*)? u:object_r:ota_data_file:s0
+ /data/ota_package(/.*)? u:object_r:ota_package_file:s0
++/data/adbroot(/.*)?	u:object_r:adbroot_data_file:s0
+ /data/adb(/.*)?		u:object_r:adb_data_file:s0
+ /data/anr(/.*)?		u:object_r:anr_data_file:s0
+ /data/apex(/.*)?		u:object_r:apex_data_file:s0
+diff --git a/private/adbroot.te b/private/adbroot.te
+new file mode 100644
+index 0000000..828ce90
+--- /dev/null
++++ b/private/adbroot.te
+@@ -0,0 +1,17 @@
++type adbroot, domain, coredomain;
++type adbroot_exec, exec_type, file_type, system_file_type;
++
++init_daemon_domain(adbroot)
++
++binder_use(adbroot)
++binder_service(adbroot)
++add_service(adbroot, adbroot_service)
++
++allow adbroot package_native_service:service_manager find;
++binder_call(adbroot, system_server)
++
++allow adbroot adbroot_data_file:dir rw_dir_perms;
++allow adbroot adbroot_data_file:file create_file_perms;
++
++set_prop(adbroot, shell_prop)
++set_prop(adbroot, ctl_adbd_prop)
+diff --git a/private/file.te b/private/file.te
+index b832da4..6da616a 100644
+--- a/private/file.te
++++ b/private/file.te
+@@ -21,6 +21,9 @@ type fs_bpf_cputimeinstate, fs_type, bpffs_type;
+ # /data/system/mediadrm
+ type mediadrm_system_data_file, file_type, data_file_type, core_data_file_type;
+ 
++# /data/adbroot
++type adbroot_data_file, file_type, data_file_type, core_data_file_type;
++
+ # /data/misc/storaged
+ type storaged_data_file, file_type, data_file_type, core_data_file_type;
+ 
+diff --git a/private/file_contexts b/private/file_contexts
+index bc79eeb..0f2d238 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -605,6 +605,7 @@
+ /data/resource-cache(/.*)? u:object_r:resourcecache_data_file:s0
+ /data/dalvik-cache(/.*)? u:object_r:dalvikcache_data_file:s0
+ /data/ota_package(/.*)? u:object_r:ota_package_file:s0
++/data/adbroot(/.*)?	u:object_r:adbroot_data_file:s0
+ /data/adb(/.*)?		u:object_r:adb_data_file:s0
+ /data/anr(/.*)?		u:object_r:anr_data_file:s0
+ /data/apex(/.*)?		u:object_r:apex_data_file:s0
+-- 
+2.43.0
+
