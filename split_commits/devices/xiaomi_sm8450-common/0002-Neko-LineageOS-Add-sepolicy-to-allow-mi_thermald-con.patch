@@ -1,0 +1,28 @@
+From 574c82d5fdcb79c103fe1977b26e01b68e73b863 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 16:15:54 +0800
+Subject: [PATCH] Neko LineageOS: Add sepolicy to allow mi_thermald control
+
+TODO: Migrate it to device/lineage/sepolicy
+Change-Id: Ib7ca5d459576905b5ced7016405dee8acadefb39
+---
+ sepolicy/vendor/hal_lineage_health_default.te | 7 +++++++
+ 1 file changed, 7 insertions(+)
+ create mode 100644 sepolicy/vendor/hal_lineage_health_default.te
+
+diff --git a/sepolicy/vendor/hal_lineage_health_default.te b/sepolicy/vendor/hal_lineage_health_default.te
+new file mode 100644
+index 0000000..cca9d70
+--- /dev/null
++++ b/sepolicy/vendor/hal_lineage_health_default.te
+@@ -0,0 +1,7 @@
++allow hal_lineage_health_default vendor_sysfs_battery_supply:dir r_dir_perms;
++allow hal_lineage_health_default vendor_sysfs_battery_supply:file rw_file_perms;
++allow hal_lineage_health_default vendor_sysfs_battery_supply:lnk_file r_file_perms;
++allow hal_lineage_health_default thermal_data_file:dir { add_name read remove_name search write };
++allow hal_lineage_health_default thermal_data_file:file { create getattr open read rename setattr unlink write };
++set_prop(hal_lineage_health_default, ctl_start_prop)
++set_prop(hal_lineage_health_default, ctl_stop_prop)
+-- 
+2.43.0
+

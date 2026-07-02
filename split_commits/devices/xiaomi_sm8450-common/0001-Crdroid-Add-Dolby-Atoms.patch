@@ -1,0 +1,298 @@
+From dd9bdb44d168aab651714bc9c06c0a9b9251fddb Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 2 Jul 2026 15:59:14 +0800
+Subject: [PATCH] Crdroid: Add Dolby Atoms
+
+weiguangtwk:
+- This commit might contains accidently mixed-in Dolby Vision codes, if interested check [commit](https://github.com/aosp-pablo/device_xiaomi_sm8450-common/commit/eb69d077ae62fed0fcd803454e7445840e3bcfd6)
+  and [commit](https://github.com/aosp-pablo/hardware_dolby/commit/4b1866fbe65d17295670447017b43110997f603b)
+
+Co-authored-by: pabloescobar-reborn <yogivangala07@gmail.com>
+
+Change-Id: I48acb867ead50a688a80f06983dad4f21f4e9c18
+signed-off-by: WeiguangTWK <weiguangtwk@outlook.com>
+---
+ BoardConfigCommon.mk                          |  3 +
+ audio/audio_effects.xml                       | 56 +++++++++++++------
+ audio/audio_policy_configuration.xml          | 16 ++++--
+ common.mk                                     |  4 ++
+ extract-files.py                              |  3 +-
+ vintf/dolby_framework_matrix.xml              | 18 ++++++
+ .../vendor.dolby.hardware.dms@2.0-service.xml | 11 ++++
+ vintf/vendor.dolby.media.c2.xml               | 19 +++++++
+ 8 files changed, 106 insertions(+), 24 deletions(-)
+ create mode 100644 vintf/dolby_framework_matrix.xml
+ create mode 100644 vintf/vendor.dolby.hardware.dms@2.0-service.xml
+ create mode 100644 vintf/vendor.dolby.media.c2.xml
+
+diff --git a/BoardConfigCommon.mk b/BoardConfigCommon.mk
+index 43d7ccd..3cece97 100644
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -198,6 +198,8 @@ $(foreach sku, $(call to-upper, $(DEVICE_MANIFEST_SKUS)), \
+     $(eval DEVICE_MANIFEST_$(sku)_FILES := \
+         $(COMMON_PATH)/vintf/manifest.xml \
+         $(COMMON_PATH)/vintf/manifest_xiaomi.xml \
++        $(COMMON_PATH)/vintf/vendor.dolby.media.c2.xml \
++        $(COMMON_PATH)/vintf/vendor.dolby.hardware.dms@2.0-service.xml \
+         $(if $(TARGET_NFC_SUPPORTED_SKUS),$(COMMON_PATH)/vintf/manifest_no_nfc.xml,) \
+     ))
+ 
+@@ -208,6 +210,7 @@ $(foreach nfc_sku, $(call to-upper, $(TARGET_NFC_SUPPORTED_SKUS)), \
+ endif
+ 
+ DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE += \
++    $(COMMON_PATH)/vintf/dolby_framework_matrix.xml \
+     hardware/qcom-caf/common/vendor_framework_compatibility_matrix.xml \
+     hardware/xiaomi/vintf/xiaomi_framework_compatibility_matrix.xml
+ 
+diff --git a/audio/audio_effects.xml b/audio/audio_effects.xml
+index 10777d5..9de4aea 100644
+--- a/audio/audio_effects.xml
++++ b/audio/audio_effects.xml
+@@ -30,6 +30,9 @@
+     <libraries>
+         <library name="bundle" path="libbundlewrapper.so"/>
+         <library name="reverb" path="libreverbwrapper.so"/>
++        <library name="qcbassboost" path="libqcbassboost.so"/>
++        <library name="qcvirt" path="libqcvirt.so"/>
++        <library name="qcreverb" path="libqcreverb.so"/>
+         <library name="visualizer_sw" path="libvisualizer.so"/>
+         <library name="visualizer_hw" path="libqcomvisualizer.so"/>
+         <library name="downmix" path="libdownmix.so"/>
+@@ -40,14 +43,26 @@
+         <library name="audio_pre_processing" path="libqcomvoiceprocessing.so"/>
+         <library name="volume_listener" path="libvolumelistener.so"/>
+         <library name="audiosphere" path="libasphere.so"/>
++        <!--DOLBY DAP-->
++        <library name="dap" path="libswdap.so"/>
++        <library name="dvl" path="libdlbvol.so"/>
++        <!--DOLBY END-->
++        <!--DOLBY SPATIALIZER-->
++        <library name="spatializer" path="libswspatializer.so"/>
++        <!--DOLBY GAME-->
++        <library name="gamedap" path="libswgamedap.so"/>
++        <!--DOLBY END-->
++        <!--DOLBY VQE-->
++        <library name="vqe" path="libswvqe.so"/>
++        <!--DOLBY END-->
+     </libraries>
+     <effects>
+         <effectProxy name="bassboost" library="proxy" uuid="14804144-a5ee-4d24-aa88-0002a5d5c51b">
+-            <libsw library="bundle" uuid="8631f300-72e2-11df-b57e-0002a5d5c51b"/>
++            <libsw library="qcbassboost" uuid="23aca180-44bd-11e2-bcfd-0800200c9a66"/>
+             <libhw library="offload_bundle" uuid="2c4a8c24-1581-487f-94f6-0002a5d5c51b"/>
+         </effectProxy>
+         <effectProxy name="virtualizer" library="proxy" uuid="d3467faa-acc7-4d34-acaf-0002a5d5c51b">
+-            <libsw library="bundle" uuid="1d4033c0-8557-11df-9f2d-0002a5d5c51b"/>
++            <libsw library="qcvirt" uuid="e6c98a16-22a3-11e2-b87b-f23c91aec05e"/>
+             <libhw library="offload_bundle" uuid="509a4498-561a-4bea-b3b1-0002a5d5c51b"/>
+         </effectProxy>
+         <effectProxy name="equalizer" library="proxy" uuid="c8e70ecd-48ca-456e-8a4f-0002a5d5c51b">
+@@ -56,19 +71,19 @@
+         </effectProxy>
+         <effect name="volume" library="bundle" uuid="119341a0-8469-11df-81f9-0002a5d5c51b"/>
+         <effectProxy name="reverb_env_aux" library="proxy" uuid="48404ac9-d202-4ccc-bf84-0002a5d5c51b">
+-            <libsw library="reverb" uuid="4a387fc0-8ab3-11df-8bad-0002a5d5c51b"/>
++            <libsw library="qcreverb" uuid="a8c1e5f3-293d-43cd-95ec-d5e26c02e217"/>
+             <libhw library="offload_bundle" uuid="79a18026-18fd-4185-8233-0002a5d5c51b"/>
+         </effectProxy>
+         <effectProxy name="reverb_env_ins" library="proxy" uuid="b707403a-a1c1-4291-9573-0002a5d5c51b">
+-            <libsw library="reverb" uuid="c7a511a0-a3bb-11df-860e-0002a5d5c51b"/>
++            <libsw library="qcreverb" uuid="791fff8b-8129-4655-83a4-59bc61034c3a"/>
+             <libhw library="offload_bundle" uuid="eb64ea04-973b-43d2-8f5e-0002a5d5c51b"/>
+         </effectProxy>
+         <effectProxy name="reverb_pre_aux" library="proxy" uuid="1b78f587-6d1c-422e-8b84-0002a5d5c51b">
+-            <libsw library="reverb" uuid="f29a1400-a3bb-11df-8ddc-0002a5d5c51b"/>
++            <libsw library="qcreverb" uuid="53ef1db5-c0c0-445b-b060-e34d20ebb70a"/>
+             <libhw library="offload_bundle" uuid="6987be09-b142-4b41-9056-0002a5d5c51b"/>
+         </effectProxy>
+         <effectProxy name="reverb_pre_ins" library="proxy" uuid="f3e178d2-ebcb-408e-8357-0002a5d5c51b">
+-            <libsw library="reverb" uuid="172cdf00-a3bc-11df-a72f-0002a5d5c51b"/>
++            <libsw library="qcreverb" uuid="b08a0e38-22a5-11e2-b87b-f23c91aec05e"/>
+             <libhw library="offload_bundle" uuid="aa2bebf6-47cf-4613-9bca-0002a5d5c51b"/>
+         </effectProxy>
+         <effectProxy name="visualizer" library="proxy" uuid="1d0a1a53-7d5d-48f2-8e71-27fbd10d842c">
+@@ -86,23 +101,28 @@
+         <effect name="voice_helper" library="volume_listener" uuid="0ace5c08-0590-11e5-ae9e-0025b32654a0"/>
+         <effect name="notification_helper" library="volume_listener" uuid="0b776dde-0590-11e5-81ba-0025b32654a0"/>
+         <effect name="audiosphere" library="audiosphere" uuid="184e62ab-2d19-4364-9d1b-c0a40733866c"/>
++        <!--DOLBY DAP-->
++        <effect name="dap" library="dap" uuid="9d4921da-8225-4f29-aefa-39537a04bcaa"/>
++        <effect name="dlb_music_listener" library="dvl" uuid="40f66c8b-5aa5-4345-8919-53ec431aaa98"/>
++        <effect name="dlb_ring_listener" library="dvl" uuid="21d14087-558a-4f21-94a9-5002dce64bce"/>
++        <effect name="dlb_alarm_listener" library="dvl" uuid="6aff229c-30c6-4cc8-9957-dbfe5c1bd7f6"/>
++        <effect name="dlb_system_listener" library="dvl" uuid="874db4d8-051d-4b7b-bd95-a3bebc837e9e"/>
++        <effect name="dlb_notification_listener" library="dvl" uuid="1f0091e3-6ad8-40fe-9b09-5948f9a26e7e"/>
++        <effect name="dlb_voice_call_listener" library="dvl" uuid="58d13383-b41d-05df-d94e-bb23db293260"/>
++        <!--DOLBY END-->
++        <!--DOLBY SPATIALIZER-->
++        <effect name="spatializer" library="spatializer" uuid="ccd4cf09-a79d-46c2-9aae-06a1698d6c8f"/>
++        <!--DOLBY GAME-->
++        <effect name="gamedap" library="gamedap" uuid="3783c334-d3a0-4d13-874f-0032e5fb80e2"/>
++        <!--DOLBY END-->
++        <!--DOLBY VQE-->
++        <effect name="vqe" library="vqe" uuid="64a0f614-7fa4-48b8-b081-d59dc954616f"/>
++        <!--DOLBY END-->
+     </effects>
+     <postprocess>
+-        <stream type="music">
+-            <apply effect="music_helper"/>
+-        </stream>
+-        <stream type="ring">
+-            <apply effect="ring_helper"/>
+-        </stream>
+-        <stream type="alarm">
+-            <apply effect="alarm_helper"/>
+-        </stream>
+         <stream type="voice_call">
+             <apply effect="voice_helper"/>
+         </stream>
+-        <stream type="notification">
+-            <apply effect="notification_helper"/>
+-        </stream>
+     </postprocess>
+     <preprocess>
+         <stream type="voice_communication">
+diff --git a/audio/audio_policy_configuration.xml b/audio/audio_policy_configuration.xml
+index 71cd41f..c1a36de 100644
+--- a/audio/audio_policy_configuration.xml
++++ b/audio/audio_policy_configuration.xml
+@@ -109,6 +109,12 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+                              samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                 </mixPort>
+                 <mixPort name="hifi_playback" role="source" />
++                <!--DOLBY SPATIALIZER-->
++                <mixPort name="spatial output" role="source" flags="AUDIO_OUTPUT_FLAG_SPATIALIZER">
++                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
++                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
++                <!--DOLBY SPATIALIZER-->
++                </mixPort>
+                 <mixPort name="direct_pcm" role="source"
+                         flags="AUDIO_OUTPUT_FLAG_DIRECT">
+                     <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+@@ -361,11 +367,11 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+                 <route type="mix" sink="Earpiece"
+                        sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out"/>
+                 <route type="mix" sink="Speaker"
+-                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out"/>
++                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,spatial output"/>
+                 <route type="mix" sink="Wired Headset"
+-                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out"/>
++                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,spatial output"/>
+                 <route type="mix" sink="Wired Headphones"
+-                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out"/>
++                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,spatial output"/>
+                 <route type="mix" sink="Line"
+                        sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out"/>
+                 <route type="mix" sink="HDMI"
+@@ -381,9 +387,9 @@ IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+                 <route type="mix" sink="BT SCO Car Kit"
+                        sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx"/>
+                 <route type="mix" sink="USB Device Out"
+-                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,hifi_playback"/>
++                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,hifi_playback,spatial output"/>
+                 <route type="mix" sink="USB Headset Out"
+-                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,hifi_playback"/>
++                       sources="primary output,deep_buffer,direct_pcm,compressed_offload,voip_rx,mmap_no_irq_out,hifi_playback,spatial output"/>
+                 <route type="mix" sink="Telephony Tx"
+                        sources="voice_tx,incall_music_uplink"/>
+                 <route type="mix" sink="voice_rx"
+diff --git a/common.mk b/common.mk
+index 23ace53..6d65a22 100644
+--- a/common.mk
++++ b/common.mk
+@@ -138,6 +138,10 @@ PRODUCT_PACKAGES += \
+ PRODUCT_COPY_FILES += \
+     hardware/qcom-caf/sm8450/display/config/snapdragon_color_libs_config.xml:$(TARGET_COPY_OUT_VENDOR)/etc/snapdragon_color_libs_config.xml
+ 
++# Dolby
++DOLBY_SKIP_VINTF_INJECT := true
++$(call inherit-product, hardware/dolby/dolby.mk)
++
+ # DRM
+ PRODUCT_PACKAGES += \
+     android.hardware.drm-service.clearkey
+diff --git a/extract-files.py b/extract-files.py
+index 924e716..f54ddb6 100755
+--- a/extract-files.py
++++ b/extract-files.py
+@@ -81,7 +81,8 @@ blob_fixups: blob_fixups_user_type = {
+        'vendor/etc/media_codecs_taro.xml',
+        'vendor/etc/media_codecs_ukee.xml',
+     ): blob_fixup()
+-        .regex_replace('.+media_codecs_(google_audio|google_c2|google_telephony|vendor_audio).+\n', ''),
++        .regex_replace('.+media_codecs_(google_audio|google_c2|google_telephony|vendor_audio).+\n', '')
++        .regex_replace(r'(?s)(<MediaCodecs.*?>)',r'\1\n    <Include href="media_codecs_dolby_audio.xml" />'),
+     'vendor/etc/vintf/manifest/c2_manifest_vendor.xml': blob_fixup()
+         .regex_replace('.+dolby.+\n', ''),
+     (
+diff --git a/vintf/dolby_framework_matrix.xml b/vintf/dolby_framework_matrix.xml
+new file mode 100644
+index 0000000..f157ff4
+--- /dev/null
++++ b/vintf/dolby_framework_matrix.xml
+@@ -0,0 +1,18 @@
++<compatibility-matrix version="4.0" type="framework">
++    <hal format="hidl" optional="true">
++        <name>vendor.dolby.hardware.dms</name>
++        <version>2.0</version>
++        <interface>
++            <name>IDms</name>
++            <instance>default</instance>
++        </interface>
++    </hal>
++    <hal format="hidl" optional="true">
++        <name>android.hardware.media.c2</name>
++        <version>1.0</version>
++        <interface>
++            <name>IComponentStore</name>
++            <instance>default1</instance>
++        </interface>
++    </hal>
++</compatibility-matrix>
+diff --git a/vintf/vendor.dolby.hardware.dms@2.0-service.xml b/vintf/vendor.dolby.hardware.dms@2.0-service.xml
+new file mode 100644
+index 0000000..f52fb36
+--- /dev/null
++++ b/vintf/vendor.dolby.hardware.dms@2.0-service.xml
+@@ -0,0 +1,11 @@
++<manifest version="1.0" type="device">
++    <hal format="hidl">
++        <name>vendor.dolby.hardware.dms</name>
++        <transport>hwbinder</transport>
++        <version>2.0</version>
++        <interface>
++            <name>IDms</name>
++            <instance>default</instance>
++        </interface>
++    </hal>
++</manifest>
+diff --git a/vintf/vendor.dolby.media.c2.xml b/vintf/vendor.dolby.media.c2.xml
+new file mode 100644
+index 0000000..7505995
+--- /dev/null
++++ b/vintf/vendor.dolby.media.c2.xml
+@@ -0,0 +1,19 @@
++<!--
++
++     This program is protected under international and U.S. copyright laws as
++     an unpublished work. This program is confidential and proprietary to the
++     copyright owners. Reproduction or disclosure, in whole or in part, or the
++     production of derivative works therefrom without the express permission of
++     the copyright owners is prohibited.
++
++                   Copyright (C) 2020-2021 by Dolby Laboratories,
++                               All rights reserved.
++
++-->
++<manifest version="1.0" type="device">
++    <hal format="hidl">
++        <name>android.hardware.media.c2</name>
++        <transport>hwbinder</transport>
++        <fqname>@1.0::IComponentStore/default1</fqname>
++    </hal>
++</manifest>
+-- 
+2.43.0
+
