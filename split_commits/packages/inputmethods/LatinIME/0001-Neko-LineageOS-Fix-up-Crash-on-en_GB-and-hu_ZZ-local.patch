@@ -4,6 +4,44 @@ Date: Fri, 3 Jul 2026 12:42:34 +0800
 Subject: [PATCH] Neko LineageOS: Fix up! Crash on en_GB and hu_ZZ locale and
  Accessibility Feature enabled
 
+1781713189.846 10290 13969 13969 E AndroidRuntime: FATAL EXCEPTION: main
+1781713189.846 10290 13969 13969 E AndroidRuntime: Process: com.google.inputmethod.nekolos, PID: 13969
+1781713189.846 10290 13969 13969 E AndroidRuntime: android.content.res.Resources$NotFoundException: String resource ID #0x0
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.content.res.Resources.getText(Resources.java:480)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.content.res.Resources.getString(Resources.java:573)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.SubtypeLocaleUtils$1.job(SubtypeLocaleUtils.java:229)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.SubtypeLocaleUtils$1.job(SubtypeLocaleUtils.java:226)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.RunInLocale.runInLocale(RunInLocale.java:40)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.SubtypeLocaleUtils.getSubtypeLocaleDisplayNameInternal(SubtypeLocaleUtils.java:232)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.SubtypeLocaleUtils.getReplacementString(SubtypeLocaleUtils.java:265)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.SubtypeLocaleUtils.getSubtypeDisplayNameInternal(SubtypeLocaleUtils.java:286)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.utils.SubtypeLocaleUtils.getSubtypeDisplayNameInSystemLocale(SubtypeLocaleUtils.java:272)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.accessibility.MainKeyboardAccessibilityDelegate.announceKeyboardLanguage(MainKeyboardAccessibilityDelegate.java:122)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.accessibility.MainKeyboardAccessibilityDelegate.setKeyboard(MainKeyboardAccessibilityDelegate.java:91)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.keyboard.MainKeyboardView.setKeyboard(MainKeyboardView.java:407)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.keyboard.KeyboardSwitcher.setKeyboard(KeyboardSwitcher.java:167)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.keyboard.KeyboardSwitcher.setAlphabetKeyboard(KeyboardSwitcher.java:226)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.keyboard.internal.KeyboardState.setAlphabetKeyboard(KeyboardState.java:305)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.keyboard.internal.KeyboardState.onLoadKeyboard(KeyboardState.java:143)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.keyboard.KeyboardSwitcher.loadKeyboard(KeyboardSwitcher.java:138)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.LatinIME.onStartInputViewInternal(LatinIME.java:1077)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.LatinIME$UIHandler.onStartInputView(LatinIME.java:524)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.inputmethod.latin.LatinIME.onStartInputView(LatinIME.java:899)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.inputmethodservice.InputMethodService.startViews(InputMethodService.java:3216)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.inputmethodservice.InputMethodService.showWindow(InputMethodService.java:3083)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.inputmethodservice.InputMethodService$InputMethodImpl.showSoftInput(InputMethodService.java:975)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.inputmethodservice.InputMethodService$InputMethodImpl.showSoftInputWithToken(InputMethodService.java:937)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.inputmethodservice.IInputMethodWrapper.executeMessage(IInputMethodWrapper.java:231)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.internal.os.HandlerCaller$MyHandler.handleMessage(HandlerCaller.java:44)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.os.Handler.dispatchMessage(Handler.java:132)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.os.Looper.dispatchMessage(Looper.java:333)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.os.Looper.loopOnce(Looper.java:263)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.os.Looper.loop(Looper.java:367)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at android.app.ActivityThread.main(ActivityThread.java:9287)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at java.lang.reflect.Method.invoke(Native Method)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:566)
+1781713189.846 10290 13969 13969 E AndroidRuntime: 	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:929)
+
 Change-Id: I2d737ced98524cb7ebe65a55f17a158e56941d6a
 ---
  java/res/values/cm_strings.xml                |  2 --
