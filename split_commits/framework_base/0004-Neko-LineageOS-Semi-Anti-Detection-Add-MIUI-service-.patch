@@ -1,0 +1,169 @@
+From 943e536734f36f479966b67002dabb3073bdaf77 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:00:52 +0800
+Subject: [PATCH] Neko LineageOS: [Semi Anti Detection] Add MIUI service
+ placeholder
+
+Some detector (e.g. Hunter) will check service list to check if Xiaomi device runs custom rom, so I added a placeholder
+to bypasss the detection and  prepare for future service addon
+
+Change-Id: Ibd7a3bb59060968cc9b864acb88fb7cf1ff475fb
+---
+ core/java/miui/os/IMiuiInit.aidl              | 25 ++++++++++
+ core/java/miui/os/MiuiInit.java               | 47 +++++++++++++++++++
+ .../com/android/server/MiuiInitService.java   | 41 ++++++++++++++++
+ .../java/com/android/server/SystemServer.java |  4 ++
+ 4 files changed, 117 insertions(+)
+ create mode 100644 core/java/miui/os/IMiuiInit.aidl
+ create mode 100644 core/java/miui/os/MiuiInit.java
+ create mode 100644 services/core/java/com/android/server/MiuiInitService.java
+
+diff --git a/core/java/miui/os/IMiuiInit.aidl b/core/java/miui/os/IMiuiInit.aidl
+new file mode 100644
+index 000000000..e3c57bf42
+--- /dev/null
++++ b/core/java/miui/os/IMiuiInit.aidl
+@@ -0,0 +1,25 @@
++/*
++ * Copyright (C) 2026 Neko LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package miui.os;
++
++/**
++ * Placeholder Binder API for MIUI compatibility.
++ *
++ * @hide
++ */
++interface IMiuiInit {
++}
+diff --git a/core/java/miui/os/MiuiInit.java b/core/java/miui/os/MiuiInit.java
+new file mode 100644
+index 000000000..5353f0c6d
+--- /dev/null
++++ b/core/java/miui/os/MiuiInit.java
+@@ -0,0 +1,47 @@
++/*
++ * Copyright (C) 2026 Neko LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package miui.os;
++
++import android.os.IBinder;
++import android.os.ServiceManager;
++import android.util.Singleton;
++
++/**
++ * Compatibility wrapper around the MIUI init Binder service.
++ *
++ * @hide
++ */
++public class MiuiInit {
++    public static final String SERVICE_NAME = "MiuiInit";
++
++    private static final Singleton<IMiuiInit> IMiuiInitSingleton =
++            new Singleton<IMiuiInit>() {
++                @Override
++                protected IMiuiInit create() {
++                    final IBinder b = ServiceManager.getService(SERVICE_NAME);
++                    return IMiuiInit.Stub.asInterface(b);
++                }
++            };
++
++    /** @hide */
++    public static IMiuiInit getService() {
++        return IMiuiInitSingleton.get();
++    }
++
++    private MiuiInit() {
++    }
++}
+diff --git a/services/core/java/com/android/server/MiuiInitService.java b/services/core/java/com/android/server/MiuiInitService.java
+new file mode 100644
+index 000000000..19ae74459
+--- /dev/null
++++ b/services/core/java/com/android/server/MiuiInitService.java
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (C) 2026 Neko LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server;
++
++import android.content.Context;
++
++import miui.os.IMiuiInit;
++import miui.os.MiuiInit;
++
++/**
++ * Empty compatibility Binder published for MIUI clients.
++ */
++public class MiuiInitService extends IMiuiInit.Stub {
++    public static final class Lifecycle extends SystemService {
++        private MiuiInitService mService;
++
++        public Lifecycle(Context context) {
++            super(context);
++        }
++
++        @Override
++        public void onStart() {
++            mService = new MiuiInitService();
++            publishBinderService(MiuiInit.SERVICE_NAME, mService);
++        }
++    }
++}
+diff --git a/services/java/com/android/server/SystemServer.java b/services/java/com/android/server/SystemServer.java
+index a184d6a7e..59f7f0db6 100644
+--- a/services/java/com/android/server/SystemServer.java
++++ b/services/java/com/android/server/SystemServer.java
+@@ -1285,6 +1285,10 @@ public final class SystemServer implements Dumpable {
+         mWindowManagerGlobalLock = atm.getGlobalLock();
+         t.traceEnd();
+ 
++        t.traceBegin("StartMiuiInitService");
++        mSystemServiceManager.startService(MiuiInitService.Lifecycle.class);
++        t.traceEnd();
++
+         // Data loader manager service needs to be started before package manager
+         t.traceBegin("StartDataLoaderManagerService");
+         mDataLoaderManagerService = mSystemServiceManager.startService(
+-- 
+2.43.0
+

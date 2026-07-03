@@ -1,0 +1,26 @@
+From 7bed478da9a6ef6ec13e6d003af2ae93a97d5819 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 17:04:51 +0800
+Subject: [PATCH] Neko LineageOS: Copy lineage sample push package permission
+ to product
+
+Change-Id: Ib0feb94ee6ddcce64cf9b7346d26d37b488b27bc
+---
+ config/lineage_sdk_common.mk | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/config/lineage_sdk_common.mk b/config/lineage_sdk_common.mk
+index 217f837..8fc26ec 100644
+--- a/config/lineage_sdk_common.mk
++++ b/config/lineage_sdk_common.mk
+@@ -4,6 +4,7 @@ PRODUCT_COPY_FILES += \
+     vendor/lineage/config/permissions/org.lineageos.hardware.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.hardware.xml \
+     vendor/lineage/config/permissions/org.lineageos.health.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.health.xml \
+     vendor/lineage/config/permissions/org.lineageos.livedisplay.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.livedisplay.xml \
++    vendor/lineage/config/permissions/org.lineageos.push.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.push.xml \
+     vendor/lineage/config/permissions/org.lineageos.profiles.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.profiles.xml \
+     vendor/lineage/config/permissions/org.lineageos.settings.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.settings.xml \
+     vendor/lineage/config/permissions/org.lineageos.trust.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.trust.xml
+-- 
+2.43.0
+

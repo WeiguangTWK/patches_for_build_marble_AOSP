@@ -1,0 +1,30 @@
+From 1f45437934e97e89d3970d76abd1f8215f67cd8d Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:33:05 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Override build info to
+ prevent 'lineage' appears in getprop()
+
+Usually there is a <device code>_lineage in build variant prop, causing detection
+
+It is unavoidable if you want to hide lineage environment
+
+Change-Id: If5ce9a66e4905d24a0c022f1e4db80026d77442e
+---
+ lineage_marble.mk | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/lineage_marble.mk b/lineage_marble.mk
+index 5f0b274..21cfc3d 100644
+--- a/lineage_marble.mk
++++ b/lineage_marble.mk
+@@ -17,6 +17,7 @@ PRODUCT_BRAND := POCO
+ PRODUCT_MODEL := 23049PCD8G
+ 
+ PRODUCT_BUILD_PROP_OVERRIDES += \
++    BuildFlavor=marble_global-$(TARGET_BUILD_VARIANT) \
+     BuildDesc="marble_global-user 15 AQ3A.250226.002 OS3.0.4.0.VMRMIXM release-keys" \
+     BuildFingerprint=POCO/marble_global/marble:15/AQ3A.250226.002/OS3.0.4.0.VMRMIXM:user/release-keys \
+     DeviceProduct=marble \
+-- 
+2.43.0
+

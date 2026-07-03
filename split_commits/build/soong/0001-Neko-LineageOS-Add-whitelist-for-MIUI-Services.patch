@@ -1,0 +1,28 @@
+From 1fd2dfe8d2d2aad49648dd83fa29f488ea560c5d Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:08:21 +0800
+Subject: [PATCH] Neko LineageOS: Add whitelist for MIUI Services
+
+Soong build system will block some new added service (e.g. IMiuiInit), it is necessary before adding MIUI Service placeholder
+and other services
+
+Change-Id: I026f3c879ffe940aab325cb5d90d290eb42a399b
+---
+ scripts/check_boot_jars/package_allowed_list.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/scripts/check_boot_jars/package_allowed_list.txt b/scripts/check_boot_jars/package_allowed_list.txt
+index 95fe0b3..7e02d4a 100644
+--- a/scripts/check_boot_jars/package_allowed_list.txt
++++ b/scripts/check_boot_jars/package_allowed_list.txt
+@@ -138,6 +138,7 @@ org\.xml\.sax\.helpers
+ dalvik\..*
+ libcore\..*
+ android\..*
++miui\..*
+ com\.android\..*
+ ###################################################
+ # android.test.base.jar
+-- 
+2.43.0
+

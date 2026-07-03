@@ -1,0 +1,32 @@
+From 44177014902a6dde90018b4f3b9e87746a1cbf17 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:38:35 +0800
+Subject: [PATCH] Neko LineageOS: Make auto-brightness more responsive
+
+Change-Id: If0f0bab00d200d33648b6eba2a4ca202a2a59d7f
+---
+ overlay/Frameworks/res/values/config.xml | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/overlay/Frameworks/res/values/config.xml b/overlay/Frameworks/res/values/config.xml
+index 0c54b08..be71cb2 100644
+--- a/overlay/Frameworks/res/values/config.xml
++++ b/overlay/Frameworks/res/values/config.xml
+@@ -22,6 +22,14 @@
+     <item format="float" name="config_screenBrightnessSettingDefaultFloat" type="dimen">0.07496032</item>
+     <item format="float" name="config_screenBrightnessDimFloat" type="dimen">0.000854597</item>
+ 
++    <!-- Tune auto-brightness to react faster on marble while keeping jitter controlled. -->
++    <integer name="config_autoBrightnessBrighteningLightDebounce">800</integer>
++    <integer name="config_autoBrightnessDarkeningLightDebounce">1600</integer>
++    <integer name="config_autoBrightnessInitialLightSensorRate">100</integer>
++    <integer name="config_autoBrightnessLightSensorRate">200</integer>
++    <integer translatable="false" name="config_brightness_ramp_rate_fast">220</integer>
++    <integer translatable="false" name="config_brightness_ramp_rate_slow">90</integer>
++
+     <!-- Array of light sensor lux values to define our levels for auto backlight brightness support.
+          The N entries of this array define N + 1 control points as follows:
+          (1-based arrays)
+-- 
+2.43.0
+

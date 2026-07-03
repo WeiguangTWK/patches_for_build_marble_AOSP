@@ -1,0 +1,260 @@
+From b35878242c5b63ab94772ed9b6d99bfe02156b38 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:40:11 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Add MIUI Props into device
+ profile
+
+Since LineageOS doesn't have many service which is only available in OEM Android like MIUI, leading to many runtime props missing
+Some detector (e.g. Hunter) will detect it and judge custom rom
+
+Change-Id: I886635e815399663d02e5e2895c9d89ed68df82b
+---
+ properties/build_CN.prop | 73 ++++++++++++++++++++++++++++++++++++++++
+ properties/build_GL.prop | 72 +++++++++++++++++++++++++++++++++++++++
+ properties/build_IN.prop | 72 +++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 217 insertions(+)
+
+diff --git a/properties/build_CN.prop b/properties/build_CN.prop
+index 2025db3..f4391b2 100644
+--- a/properties/build_CN.prop
++++ b/properties/build_CN.prop
+@@ -7,3 +7,76 @@ ro.product.odm.manufacturer=Xiaomi
+ ro.product.odm.model=23049RAD8C
+ ro.product.odm.name=marble
+ ro.product.mod_device=marble
++
++# For hide purpose
++init.svc.miuibooster=running
++init.svc.miuitcptracker=stopped
++miui.usb.dialog=1
++persist.miui.miperf.enable=true
++persist.miui.wifi.upf.enable=
++persist.sys.enable_miui_booster=1
++persist.sys.hardcoder.name=miui_booster
++persist.sys.miui.camera.boost.killAdj_threshold=100
++persist.sys.miui.camera.version=2.7
++persist.sys.miui.sno=_tDCn7OprdAboSBMlGtNIw==
++persist.sys.miui_animator_sched.big_prime_cores=4-7
++persist.sys.miui_animator_sched.bigcores=4-6
++persist.sys.miui_animator_sched.sched_threads=2
++persist.sys.miui_gnss_dc=true
++persist.sys.miui_record_enable=true
++persist.sys.miui_resolution=1080,2400,420
++persist.sys.miui_scout_binder_full_kill_process=true
++persist.sys.miui_scout_enable=true
++persist.sys.miui_sptm.enable=true
++persist.sys.miui_sptm.enable_pl_type=3
++persist.sys.miuibooster.launch.rtmode=true
++persist.sys.miuibooster.name=miui_booster
++persist.sys.miuibooster.rtmode=true
++persist.sys.smart_gc.packages=com.miui.home,com.android.systemui
++persist.sys.stability.miui_fbo_enable=true
++persist.sys.stability.miui_fbo_start_count=0
++ro.config.miui_activity_embedding_enable=true
++ro.config.miui_orientation_projection_enable=true
++ro.miui.affinity.sfre=4-6
++ro.miui.affinity.sfui=4-6
++ro.miui.affinity.sfuireset=0-6
++ro.miui.allow_app_playbackcapture=true
++ro.miui.block_device_path=/dev/block/bootdevice/by-name
++ro.miui.build.region=cn
++ro.miui.business.version=marble.cn.1.1.0109
++ro.miui.cust_erofs=1
++ro.miui.cust_hardware=V1
++ro.miui.cust_variant=cn
++ro.miui.enable_cloud_verify=true
++ro.miui.has_cust_partition=true
++ro.miui.has_gmscore=1
++ro.miui.has_security_keyboard=1
++ro.miui.mcc=9460
++ro.miui.mnc=9999
++ro.miui.nfc.open_camera=1
++ro.miui.notch=1
++ro.miui.product.home=com.miui.home
++ro.miui.region=CN
++ro.miui.remove_uri_80_flag=1
++ro.miui.restrict_imei=1
++ro.miui.shell_anim_enable_fcb=true
++ro.miui.support.enable_new_factory_reset=1
++ro.miui.support_audiorecord_compress=true
++ro.miui.support_miui_ime_bottom=1
++ro.miui.ui.font.animation=disable
++ro.miui.ui.font.mi_font_path=/system/fonts/MiSansVF.ttf
++ro.miui.ui.font.theme_apply=true
++ro.miui.ui.font.version=3
++ro.miui.ui.fonttype=mipro
++ro.miui.ui.version.code=816
++ro.miui.ui.version.name=V816
++ro.miui.vicegwsd=true
++ro.vendor.audio.miui.karaoke.show=false
++ro.vendor.audio.miui.karaoke.tencent.show=false
++ro.vendor.miui.cust_hardware=V1
++ro.vendor.miui.cust_variant=cn
++ro.vendor.miui.mcc=9460
++ro.vendor.miui.mnc=9999
++ro.vendor.miui.region=CN
++sys.miui_bpf_ready=1
++
+diff --git a/properties/build_GL.prop b/properties/build_GL.prop
+index b6cb2a7..0cc959a 100644
+--- a/properties/build_GL.prop
++++ b/properties/build_GL.prop
+@@ -7,3 +7,75 @@ ro.product.odm.manufacturer=Xiaomi
+ ro.product.odm.model=23049PCD8G
+ ro.product.odm.name=marble_global
+ ro.product.mod_device=marble_global
++
++# For hide purpose
++init.svc.miuibooster=running
++init.svc.miuitcptracker=stopped
++miui.usb.dialog=1
++persist.miui.miperf.enable=true
++persist.miui.wifi.upf.enable=
++persist.sys.enable_miui_booster=1
++persist.sys.hardcoder.name=miui_booster
++persist.sys.miui.camera.boost.killAdj_threshold=100
++persist.sys.miui.camera.version=2.7
++persist.sys.miui.sno=_tDCn7OprdAboSBMlGtNIw==
++persist.sys.miui_animator_sched.big_prime_cores=4-7
++persist.sys.miui_animator_sched.bigcores=4-6
++persist.sys.miui_animator_sched.sched_threads=2
++persist.sys.miui_gnss_dc=true
++persist.sys.miui_record_enable=true
++persist.sys.miui_resolution=1080,2400,420
++persist.sys.miui_scout_binder_full_kill_process=true
++persist.sys.miui_scout_enable=true
++persist.sys.miui_sptm.enable=true
++persist.sys.miui_sptm.enable_pl_type=3
++persist.sys.miuibooster.launch.rtmode=true
++persist.sys.miuibooster.name=miui_booster
++persist.sys.miuibooster.rtmode=true
++persist.sys.smart_gc.packages=com.miui.home,com.android.systemui
++persist.sys.stability.miui_fbo_enable=true
++persist.sys.stability.miui_fbo_start_count=0
++ro.config.miui_activity_embedding_enable=true
++ro.config.miui_orientation_projection_enable=true
++ro.miui.affinity.sfre=4-6
++ro.miui.affinity.sfui=4-6
++ro.miui.affinity.sfuireset=0-6
++ro.miui.allow_app_playbackcapture=true
++ro.miui.block_device_path=/dev/block/bootdevice/by-name
++ro.miui.build.region=cn
++ro.miui.business.version=marble.cn.1.1.0109
++ro.miui.cust_erofs=1
++ro.miui.cust_hardware=V1
++ro.miui.cust_variant=cn
++ro.miui.enable_cloud_verify=true
++ro.miui.has_cust_partition=true
++ro.miui.has_gmscore=1
++ro.miui.has_security_keyboard=1
++ro.miui.mcc=9460
++ro.miui.mnc=9999
++ro.miui.nfc.open_camera=1
++ro.miui.notch=1
++ro.miui.product.home=com.miui.home
++ro.miui.region=CN
++ro.miui.remove_uri_80_flag=1
++ro.miui.restrict_imei=1
++ro.miui.shell_anim_enable_fcb=true
++ro.miui.support.enable_new_factory_reset=1
++ro.miui.support_audiorecord_compress=true
++ro.miui.support_miui_ime_bottom=1
++ro.miui.ui.font.animation=disable
++ro.miui.ui.font.mi_font_path=/system/fonts/MiSansVF.ttf
++ro.miui.ui.font.theme_apply=true
++ro.miui.ui.font.version=3
++ro.miui.ui.fonttype=mipro
++ro.miui.ui.version.code=816
++ro.miui.ui.version.name=V816
++ro.miui.vicegwsd=true
++ro.vendor.audio.miui.karaoke.show=false
++ro.vendor.audio.miui.karaoke.tencent.show=false
++ro.vendor.miui.cust_hardware=V1
++ro.vendor.miui.cust_variant=cn
++ro.vendor.miui.mcc=9460
++ro.vendor.miui.mnc=9999
++ro.vendor.miui.region=CN
++sys.miui_bpf_ready=1
+diff --git a/properties/build_IN.prop b/properties/build_IN.prop
+index d21d1b3..0884fbe 100644
+--- a/properties/build_IN.prop
++++ b/properties/build_IN.prop
+@@ -7,3 +7,75 @@ ro.product.odm.manufacturer=Xiaomi
+ ro.product.odm.model=23049PCD8I
+ ro.product.odm.name=marble_in_global
+ ro.product.mod_device=marble_in_global
++
++# For hide purpose
++init.svc.miuibooster=running
++init.svc.miuitcptracker=stopped
++miui.usb.dialog=1
++persist.miui.miperf.enable=true
++persist.miui.wifi.upf.enable=
++persist.sys.enable_miui_booster=1
++persist.sys.hardcoder.name=miui_booster
++persist.sys.miui.camera.boost.killAdj_threshold=100
++persist.sys.miui.camera.version=2.7
++persist.sys.miui.sno=_tDCn7OprdAboSBMlGtNIw==
++persist.sys.miui_animator_sched.big_prime_cores=4-7
++persist.sys.miui_animator_sched.bigcores=4-6
++persist.sys.miui_animator_sched.sched_threads=2
++persist.sys.miui_gnss_dc=true
++persist.sys.miui_record_enable=true
++persist.sys.miui_resolution=1080,2400,420
++persist.sys.miui_scout_binder_full_kill_process=true
++persist.sys.miui_scout_enable=true
++persist.sys.miui_sptm.enable=true
++persist.sys.miui_sptm.enable_pl_type=3
++persist.sys.miuibooster.launch.rtmode=true
++persist.sys.miuibooster.name=miui_booster
++persist.sys.miuibooster.rtmode=true
++persist.sys.smart_gc.packages=com.miui.home,com.android.systemui
++persist.sys.stability.miui_fbo_enable=true
++persist.sys.stability.miui_fbo_start_count=0
++ro.config.miui_activity_embedding_enable=true
++ro.config.miui_orientation_projection_enable=true
++ro.miui.affinity.sfre=4-6
++ro.miui.affinity.sfui=4-6
++ro.miui.affinity.sfuireset=0-6
++ro.miui.allow_app_playbackcapture=true
++ro.miui.block_device_path=/dev/block/bootdevice/by-name
++ro.miui.build.region=cn
++ro.miui.business.version=marble.cn.1.1.0109
++ro.miui.cust_erofs=1
++ro.miui.cust_hardware=V1
++ro.miui.cust_variant=cn
++ro.miui.enable_cloud_verify=true
++ro.miui.has_cust_partition=true
++ro.miui.has_gmscore=1
++ro.miui.has_security_keyboard=1
++ro.miui.mcc=9460
++ro.miui.mnc=9999
++ro.miui.nfc.open_camera=1
++ro.miui.notch=1
++ro.miui.product.home=com.miui.home
++ro.miui.region=CN
++ro.miui.remove_uri_80_flag=1
++ro.miui.restrict_imei=1
++ro.miui.shell_anim_enable_fcb=true
++ro.miui.support.enable_new_factory_reset=1
++ro.miui.support_audiorecord_compress=true
++ro.miui.support_miui_ime_bottom=1
++ro.miui.ui.font.animation=disable
++ro.miui.ui.font.mi_font_path=/system/fonts/MiSansVF.ttf
++ro.miui.ui.font.theme_apply=true
++ro.miui.ui.font.version=3
++ro.miui.ui.fonttype=mipro
++ro.miui.ui.version.code=816
++ro.miui.ui.version.name=V816
++ro.miui.vicegwsd=true
++ro.vendor.audio.miui.karaoke.show=false
++ro.vendor.audio.miui.karaoke.tencent.show=false
++ro.vendor.miui.cust_hardware=V1
++ro.vendor.miui.cust_variant=cn
++ro.vendor.miui.mcc=9460
++ro.vendor.miui.mnc=9999
++ro.vendor.miui.region=CN
++sys.miui_bpf_ready=1
+-- 
+2.43.0
+

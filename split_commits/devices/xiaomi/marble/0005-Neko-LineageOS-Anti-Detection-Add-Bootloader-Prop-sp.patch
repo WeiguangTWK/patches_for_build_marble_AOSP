@@ -1,0 +1,28 @@
+From 2d4264fc6bb22e1c3c16450c1e39e52da69fce76 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:36:20 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Add Bootloader Prop sproof
+
+There is nothing like "ro.boot.flash.locked" prop in LineageOS, so just hard code it into device profile is OK
+
+Change-Id: Ieda0256f511ccb33e62a7abb761d6cf9f2ff9333
+---
+ properties/system.prop | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/properties/system.prop b/properties/system.prop
+index 114d805..53e72bd 100644
+--- a/properties/system.prop
++++ b/properties/system.prop
+@@ -1,5 +1,8 @@
+ # Xiaomi
+ ro.product.mod_device=marble_global
+ 
++# Bootloader spoof
++ro.boot.flash.locked=1
++
+ BHIM UPI QR fix
+ vendor.camera.aux.packageexcludelist=in.org.npci.upiapp
+-- 
+2.43.0
+

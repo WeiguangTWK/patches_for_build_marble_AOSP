@@ -1,0 +1,47 @@
+From 4d564d74c9ba57c234ad42676123c5779fc47630 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:16:21 +0800
+Subject: [PATCH] CrDroid: Inherit MIUI Cam
+
+This commit only add MIUI Cam into the build, you need to clone following repo:
+
+Chaitanyakm/device_xiaomi_miuicamera-marble -> device/xiaomi/miuicamera-marble
+Chaitanyakm/vendor_xiaomi_miuicamera-marble -> vendor/xiaomi/miuicamera-marble
+
+Change-Id: I718afdddf727f949e1c1e4cc954b1fa7990819d1
+---
+ BoardConfig.mk | 3 +++
+ device.mk      | 3 +++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 8816f44..df6be69 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -13,6 +13,9 @@ include device/xiaomi/sm8450-common/BoardConfigCommon.mk
+ # Inherit from the proprietary version
+ include vendor/xiaomi/marble/BoardConfigVendor.mk
+ 
++# Inherit from proprietary files for miuicamera
++-include device/xiaomi/miuicamera-marble/BoardConfig.mk
++
+ DEVICE_PATH := device/xiaomi/marble
+ 
+ # Assert
+diff --git a/device.mk b/device.mk
+index caf6983..b7bf158 100644
+--- a/device.mk
++++ b/device.mk
+@@ -7,6 +7,9 @@
+ # NFC
+ TARGET_NFC_SUPPORTED_SKUS := marble
+ 
++# Inherit MIUICAM
++$(call inherit-product-if-exists, device/xiaomi/miuicamera-marble/device.mk)
++
+ # Inherit from xiaomi sm8450-common
+ $(call inherit-product, device/xiaomi/sm8450-common/common.mk)
+ 
+-- 
+2.43.0
+

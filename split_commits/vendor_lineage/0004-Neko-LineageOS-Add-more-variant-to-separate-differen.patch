@@ -1,0 +1,38 @@
+From d3fee2558581a038fb529d5d9080e1dd5eaa8239 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 17:06:17 +0800
+Subject: [PATCH] Neko LineageOS: Add more variant to separate different update
+ channel
+
+Neko LineageOS is a LineageOS fork which uses EROFS as its filesystem and AVB enabled, making it reliable & fast but
+barely impossible to modify super partition to add more feature
+
+So it is separated into three variant: GMS MICROG NOGMS to make it work with OTA update
+
+Change-Id: I1062a0e3f3b7e0416f74c338f5950d77806fdbd7
+---
+ config/version.mk | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/config/version.mk b/config/version.mk
+index 7b7e646..3a228f6 100644
+--- a/config/version.mk
++++ b/config/version.mk
+@@ -18,12 +18,12 @@ ifndef LINEAGE_BUILDTYPE
+ endif
+ 
+ # Filter out random types, so it'll reset to UNOFFICIAL
+-ifeq ($(filter RELEASE NIGHTLY SNAPSHOT EXPERIMENTAL,$(LINEAGE_BUILDTYPE)),)
++ifeq ($(filter RELEASE NIGHTLY SNAPSHOT EXPERIMENTAL UNOFFICIAL-NOGMS UNOFFICIAL-MICROG UNOFFICIAL-GMS,$(LINEAGE_BUILDTYPE)),)
+     LINEAGE_BUILDTYPE := UNOFFICIAL
+     LINEAGE_EXTRAVERSION :=
+ endif
+ 
+-ifeq ($(LINEAGE_BUILDTYPE), UNOFFICIAL)
++ifneq ($(filter UNOFFICIAL UNOFFICIAL-NOGMS UNOFFICIAL-MICROG UNOFFICIAL-GMS,$(LINEAGE_BUILDTYPE)),)
+     ifneq ($(TARGET_UNOFFICIAL_BUILD_ID),)
+         LINEAGE_EXTRAVERSION := -$(TARGET_UNOFFICIAL_BUILD_ID)
+     endif
+-- 
+2.43.0
+

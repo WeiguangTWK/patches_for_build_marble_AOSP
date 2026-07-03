@@ -1,0 +1,26 @@
+From 9576e505eb67881eac18c1b32656ec5034b403ef Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:27:09 +0800
+Subject: [PATCH] Neko LineageOS: Fix up! BHIM UPI Qr scanner issue
+
+For months I've been treat it as detection/risk control problem, then some hint me noticed me that actually it is caused
+by BHIM UPI cannot properly support device with multiple camera
+
+Change-Id: I1e019a83ce30677bbf93333c47be4c119e7d535e
+---
+ properties/system.prop | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/properties/system.prop b/properties/system.prop
+index 2618726..114d805 100644
+--- a/properties/system.prop
++++ b/properties/system.prop
+@@ -1,2 +1,5 @@
+ # Xiaomi
+ ro.product.mod_device=marble_global
++
++BHIM UPI QR fix
++vendor.camera.aux.packageexcludelist=in.org.npci.upiapp
+-- 
+2.43.0
+

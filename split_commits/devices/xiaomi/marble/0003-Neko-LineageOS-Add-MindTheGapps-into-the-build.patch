@@ -1,0 +1,29 @@
+From 0da007c0b64372c3002e5974b46553f3839c3b21 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 16:30:26 +0800
+Subject: [PATCH] Neko LineageOS: Add MindTheGapps into the build
+
+This is very necessary if use EROFS, go and check MindTheGapps GitLab repo for more guidance
+
+Change-Id: I9372764969eb1a0d4397f5f8508b6cf607fad8cb
+---
+ device.mk | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/device.mk b/device.mk
+index b7bf158..386af40 100644
+--- a/device.mk
++++ b/device.mk
+@@ -16,6 +16,9 @@ $(call inherit-product, device/xiaomi/sm8450-common/common.mk)
+ # Inherit from the proprietary version
+ $(call inherit-product, vendor/xiaomi/marble/marble-vendor.mk)
+ 
++# Inherit Gapps
++$(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)
++
+ # Init scripts
+ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/rootdir/etc/init.marble.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.marble.rc
+-- 
+2.43.0
+
