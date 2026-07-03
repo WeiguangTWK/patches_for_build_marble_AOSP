@@ -1,0 +1,80 @@
+From 0c37ee41c49e77a74ff43599492fbfd57c7299d6 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 10:20:51 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Remove adb_root service
+ policy
+
+Change-Id: Ia51b14f19f31f23d8c728cde0fcd6e015fb86a7d
+---
+ common/private/adbd.te       |  2 --
+ common/private/adbroot.te    | 17 -----------------
+ common/private/file_contexts |  6 +-----
+ common/private/service.te    |  1 -
+ 4 files changed, 1 insertion(+), 25 deletions(-)
+ delete mode 100644 common/private/adbd.te
+ delete mode 100644 common/private/adbroot.te
+
+diff --git a/common/private/adbd.te b/common/private/adbd.te
+deleted file mode 100644
+index e5ef587..0000000
+--- a/common/private/adbd.te
++++ /dev/null
+@@ -1,2 +0,0 @@
+-allow adbd adbroot:binder call;
+-allow adbd adbroot_service:service_manager find;
+diff --git a/common/private/adbroot.te b/common/private/adbroot.te
+deleted file mode 100644
+index 828ce90..0000000
+--- a/common/private/adbroot.te
++++ /dev/null
+@@ -1,17 +0,0 @@
+-type adbroot, domain, coredomain;
+-type adbroot_exec, exec_type, file_type, system_file_type;
+-
+-init_daemon_domain(adbroot)
+-
+-binder_use(adbroot)
+-binder_service(adbroot)
+-add_service(adbroot, adbroot_service)
+-
+-allow adbroot package_native_service:service_manager find;
+-binder_call(adbroot, system_server)
+-
+-allow adbroot adbroot_data_file:dir rw_dir_perms;
+-allow adbroot adbroot_data_file:file create_file_perms;
+-
+-set_prop(adbroot, shell_prop)
+-set_prop(adbroot, ctl_adbd_prop)
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index dcca52f..9fda3a2 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -1,5 +1,5 @@
+ # Filesystem tools
+-/system/bin/fsck\.ntfs                  u:object_r:fsck_exec:s0
++/system/bin/fsck\.ntfs                  u:object_r:fsck_ntfs_untrusted_exec:s0
+ /system/bin/mkfs\.exfat                 u:object_r:mkfs_exec:s0
+ /system/bin/mkfs\.f2fs                  u:object_r:mkfs_exec:s0
+ /system/bin/mkfs\.ntfs                  u:object_r:mkfs_exec:s0
+@@ -58,9 +58,5 @@
+ /system/bin/backuptool_ab\.sh                     u:object_r:postinstall_exec:s0
+ /system/bin/backuptool_postinstall\.sh            u:object_r:postinstall_exec:s0
+ 
+-# ADB Root
+-/(system_ext|system/system_ext)/bin/adb_root      u:object_r:adbroot_exec:s0
+-/data/adbroot(/.*)?        u:object_r:adbroot_data_file:s0
+-
+ # Bash
+ /(system_ext|system/system_ext)/bin/bash          u:object_r:shell_exec:s0
+diff --git a/common/private/service.te b/common/private/service.te
+index d20f193..ba721d8 100644
+--- a/common/private/service.te
++++ b/common/private/service.te
+@@ -1,4 +1,3 @@
+-type adbroot_service,                   service_manager_type;
+ type lineage_hardware_service, system_api_service, system_server_service, service_manager_type;
+ type lineage_health_interface_service, system_api_service, system_server_service, service_manager_type;
+ type lineage_globalactions_service, system_api_service, system_server_service, service_manager_type;
+-- 
+2.43.0
+

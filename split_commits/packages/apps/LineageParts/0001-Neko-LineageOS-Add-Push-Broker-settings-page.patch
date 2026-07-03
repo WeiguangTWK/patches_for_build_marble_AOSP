@@ -1,0 +1,1136 @@
+From a3a867f78549ebf205ef35df9f8bf1c0820841fa Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 1 Jul 2026 13:46:45 +0800
+Subject: [PATCH] Neko LineageOS: Add Push Broker settings page
+
+Change-Id: I719c91b3ace625a9c8ec5d8dedae15ce28f837f3
+---
+ res/values-zh-rCN/strings_push_broker.xml     |  52 ++
+ res/values-zh-rTW/strings_push_broker.xml     |  52 ++
+ res/values/strings.xml                        |  50 ++
+ res/xml/parts_catalog.xml                     |   6 +
+ ...push_broker_compatibility_app_settings.xml |  15 +
+ res/xml/push_broker_settings.xml              |  36 ++
+ .../PushBrokerCompatibilityAppSettings.java   | 330 +++++++++++
+ .../lineageparts/push/PushBrokerSettings.java | 511 ++++++++++++++++++
+ 8 files changed, 1052 insertions(+)
+ create mode 100644 res/values-zh-rCN/strings_push_broker.xml
+ create mode 100644 res/values-zh-rTW/strings_push_broker.xml
+ create mode 100644 res/xml/push_broker_compatibility_app_settings.xml
+ create mode 100644 res/xml/push_broker_settings.xml
+ create mode 100644 src/org/lineageos/lineageparts/push/PushBrokerCompatibilityAppSettings.java
+ create mode 100644 src/org/lineageos/lineageparts/push/PushBrokerSettings.java
+
+diff --git a/res/values-zh-rCN/strings_push_broker.xml b/res/values-zh-rCN/strings_push_broker.xml
+new file mode 100644
+index 0000000..471e4cb
+--- /dev/null
++++ b/res/values-zh-rCN/strings_push_broker.xml
+@@ -0,0 +1,52 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="third_party_notification_push_provider_title">第三方通知推送提供方</string>
++    <string name="third_party_notification_push_provider_summary">选择并管理可插拔的推送提供方</string>
++    <string name="third_party_notification_push_provider_status_title">状态</string>
++    <string name="active_notification_push_provider_title">当前提供方</string>
++    <string name="available_notification_push_provider_title">可用提供方</string>
++    <string name="disable_notification_push_provider_title">停用当前提供方</string>
++    <string name="disable_notification_push_provider_summary">停止使用当前已选中的提供方</string>
++    <string name="avoid_duplicate_push_title">避免重复推送</string>
++    <string name="avoid_duplicate_push_summary">减少应用休眠后由推送框架和应用本体同时发出重复通知的情况。可能增加少量后台处理。</string>
++    <string name="no_notification_push_provider_active">未选择提供方</string>
++    <string name="no_notification_push_provider_installed">未安装兼容的推送提供方</string>
++    <string name="notification_push_compatibility_status_title">兼容状态</string>
++    <string name="notification_push_compatibility_apps_title">兼容应用</string>
++    <string name="notification_push_compatibility_not_available">当前没有活动的兼容提供方</string>
++    <string name="notification_push_compatibility_summary">已授权应用：%1$d，受支持应用：%2$d</string>
++    <string name="notification_push_compatibility_single_profile_summary">针对单 profile 兼容提供方的临时控制项</string>
++    <string name="notification_push_compatibility_profiles_summary">配置文件：%1$s</string>
++    <string name="notification_push_compatibility_authorized">已授权</string>
++    <string name="notification_push_compatibility_supported">受支持</string>
++    <string name="notification_push_compatibility_profiles_label">配置文件</string>
++    <string name="notification_push_compatibility_capabilities_summary">能力：%1$s</string>
++    <string name="notification_push_compatibility_capability_controls">能力控制</string>
++    <string name="notification_push_compatibility_capability_title">%1$s：%2$s</string>
++    <string name="notification_push_compatibility_capability_available">Broker 能力可用</string>
++    <string name="notification_push_compatibility_capability_unavailable">当前构建不支持此 Broker 能力</string>
++    <string name="notification_push_compatibility_capability_signature_spoof">签名欺骗</string>
++    <string name="notification_push_compatibility_capability_package_sync">包状态同步</string>
++    <string name="notification_push_compatibility_capability_keepalive">服务保活</string>
++    <string name="notification_push_compatibility_result_summary">prepare=%1$s，sync=%2$s，token=%3$s</string>
++    <string name="notification_push_compatibility_unknown_result">-</string>
++    <string name="notification_push_compatibility_effective">生效中的能力</string>
++    <string name="notification_push_compatibility_results">Broker 结果</string>
++    <string name="notification_push_provider_unavailable">此构建中 Push Broker 不可用</string>
++    <string name="notification_push_provider_disabled">已停用提供方</string>
++    <string name="notification_push_provider_disable_failed">停用提供方失败</string>
++    <string name="notification_push_provider_enabled">已启用提供方</string>
++    <string name="notification_push_provider_enable_failed">启用提供方失败</string>
++    <string name="notification_push_provider_setup_required">请先完成提供方设置再启用</string>
++    <string name="notification_push_provider_state_enabled">已启用</string>
++    <string name="notification_push_provider_state_degraded">已降级</string>
++    <string name="notification_push_provider_state_selected">已选中</string>
++    <string name="notification_push_provider_state_requires_action">需要用户操作</string>
++    <string name="notification_push_provider_type_native">原生</string>
++    <string name="notification_push_provider_type_compatibility">兼容</string>
++    <string name="notification_push_provider_type_unknown">未知类型</string>
++    <string name="notification_push_provider_trust_system">系统</string>
++    <string name="notification_push_provider_trust_user">用户已批准</string>
++    <string name="notification_push_provider_trust_rejected">已拒绝</string>
++    <string name="notification_push_provider_trust_unknown">未知信任状态</string>
++</resources>
+diff --git a/res/values-zh-rTW/strings_push_broker.xml b/res/values-zh-rTW/strings_push_broker.xml
+new file mode 100644
+index 0000000..432d5b1
+--- /dev/null
++++ b/res/values-zh-rTW/strings_push_broker.xml
+@@ -0,0 +1,52 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="third_party_notification_push_provider_title">第三方通知推送提供方</string>
++    <string name="third_party_notification_push_provider_summary">選擇並管理可插拔的推送提供方</string>
++    <string name="third_party_notification_push_provider_status_title">狀態</string>
++    <string name="active_notification_push_provider_title">目前提供方</string>
++    <string name="available_notification_push_provider_title">可用提供方</string>
++    <string name="disable_notification_push_provider_title">停用目前提供方</string>
++    <string name="disable_notification_push_provider_summary">停止使用目前已選取的提供方</string>
++    <string name="avoid_duplicate_push_title">避免重複推送</string>
++    <string name="avoid_duplicate_push_summary">減少應用程式休眠後由推送框架和應用程式本體同時發出重複通知的情況。可能會增加少量背景處理。</string>
++    <string name="no_notification_push_provider_active">未選擇提供方</string>
++    <string name="no_notification_push_provider_installed">未安裝相容的推送提供方</string>
++    <string name="notification_push_compatibility_status_title">相容狀態</string>
++    <string name="notification_push_compatibility_apps_title">相容應用程式</string>
++    <string name="notification_push_compatibility_not_available">目前沒有啟用中的相容提供方</string>
++    <string name="notification_push_compatibility_summary">已授權應用程式：%1$d，支援的應用程式：%2$d</string>
++    <string name="notification_push_compatibility_single_profile_summary">針對單一 profile 相容提供方的暫時控制項</string>
++    <string name="notification_push_compatibility_profiles_summary">設定檔：%1$s</string>
++    <string name="notification_push_compatibility_authorized">已授權</string>
++    <string name="notification_push_compatibility_supported">受支援</string>
++    <string name="notification_push_compatibility_profiles_label">設定檔</string>
++    <string name="notification_push_compatibility_capabilities_summary">能力：%1$s</string>
++    <string name="notification_push_compatibility_capability_controls">能力控制</string>
++    <string name="notification_push_compatibility_capability_title">%1$s：%2$s</string>
++    <string name="notification_push_compatibility_capability_available">Broker 能力可用</string>
++    <string name="notification_push_compatibility_capability_unavailable">此版本建置不支援這項 Broker 能力</string>
++    <string name="notification_push_compatibility_capability_signature_spoof">簽章欺騙</string>
++    <string name="notification_push_compatibility_capability_package_sync">套件狀態同步</string>
++    <string name="notification_push_compatibility_capability_keepalive">服務保活</string>
++    <string name="notification_push_compatibility_result_summary">prepare=%1$s，sync=%2$s，token=%3$s</string>
++    <string name="notification_push_compatibility_unknown_result">-</string>
++    <string name="notification_push_compatibility_effective">生效中的能力</string>
++    <string name="notification_push_compatibility_results">Broker 結果</string>
++    <string name="notification_push_provider_unavailable">此版本建置中的 Push Broker 不可用</string>
++    <string name="notification_push_provider_disabled">已停用提供方</string>
++    <string name="notification_push_provider_disable_failed">停用提供方失敗</string>
++    <string name="notification_push_provider_enabled">已啟用提供方</string>
++    <string name="notification_push_provider_enable_failed">啟用提供方失敗</string>
++    <string name="notification_push_provider_setup_required">請先完成提供方設定再啟用</string>
++    <string name="notification_push_provider_state_enabled">已啟用</string>
++    <string name="notification_push_provider_state_degraded">已降級</string>
++    <string name="notification_push_provider_state_selected">已選取</string>
++    <string name="notification_push_provider_state_requires_action">需要使用者操作</string>
++    <string name="notification_push_provider_type_native">原生</string>
++    <string name="notification_push_provider_type_compatibility">相容</string>
++    <string name="notification_push_provider_type_unknown">未知類型</string>
++    <string name="notification_push_provider_trust_system">系統</string>
++    <string name="notification_push_provider_trust_user">使用者已核准</string>
++    <string name="notification_push_provider_trust_rejected">已拒絕</string>
++    <string name="notification_push_provider_trust_unknown">未知信任狀態</string>
++</resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 9a0010f..a4aa858 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -518,6 +518,56 @@
+     <string name="network_traffic_autohide_summary">Hide the traffic monitor when there is no activity</string>
+     <string name="network_traffic_hide_arrows">Hide arrows</string>
+     <string name="network_traffic_hide_arrows_summary">Hide upload and download direction arrows</string>
++
++    <string name="third_party_notification_push_provider_title">Third-party notification push provider</string>
++    <string name="third_party_notification_push_provider_summary">Choose and manage a pluggable push provider</string>
++    <string name="third_party_notification_push_provider_status_title">Status</string>
++    <string name="active_notification_push_provider_title">Active provider</string>
++    <string name="available_notification_push_provider_title">Available providers</string>
++    <string name="disable_notification_push_provider_title">Disable current provider</string>
++    <string name="disable_notification_push_provider_summary">Stop using the currently selected provider</string>
++    <string name="avoid_duplicate_push_title">Avoid duplicate push notifications</string>
++    <string name="avoid_duplicate_push_summary">Reduce duplicate notifications when the push framework posts first and the app later resumes and posts its own notification. May add a small amount of background processing.</string>
++    <string name="no_notification_push_provider_active">No provider selected</string>
++    <string name="no_notification_push_provider_installed">No compatible push providers installed</string>
++    <string name="notification_push_compatibility_status_title">Compatibility status</string>
++    <string name="notification_push_compatibility_apps_title">Compatibility apps</string>
++    <string name="notification_push_compatibility_not_available">No active compatibility provider</string>
++    <string name="notification_push_compatibility_summary">Authorized apps: %1$d, supported apps: %2$d</string>
++    <string name="notification_push_compatibility_single_profile_summary">Temporary control for single-profile compatibility providers</string>
++    <string name="notification_push_compatibility_profiles_summary">Profiles: %1$s</string>
++    <string name="notification_push_compatibility_authorized">Authorized</string>
++    <string name="notification_push_compatibility_supported">Supported</string>
++    <string name="notification_push_compatibility_profiles_label">Profiles</string>
++    <string name="notification_push_compatibility_capabilities_summary">Capabilities: %1$s</string>
++    <string name="notification_push_compatibility_capability_controls">Capability controls</string>
++    <string name="notification_push_compatibility_capability_title">%1$s: %2$s</string>
++    <string name="notification_push_compatibility_capability_available">Broker capability available</string>
++    <string name="notification_push_compatibility_capability_unavailable">Broker capability not available on this build</string>
++    <string name="notification_push_compatibility_capability_signature_spoof">Signature spoof</string>
++    <string name="notification_push_compatibility_capability_package_sync">Package state sync</string>
++    <string name="notification_push_compatibility_capability_keepalive">Service keepalive</string>
++    <string name="notification_push_compatibility_result_summary">prepare=%1$s, sync=%2$s, token=%3$s</string>
++    <string name="notification_push_compatibility_unknown_result">-</string>
++    <string name="notification_push_compatibility_effective">Effective capabilities</string>
++    <string name="notification_push_compatibility_results">Broker results</string>
++    <string name="notification_push_provider_unavailable">Push Broker is unavailable on this build</string>
++    <string name="notification_push_provider_disabled">Provider disabled</string>
++    <string name="notification_push_provider_disable_failed">Failed to disable provider</string>
++    <string name="notification_push_provider_enabled">Provider enabled</string>
++    <string name="notification_push_provider_enable_failed">Failed to enable provider</string>
++    <string name="notification_push_provider_setup_required">Finish provider setup before enabling it</string>
++    <string name="notification_push_provider_state_enabled">Enabled</string>
++    <string name="notification_push_provider_state_degraded">Degraded</string>
++    <string name="notification_push_provider_state_selected">Selected</string>
++    <string name="notification_push_provider_state_requires_action">Requires user action</string>
++    <string name="notification_push_provider_type_native">Native</string>
++    <string name="notification_push_provider_type_compatibility">Compatibility</string>
++    <string name="notification_push_provider_type_unknown">Unknown type</string>
++    <string name="notification_push_provider_trust_system">System</string>
++    <string name="notification_push_provider_trust_user">User installed</string>
++    <string name="notification_push_provider_trust_rejected">Rejected</string>
++    <string name="notification_push_provider_trust_unknown">Unknown trust</string>
+     <string name="network_traffic_units_title">Traffic measurement units</string>
+     <string name="network_traffic_units_kilobits">Kilobits per second (kb/s)</string>
+     <string name="network_traffic_units_megabits">Megabits per second (Mb/s)</string>
+diff --git a/res/xml/parts_catalog.xml b/res/xml/parts_catalog.xml
+index 8906d2f..71a7fd0 100644
+--- a/res/xml/parts_catalog.xml
++++ b/res/xml/parts_catalog.xml
+@@ -74,6 +74,12 @@
+           android:fragment="org.lineageos.lineageparts.input.PowerMenuActions"
+           lineage:xmlRes="@xml/power_menu_settings" />
+ 
++    <part android:key="third_party_notification_push_provider"
++          android:title="@string/third_party_notification_push_provider_title"
++          android:summary="@string/third_party_notification_push_provider_summary"
++          android:fragment="org.lineageos.lineageparts.push.PushBrokerSettings"
++          lineage:xmlRes="@xml/push_broker_settings" />
++
+     <part android:key="long_screen_settings"
+           android:title="@string/long_screen_settings_title"
+           android:summary="@string/long_screen_settings_summary"
+diff --git a/res/xml/push_broker_compatibility_app_settings.xml b/res/xml/push_broker_compatibility_app_settings.xml
+new file mode 100644
+index 0000000..a50cb4b
+--- /dev/null
++++ b/res/xml/push_broker_compatibility_app_settings.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
++
++    <SwitchPreferenceCompat
++        android:key="push_provider_compatibility_app_switch"
++        android:title="@string/notification_push_compatibility_apps_title" />
++
++    <PreferenceCategory
++        android:key="push_provider_compatibility_app_status"
++        android:title="@string/notification_push_compatibility_status_title" />
++
++    <PreferenceCategory
++        android:key="push_provider_compatibility_app_capabilities"
++        android:title="@string/notification_push_compatibility_capability_controls" />
++</PreferenceScreen>
+diff --git a/res/xml/push_broker_settings.xml b/res/xml/push_broker_settings.xml
+new file mode 100644
+index 0000000..00deddd
+--- /dev/null
++++ b/res/xml/push_broker_settings.xml
+@@ -0,0 +1,36 @@
++<?xml version="1.0" encoding="utf-8"?>
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    android:title="@string/third_party_notification_push_provider_title">
++
++    <PreferenceCategory
++        android:key="push_provider_status"
++        android:title="@string/third_party_notification_push_provider_status_title">
++
++        <Preference
++            android:key="push_provider_active"
++            android:title="@string/active_notification_push_provider_title"
++            android:summary="@string/no_notification_push_provider_active" />
++
++        <Preference
++            android:key="push_provider_disable"
++            android:title="@string/disable_notification_push_provider_title"
++            android:summary="@string/disable_notification_push_provider_summary" />
++
++        <SwitchPreferenceCompat
++            android:key="push_provider_avoid_duplicate_push"
++            android:title="@string/avoid_duplicate_push_title"
++            android:summary="@string/avoid_duplicate_push_summary" />
++    </PreferenceCategory>
++
++    <PreferenceCategory
++        android:key="push_provider_list"
++        android:title="@string/available_notification_push_provider_title" />
++
++    <PreferenceCategory
++        android:key="push_provider_compatibility_status"
++        android:title="@string/notification_push_compatibility_status_title" />
++
++    <PreferenceCategory
++        android:key="push_provider_compatibility_apps"
++        android:title="@string/notification_push_compatibility_apps_title" />
++</PreferenceScreen>
+diff --git a/src/org/lineageos/lineageparts/push/PushBrokerCompatibilityAppSettings.java b/src/org/lineageos/lineageparts/push/PushBrokerCompatibilityAppSettings.java
+new file mode 100644
+index 0000000..af7b559
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/push/PushBrokerCompatibilityAppSettings.java
+@@ -0,0 +1,330 @@
++/*
++ * Copyright (C) 2026 Neko-LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.lineageos.lineageparts.push;
++
++import android.content.Context;
++import android.content.pm.PackageManager;
++import android.os.Bundle;
++import android.os.UserHandle;
++import android.text.TextUtils;
++import android.widget.Toast;
++
++import androidx.preference.Preference;
++import androidx.preference.PreferenceCategory;
++import androidx.preference.SwitchPreferenceCompat;
++
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++import org.lineageos.lineageparts.search.BaseSearchIndexProvider;
++import org.lineageos.lineageparts.search.Searchable;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++import lineageos.push.PushBrokerConstants;
++import lineageos.push.PushBrokerManager;
++import lineageos.push.PushProviderInfo;
++
++public class PushBrokerCompatibilityAppSettings extends SettingsPreferenceFragment
++        implements Searchable {
++    private static final String KEY_APP_SWITCH = "push_provider_compatibility_app_switch";
++    private static final String KEY_STATUS_CATEGORY = "push_provider_compatibility_app_status";
++    private static final String KEY_CAPABILITIES_CATEGORY =
++            "push_provider_compatibility_app_capabilities";
++    private static final String KEY_CAPABILITY_PREFIX =
++            "push_provider_compatibility_app_capability_";
++
++    private PushBrokerManager mPushBrokerManager;
++    private String mProviderId;
++    private String mPackageName;
++    private int mUserId;
++
++    @Override
++    public void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++        addPreferencesFromResource(R.xml.push_broker_compatibility_app_settings);
++    }
++
++    @Override
++    public void onAttach(Context context) {
++        super.onAttach(context);
++        final Bundle arguments = getArguments();
++        mProviderId = arguments == null
++                ? null : arguments.getString(PushBrokerSettings.EXTRA_PROVIDER_ID);
++        mPackageName = arguments == null
++                ? null : arguments.getString(PushBrokerSettings.EXTRA_PACKAGE_NAME);
++        mUserId = arguments == null
++                ? UserHandle.USER_SYSTEM
++                : arguments.getInt(PushBrokerSettings.EXTRA_USER_ID, UserHandle.USER_SYSTEM);
++    }
++
++    @Override
++    public void onActivityCreated(Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++        requireActivity().getActionBar().setTitle(getCompatibilityAppLabel());
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        refreshState();
++    }
++
++    private void refreshState() {
++        final SwitchPreferenceCompat appSwitch = requirePreference(KEY_APP_SWITCH);
++        final PreferenceCategory statusCategory = requirePreference(KEY_STATUS_CATEGORY);
++        final PreferenceCategory capabilitiesCategory = requirePreference(KEY_CAPABILITIES_CATEGORY);
++
++        statusCategory.removeAll();
++        capabilitiesCategory.removeAll();
++        statusCategory.setVisible(false);
++        capabilitiesCategory.setVisible(false);
++
++        if (TextUtils.isEmpty(mProviderId) || TextUtils.isEmpty(mPackageName)) {
++            appSwitch.setEnabled(false);
++            appSwitch.setSummary(R.string.notification_push_provider_unavailable);
++            return;
++        }
++
++        try {
++            mPushBrokerManager = PushBrokerManager.getInstance(getContext());
++        } catch (RuntimeException e) {
++            appSwitch.setEnabled(false);
++            appSwitch.setSummary(R.string.notification_push_provider_unavailable);
++            return;
++        }
++
++        final Bundle appState = mPushBrokerManager.getCompatibilityAppState(
++                mProviderId, mPackageName, mUserId);
++        if (appState == null || !appState.getBoolean(PushBrokerConstants.COMPAT_APP_SUPPORTED,
++                false)) {
++            appSwitch.setEnabled(false);
++            appSwitch.setSummary(R.string.notification_push_compatibility_not_available);
++            return;
++        }
++
++        final String[] providerProfiles = getProviderProfiles();
++        final boolean authorized = appState.getBoolean(PushBrokerConstants.COMPAT_APP_AUTHORIZED,
++                false);
++        final boolean switchEnabled = providerProfiles.length == 1;
++        appSwitch.setTitle(getCompatibilityAppLabel());
++        appSwitch.setChecked(authorized);
++        appSwitch.setEnabled(switchEnabled);
++        appSwitch.setSummary(buildCompatibilityAppSummary(appState));
++        if (switchEnabled) {
++            appSwitch.setOnPreferenceChangeListener((pref, newValue) -> {
++                final boolean enabled = Boolean.TRUE.equals(newValue);
++                final boolean changed = enabled
++                        ? mPushBrokerManager.setCompatibilityProfiles(mProviderId, mPackageName,
++                                mUserId, new String[] {providerProfiles[0]})
++                        : mPushBrokerManager.clearCompatibilityProfiles(mProviderId,
++                                mPackageName, mUserId);
++                if (!changed) {
++                    Toast.makeText(getContext(),
++                            R.string.notification_push_provider_enable_failed,
++                            Toast.LENGTH_SHORT).show();
++                    return false;
++                }
++                refreshState();
++                return true;
++            });
++        } else {
++            appSwitch.setOnPreferenceChangeListener(null);
++        }
++
++        statusCategory.setVisible(true);
++        addStatusPreference(statusCategory,
++                getString(R.string.notification_push_compatibility_profiles_label),
++                getString(R.string.notification_push_compatibility_profiles_summary,
++                        providerProfiles.length == 0
++                                ? getString(R.string.notification_push_compatibility_unknown_result)
++                                : TextUtils.join(", ", Arrays.asList(providerProfiles))));
++        addStatusPreference(statusCategory,
++                getString(R.string.notification_push_compatibility_effective),
++                getCapabilityListSummary(appState.getStringArray(
++                        PushBrokerConstants.COMPAT_APP_EFFECTIVE_CAPABILITY_IDS)));
++        addStatusPreference(statusCategory,
++                getString(R.string.notification_push_compatibility_results),
++                getString(R.string.notification_push_compatibility_result_summary,
++                        formatResultCode(appState, "lastPrepareResult"),
++                        formatResultCode(appState, "lastSyncResult"),
++                        formatResultCode(appState, "lastTokenResult")));
++
++        addCapabilityPreferences(capabilitiesCategory, appState, authorized);
++    }
++
++    private void addCapabilityPreferences(PreferenceCategory category, Bundle appState,
++            boolean authorized) {
++        final String[] requestedCapabilities = appState.getStringArray(
++                PushBrokerConstants.COMPAT_APP_REQUESTED_CAPABILITY_IDS);
++        if (requestedCapabilities == null || requestedCapabilities.length == 0) {
++            return;
++        }
++
++        final Set<String> enabledCapabilities = new HashSet<>(Arrays.asList(
++                safeArray(appState.getStringArray(
++                        PushBrokerConstants.COMPAT_APP_ENABLED_CAPABILITY_IDS))));
++        final Set<String> availableCapabilities = new HashSet<>(Arrays.asList(
++                safeArray(appState.getStringArray(
++                        PushBrokerConstants.COMPAT_APP_AVAILABLE_CAPABILITY_IDS))));
++        final ArrayList<String> visibleCapabilities = new ArrayList<>();
++        for (String capabilityId : requestedCapabilities) {
++            if (!TextUtils.isEmpty(capabilityId) && availableCapabilities.contains(capabilityId)) {
++                visibleCapabilities.add(capabilityId);
++            }
++        }
++        if (visibleCapabilities.isEmpty()) {
++            return;
++        }
++
++        category.setVisible(true);
++        for (String capabilityId : visibleCapabilities) {
++            final SwitchPreferenceCompat capabilityPreference =
++                    new SwitchPreferenceCompat(getPrefContext());
++            capabilityPreference.setKey(KEY_CAPABILITY_PREFIX + capabilityId);
++            capabilityPreference.setTitle(getCapabilityLabel(capabilityId));
++            capabilityPreference.setSummary(
++                    R.string.notification_push_compatibility_capability_available);
++            capabilityPreference.setChecked(enabledCapabilities.contains(capabilityId));
++            capabilityPreference.setEnabled(authorized);
++            capabilityPreference.setOnPreferenceChangeListener((pref, newValue) -> {
++                final Set<String> nextEnabled = new HashSet<>(enabledCapabilities);
++                if (Boolean.TRUE.equals(newValue)) {
++                    nextEnabled.add(capabilityId);
++                } else {
++                    nextEnabled.remove(capabilityId);
++                }
++                final boolean changed = mPushBrokerManager.setCompatibilityCapabilities(
++                        mProviderId, mPackageName, mUserId, nextEnabled.toArray(new String[0]));
++                if (!changed) {
++                    Toast.makeText(getContext(),
++                            R.string.notification_push_provider_enable_failed,
++                            Toast.LENGTH_SHORT).show();
++                    return false;
++                }
++                refreshState();
++                return true;
++            });
++            category.addPreference(capabilityPreference);
++        }
++    }
++
++    private void addStatusPreference(PreferenceCategory category, CharSequence title,
++            CharSequence summary) {
++        final Preference preference = new Preference(getPrefContext());
++        preference.setTitle(title);
++        preference.setSummary(summary);
++        preference.setSelectable(false);
++        category.addPreference(preference);
++    }
++
++    private CharSequence getCompatibilityAppLabel() {
++        try {
++            return requireContext().getPackageManager().getApplicationLabel(
++                    requireContext().getPackageManager().getApplicationInfo(mPackageName, 0));
++        } catch (PackageManager.NameNotFoundException e) {
++            return mPackageName;
++        }
++    }
++
++    private String[] getProviderProfiles() {
++        final List<PushProviderInfo> providers = mPushBrokerManager.getInstalledProviders();
++        for (PushProviderInfo provider : providers) {
++            if (TextUtils.equals(provider.providerId, mProviderId)) {
++                return provider.compatibilityProfiles == null
++                        ? new String[0] : provider.compatibilityProfiles;
++            }
++        }
++        return new String[0];
++    }
++
++    private String buildCompatibilityAppSummary(Bundle appState) {
++        final ArrayList<String> parts = new ArrayList<>();
++        if (appState.getBoolean(PushBrokerConstants.COMPAT_APP_AUTHORIZED, false)) {
++            parts.add(getString(R.string.notification_push_compatibility_authorized));
++        }
++        if (appState.getBoolean(PushBrokerConstants.COMPAT_APP_SUPPORTED, false)) {
++            parts.add(getString(R.string.notification_push_compatibility_supported));
++        }
++        final String[] profiles = appState.getStringArray(
++                PushBrokerConstants.COMPAT_APP_ENABLED_PROFILE_IDS);
++        if (profiles != null && profiles.length > 0) {
++            parts.add(getString(R.string.notification_push_compatibility_profiles_summary,
++                    TextUtils.join(", ", Arrays.asList(profiles))));
++        }
++        final String[] effectiveCapabilities = appState.getStringArray(
++                PushBrokerConstants.COMPAT_APP_EFFECTIVE_CAPABILITY_IDS);
++        if (effectiveCapabilities != null && effectiveCapabilities.length > 0) {
++            parts.add(getString(R.string.notification_push_compatibility_capabilities_summary,
++                    TextUtils.join(", ", Arrays.asList(effectiveCapabilities))));
++        }
++        parts.add(getString(R.string.notification_push_compatibility_result_summary,
++                formatResultCode(appState, "lastPrepareResult"),
++                formatResultCode(appState, "lastSyncResult"),
++                formatResultCode(appState, "lastTokenResult")));
++        return TextUtils.join(", ", parts);
++    }
++
++    private String formatResultCode(Bundle appState, String key) {
++        return appState.containsKey(key)
++                ? String.valueOf(appState.getInt(key))
++                : getString(R.string.notification_push_compatibility_unknown_result);
++    }
++
++    private String getCapabilityListSummary(String[] capabilityIds) {
++        if (capabilityIds == null || capabilityIds.length == 0) {
++            return getString(R.string.notification_push_compatibility_unknown_result);
++        }
++        final ArrayList<String> labels = new ArrayList<>();
++        for (String capabilityId : capabilityIds) {
++            labels.add(getCapabilityLabel(capabilityId));
++        }
++        return TextUtils.join(", ", labels);
++    }
++
++    private String getCapabilityLabel(String capabilityId) {
++        if (PushBrokerConstants.COMPAT_CAP_PACKAGE_SIGNATURE_SPOOF.equals(capabilityId)) {
++            return getString(R.string.notification_push_compatibility_capability_signature_spoof);
++        }
++        if (PushBrokerConstants.COMPAT_CAP_PACKAGE_STATE_SYNC.equals(capabilityId)) {
++            return getString(R.string.notification_push_compatibility_capability_package_sync);
++        }
++        if (PushBrokerConstants.COMPAT_CAP_SERVICE_KEEPALIVE.equals(capabilityId)) {
++            return getString(R.string.notification_push_compatibility_capability_keepalive);
++        }
++        return capabilityId;
++    }
++
++    private String[] safeArray(String[] values) {
++        return values == null ? new String[0] : values;
++    }
++
++    @SuppressWarnings("unchecked")
++    private <T extends Preference> T requirePreference(String key) {
++        final Preference preference = findPreference(key);
++        if (preference == null) {
++            throw new IllegalStateException("Missing preference: " + key);
++        }
++        return (T) preference;
++    }
++
++    public static final BaseSearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
++            new BaseSearchIndexProvider();
++}
+diff --git a/src/org/lineageos/lineageparts/push/PushBrokerSettings.java b/src/org/lineageos/lineageparts/push/PushBrokerSettings.java
+new file mode 100644
+index 0000000..0a8406e
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/push/PushBrokerSettings.java
+@@ -0,0 +1,511 @@
++/*
++ * Copyright (C) 2026 Neko-LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.lineageos.lineageparts.push;
++
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.PackageManager;
++import android.content.pm.ResolveInfo;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.UserHandle;
++import android.provider.Settings;
++import android.text.TextUtils;
++import android.widget.Toast;
++
++import androidx.preference.Preference;
++import androidx.preference.PreferenceCategory;
++import androidx.preference.SwitchPreferenceCompat;
++
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++import org.lineageos.lineageparts.search.BaseSearchIndexProvider;
++import org.lineageos.lineageparts.search.Searchable;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Comparator;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++import lineageos.push.PushBrokerConstants;
++import lineageos.push.PushBrokerManager;
++import lineageos.push.PushProviderInfo;
++import lineageos.push.PushProviderState;
++
++public class PushBrokerSettings extends SettingsPreferenceFragment implements Searchable {
++    private static final String KEY_ACTIVE_PROVIDER = "push_provider_active";
++    private static final String KEY_DISABLE_PROVIDER = "push_provider_disable";
++    private static final String KEY_AVOID_DUPLICATE_PUSH = "push_provider_avoid_duplicate_push";
++    private static final String KEY_PROVIDER_LIST = "push_provider_list";
++    private static final String KEY_COMPATIBILITY_STATUS = "push_provider_compatibility_status";
++    private static final String KEY_COMPATIBILITY_APPS = "push_provider_compatibility_apps";
++    private static final String KEY_COMPATIBILITY_SUMMARY = "push_provider_compatibility_summary";
++    private static final String KEY_COMPATIBILITY_APP_PREFIX = "push_provider_compatibility_app_";
++    private static final String KEY_PROVIDER_PREFIX = "push_provider_item_";
++    private static final long PROVIDER_ENABLE_STATE_CHECK_DELAY_MILLIS = 1_000L;
++
++    static final String EXTRA_PROVIDER_ID = "extra_provider_id";
++    static final String EXTRA_PACKAGE_NAME = "extra_package_name";
++    static final String EXTRA_USER_ID = "extra_user_id";
++
++    private final Handler mHandler = new Handler(Looper.getMainLooper());
++    private PushBrokerManager mPushBrokerManager;
++    private String mPendingSetupProviderId;
++
++    @Override
++    public void onCreate(Bundle savedInstanceState) {
++        super.onCreate(savedInstanceState);
++        addPreferencesFromResource(R.xml.push_broker_settings);
++    }
++
++    @Override
++    public void onActivityCreated(Bundle savedInstanceState) {
++        super.onActivityCreated(savedInstanceState);
++        requireActivity().getActionBar().setTitle(
++                R.string.third_party_notification_push_provider_title);
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        refreshProviders();
++        retryPendingSetupProviderIfNeeded();
++    }
++
++    @Override
++    public boolean onPreferenceTreeClick(Preference preference) {
++        final String key = preference.getKey();
++        if (KEY_DISABLE_PROVIDER.equals(key)) {
++            final boolean result = mPushBrokerManager != null
++                    && mPushBrokerManager.disableActiveProvider();
++            Toast.makeText(getContext(), result
++                    ? R.string.notification_push_provider_disabled
++                    : R.string.notification_push_provider_disable_failed, Toast.LENGTH_SHORT)
++                    .show();
++            refreshProviders();
++            return true;
++        }
++
++        if (key != null && key.startsWith(KEY_PROVIDER_PREFIX)) {
++            final String providerId = key.substring(KEY_PROVIDER_PREFIX.length());
++            final PushProviderInfo provider = findProvider(
++                    mPushBrokerManager.getInstalledProviders(), providerId);
++            final PushProviderState state = provider == null ? null
++                    : mPushBrokerManager.getProviderState(providerId);
++            if (provider != null && state != null && state.requiresUserAction) {
++                if (launchProviderActivity(provider, firstNonEmpty(
++                        provider.setupActivity, provider.settingsActivity))) {
++                    return true;
++                }
++                Toast.makeText(getContext(),
++                        R.string.notification_push_provider_setup_required, Toast.LENGTH_SHORT)
++                        .show();
++                return true;
++            }
++
++            final boolean result = mPushBrokerManager != null
++                    && mPushBrokerManager.setActiveProvider(providerId);
++            Toast.makeText(getContext(), result
++                    ? R.string.notification_push_provider_enabled
++                    : R.string.notification_push_provider_enable_failed, Toast.LENGTH_SHORT)
++                    .show();
++            refreshProviders();
++            if (result) {
++                scheduleProviderEnableStateCheck(providerId);
++            }
++            return true;
++        }
++
++        return super.onPreferenceTreeClick(preference);
++    }
++
++    private void refreshProviders() {
++        final Preference activePreference = requirePreference(KEY_ACTIVE_PROVIDER);
++        final Preference disablePreference = requirePreference(KEY_DISABLE_PROVIDER);
++        final SwitchPreferenceCompat avoidDuplicatePushPreference =
++                requirePreference(KEY_AVOID_DUPLICATE_PUSH);
++        final PreferenceCategory providerCategory = requirePreference(KEY_PROVIDER_LIST);
++        final PreferenceCategory compatibilityStatusCategory =
++                requirePreference(KEY_COMPATIBILITY_STATUS);
++        final PreferenceCategory compatibilityAppsCategory =
++                requirePreference(KEY_COMPATIBILITY_APPS);
++
++        providerCategory.removeAll();
++        compatibilityStatusCategory.removeAll();
++        compatibilityAppsCategory.removeAll();
++        compatibilityStatusCategory.setVisible(false);
++        compatibilityAppsCategory.setVisible(false);
++        refreshAvoidDuplicatePushPreference(avoidDuplicatePushPreference);
++
++        try {
++            mPushBrokerManager = PushBrokerManager.getInstance(getContext());
++        } catch (RuntimeException e) {
++            activePreference.setSummary(R.string.notification_push_provider_unavailable);
++            disablePreference.setEnabled(false);
++            addEmptyPreference(providerCategory,
++                    getString(R.string.notification_push_provider_unavailable));
++            addEmptyPreference(compatibilityStatusCategory,
++                    getString(R.string.notification_push_provider_unavailable));
++            return;
++        }
++
++        final List<PushProviderInfo> providers = mPushBrokerManager.getInstalledProviders();
++        final String activeProviderId = mPushBrokerManager.getActiveProviderId();
++        final PushProviderInfo activeProvider = findProvider(providers, activeProviderId);
++        final PushProviderState activeProviderState = activeProvider == null
++                ? null : mPushBrokerManager.getProviderState(activeProvider.providerId);
++
++        if (TextUtils.isEmpty(activeProviderId)) {
++            activePreference.setSummary(R.string.no_notification_push_provider_active);
++        } else {
++            activePreference.setSummary(activeProvider != null
++                    ? activeProvider.displayName
++                    : activeProviderId);
++        }
++        disablePreference.setEnabled(!TextUtils.isEmpty(activeProviderId));
++        refreshCompatibilityPreferences(compatibilityStatusCategory, compatibilityAppsCategory,
++                activeProvider, activeProviderState);
++
++        if (providers.isEmpty()) {
++            addEmptyPreference(providerCategory,
++                    getString(R.string.no_notification_push_provider_installed));
++            return;
++        }
++
++        for (PushProviderInfo provider : providers) {
++            final PushProviderState state = mPushBrokerManager.getProviderState(provider.providerId);
++            final Preference pref = new Preference(getPrefContext());
++            pref.setKey(KEY_PROVIDER_PREFIX + provider.providerId);
++            pref.setTitle(provider.displayName);
++            pref.setSummary(buildProviderSummary(provider, state));
++            providerCategory.addPreference(pref);
++        }
++    }
++
++    private void refreshCompatibilityPreferences(PreferenceCategory statusCategory,
++            PreferenceCategory appsCategory, PushProviderInfo activeProvider,
++            PushProviderState activeProviderState) {
++        if (activeProvider == null || activeProviderState == null
++                || !PushProviderInfo.PROVIDER_TYPE_COMPATIBILITY.equals(activeProvider.providerType)) {
++            return;
++        }
++
++        statusCategory.setVisible(true);
++        appsCategory.setVisible(true);
++
++        final Bundle compatibilityState =
++                mPushBrokerManager.getCompatibilityState(activeProvider.providerId);
++        final int authorizedCount = compatibilityState.getInt(
++                PushBrokerConstants.DIAG_COMPAT_AUTHORIZED_APP_COUNT, 0);
++        final int supportedCount = compatibilityState.getInt(
++                PushBrokerConstants.DIAG_COMPAT_SUPPORTED_APP_COUNT, 0);
++
++        final Preference summaryPreference = new Preference(getPrefContext());
++        summaryPreference.setKey(KEY_COMPATIBILITY_SUMMARY);
++        summaryPreference.setTitle(activeProvider.displayName);
++        summaryPreference.setSummary(getString(
++                R.string.notification_push_compatibility_summary,
++                authorizedCount, supportedCount));
++        summaryPreference.setSelectable(false);
++        statusCategory.addPreference(summaryPreference);
++
++        final String[] profiles = activeProvider.compatibilityProfiles == null
++                ? new String[0] : activeProvider.compatibilityProfiles;
++        final Preference profilesPreference = new Preference(getPrefContext());
++        profilesPreference.setTitle(R.string.notification_push_compatibility_supported);
++        profilesPreference.setSummary(getString(
++                R.string.notification_push_compatibility_profiles_summary,
++                profiles.length == 0 ? getString(
++                        R.string.notification_push_compatibility_unknown_result)
++                        : TextUtils.join(", ", Arrays.asList(profiles))));
++        profilesPreference.setSelectable(false);
++        statusCategory.addPreference(profilesPreference);
++
++        if (profiles.length == 1) {
++            final Preference notePreference = new Preference(getPrefContext());
++            notePreference.setSummary(
++                    R.string.notification_push_compatibility_single_profile_summary);
++            notePreference.setSelectable(false);
++            statusCategory.addPreference(notePreference);
++        }
++
++        final List<Bundle> authorizedApps = mPushBrokerManager.getCompatibilityAuthorizedApps(
++                activeProvider.providerId, UserHandle.USER_SYSTEM);
++        final Set<String> authorizedPackages = new HashSet<>();
++        for (Bundle appState : authorizedApps) {
++            if (appState == null) {
++                continue;
++            }
++            final String packageName = appState.getString(
++                    PushBrokerConstants.COMPAT_APP_PACKAGE_NAME);
++            if (!TextUtils.isEmpty(packageName)) {
++                authorizedPackages.add(packageName);
++            }
++        }
++
++        final List<String> candidatePackages = collectCompatibilityCandidatePackages();
++        for (String authorizedPackage : authorizedPackages) {
++            if (!candidatePackages.contains(authorizedPackage)) {
++                candidatePackages.add(authorizedPackage);
++            }
++        }
++        candidatePackages.sort(Comparator.comparing(packageName -> {
++            final CharSequence label = getApplicationLabel(requireContext(), packageName);
++            return label == null ? packageName : label.toString().toLowerCase();
++        }));
++        for (String packageName : candidatePackages) {
++            final Bundle appState = mPushBrokerManager.getCompatibilityAppState(
++                    activeProvider.providerId, packageName, UserHandle.USER_SYSTEM);
++            if (appState == null || !appState.getBoolean(
++                    PushBrokerConstants.COMPAT_APP_SUPPORTED, false)) {
++                continue;
++            }
++            appsCategory.addPreference(buildCompatibilityAppPreference(activeProvider,
++                    packageName, appState));
++        }
++
++        if (appsCategory.getPreferenceCount() == 0 && authorizedPackages.isEmpty()) {
++            addEmptyPreference(appsCategory,
++                    getString(R.string.notification_push_compatibility_not_available));
++        }
++    }
++
++    private Preference buildCompatibilityAppPreference(PushProviderInfo provider,
++            String packageName, Bundle appState) {
++        final Preference preference = new Preference(getPrefContext());
++        preference.setKey(KEY_COMPATIBILITY_APP_PREFIX + packageName);
++        final CharSequence label = getApplicationLabel(requireContext(), packageName);
++        preference.setTitle(TextUtils.isEmpty(label) ? packageName : label);
++        preference.setSummary(buildCompatibilityAppSummary(appState));
++        preference.setFragment(PushBrokerCompatibilityAppSettings.class.getName());
++        final Bundle extras = preference.getExtras();
++        extras.putString(EXTRA_PROVIDER_ID, provider.providerId);
++        extras.putString(EXTRA_PACKAGE_NAME, packageName);
++        extras.putInt(EXTRA_USER_ID, UserHandle.USER_SYSTEM);
++        return preference;
++    }
++
++    private String buildCompatibilityAppSummary(Bundle appState) {
++        final ArrayList<String> parts = new ArrayList<>();
++        if (appState.getBoolean(PushBrokerConstants.COMPAT_APP_AUTHORIZED, false)) {
++            parts.add(getString(R.string.notification_push_compatibility_authorized));
++        }
++        if (appState.getBoolean(PushBrokerConstants.COMPAT_APP_SUPPORTED, false)) {
++            parts.add(getString(R.string.notification_push_compatibility_supported));
++        }
++        final String[] profiles = appState.getStringArray(
++                PushBrokerConstants.COMPAT_APP_ENABLED_PROFILE_IDS);
++        if (profiles != null && profiles.length > 0) {
++            parts.add(getString(R.string.notification_push_compatibility_profiles_summary,
++                    TextUtils.join(", ", Arrays.asList(profiles))));
++        }
++        final String[] effectiveCapabilities = appState.getStringArray(
++                PushBrokerConstants.COMPAT_APP_EFFECTIVE_CAPABILITY_IDS);
++        if (effectiveCapabilities != null && effectiveCapabilities.length > 0) {
++            parts.add(getString(R.string.notification_push_compatibility_capabilities_summary,
++                    TextUtils.join(", ", Arrays.asList(effectiveCapabilities))));
++        }
++        parts.add(getString(R.string.notification_push_compatibility_result_summary,
++                formatResultCode(appState, "lastPrepareResult"),
++                formatResultCode(appState, "lastSyncResult"),
++                formatResultCode(appState, "lastTokenResult")));
++        return TextUtils.join(", ", parts);
++    }
++
++    private String formatResultCode(Bundle appState, String key) {
++        return appState.containsKey(key)
++                ? String.valueOf(appState.getInt(key))
++                : getString(R.string.notification_push_compatibility_unknown_result);
++    }
++
++    private List<String> collectCompatibilityCandidatePackages() {
++        final Intent launcherIntent = new Intent(Intent.ACTION_MAIN);
++        launcherIntent.addCategory(Intent.CATEGORY_LAUNCHER);
++        final List<ResolveInfo> resolveInfos = requireContext().getPackageManager()
++                .queryIntentActivities(launcherIntent, PackageManager.ResolveInfoFlags.of(0));
++        final Set<String> packageNames = new HashSet<>();
++        for (ResolveInfo resolveInfo : resolveInfos) {
++            if (resolveInfo == null || resolveInfo.activityInfo == null
++                    || TextUtils.isEmpty(resolveInfo.activityInfo.packageName)) {
++                continue;
++            }
++            packageNames.add(resolveInfo.activityInfo.packageName);
++        }
++        return new ArrayList<>(packageNames);
++    }
++
++    private void refreshAvoidDuplicatePushPreference(SwitchPreferenceCompat preference) {
++        final boolean checked = Settings.Global.getInt(requireContext().getContentResolver(),
++                PushBrokerConstants.SETTING_AVOID_DUPLICATE_PUSH, 0) == 1;
++        preference.setChecked(checked);
++        preference.setOnPreferenceChangeListener((pref, newValue) -> Settings.Global.putInt(
++                requireContext().getContentResolver(),
++                PushBrokerConstants.SETTING_AVOID_DUPLICATE_PUSH,
++                Boolean.TRUE.equals(newValue) ? 1 : 0));
++    }
++
++    private void scheduleProviderEnableStateCheck(String providerId) {
++        if (TextUtils.isEmpty(providerId)) {
++            return;
++        }
++        mPendingSetupProviderId = providerId;
++        mHandler.removeCallbacksAndMessages(providerId);
++        final Runnable task = this::retryPendingSetupProviderIfNeeded;
++        mHandler.postAtTime(task, providerId,
++                System.currentTimeMillis() + PROVIDER_ENABLE_STATE_CHECK_DELAY_MILLIS);
++    }
++
++    private void retryPendingSetupProviderIfNeeded() {
++        if (mPushBrokerManager == null || TextUtils.isEmpty(mPendingSetupProviderId)) {
++            return;
++        }
++        final String providerId = mPendingSetupProviderId;
++        final PushProviderInfo provider = findProvider(mPushBrokerManager.getInstalledProviders(),
++                providerId);
++        final PushProviderState state = mPushBrokerManager.getProviderState(providerId);
++        if (provider == null || state == null || !state.requiresUserAction) {
++            mPendingSetupProviderId = null;
++            return;
++        }
++        if (launchProviderActivity(provider, firstNonEmpty(
++                provider.setupActivity, provider.settingsActivity))) {
++            return;
++        }
++        Toast.makeText(getContext(), R.string.notification_push_provider_setup_required,
++                Toast.LENGTH_SHORT).show();
++        mPendingSetupProviderId = null;
++    }
++
++    private boolean launchProviderActivity(PushProviderInfo provider, String activityName) {
++        if (provider == null || TextUtils.isEmpty(activityName)) {
++            return false;
++        }
++        try {
++            final ComponentName component = ComponentName.unflattenFromString(activityName) != null
++                    ? ComponentName.unflattenFromString(activityName)
++                    : new ComponentName(provider.packageName, activityName);
++            final Intent intent = new Intent().setComponent(component)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++            startActivity(intent);
++            return true;
++        } catch (RuntimeException e) {
++            return false;
++        }
++    }
++
++    private PushProviderInfo findProvider(List<PushProviderInfo> providers, String providerId) {
++        if (providers == null || TextUtils.isEmpty(providerId)) {
++            return null;
++        }
++        for (PushProviderInfo provider : providers) {
++            if (TextUtils.equals(provider.providerId, providerId)) {
++                return provider;
++            }
++        }
++        return null;
++    }
++
++    private CharSequence getApplicationLabel(Context context, String packageName) {
++        try {
++            return context.getPackageManager().getApplicationLabel(
++                    context.getPackageManager().getApplicationInfo(packageName, 0));
++        } catch (PackageManager.NameNotFoundException e) {
++            return packageName;
++        }
++    }
++
++    private void addEmptyPreference(PreferenceCategory category, CharSequence summary) {
++        final Preference preference = new Preference(getPrefContext());
++        preference.setSummary(summary);
++        preference.setSelectable(false);
++        category.addPreference(preference);
++    }
++
++    private String buildProviderSummary(PushProviderInfo provider, PushProviderState state) {
++        final ArrayList<String> parts = new ArrayList<>();
++        parts.add(provider.providerId);
++        parts.add(getProviderTypeLabel(provider.providerType));
++        parts.add(getProviderTrustLabel(provider.trustLevel));
++        if (state.selected) {
++            parts.add(getString(R.string.notification_push_provider_state_selected));
++        }
++        if (state.enabled) {
++            parts.add(getString(R.string.notification_push_provider_state_enabled));
++        }
++        if (state.degraded) {
++            parts.add(getString(R.string.notification_push_provider_state_degraded));
++        }
++        if (state.requiresUserAction) {
++            parts.add(getString(R.string.notification_push_provider_state_requires_action));
++        }
++        if (!TextUtils.isEmpty(state.lastErrorMessage)) {
++            parts.add(state.lastErrorMessage);
++        }
++        return TextUtils.join(", ", parts);
++    }
++
++    private String getProviderTypeLabel(String providerType) {
++        if (PushProviderInfo.PROVIDER_TYPE_NATIVE.equals(providerType)) {
++            return getString(R.string.notification_push_provider_type_native);
++        }
++        if (PushProviderInfo.PROVIDER_TYPE_COMPATIBILITY.equals(providerType)) {
++            return getString(R.string.notification_push_provider_type_compatibility);
++        }
++        return getString(R.string.notification_push_provider_type_unknown);
++    }
++
++    private String getProviderTrustLabel(int trustLevel) {
++        switch (trustLevel) {
++            case PushProviderInfo.TRUST_SYSTEM:
++                return getString(R.string.notification_push_provider_trust_system);
++            case PushProviderInfo.TRUST_USER_INSTALLED:
++                return getString(R.string.notification_push_provider_trust_user);
++            case PushProviderInfo.TRUST_REJECTED:
++                return getString(R.string.notification_push_provider_trust_rejected);
++            default:
++                return getString(R.string.notification_push_provider_trust_unknown);
++        }
++    }
++
++    private String firstNonEmpty(String... values) {
++        if (values == null) {
++            return null;
++        }
++        for (String value : values) {
++            if (!TextUtils.isEmpty(value)) {
++                return value;
++            }
++        }
++        return null;
++    }
++
++    @SuppressWarnings("unchecked")
++    private <T extends Preference> T requirePreference(String key) {
++        final Preference preference = findPreference(key);
++        if (preference == null) {
++            throw new IllegalStateException("Missing preference: " + key);
++        }
++        return (T) preference;
++    }
++
++    public static final BaseSearchIndexProvider SEARCH_INDEX_DATA_PROVIDER =
++            new BaseSearchIndexProvider();
++}
+-- 
+2.43.0
+

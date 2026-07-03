@@ -1,0 +1,995 @@
+From 693e974d9e9ed16d637d03237bea0f2c8b2e8f56 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Tue, 30 Jun 2026 15:11:36 +0800
+Subject: [PATCH] Neko-Lineage: Flyme type PopUp View [Launcher3 shortcut &
+ gesture]
+
+Allow swipe up gesture trigger & TaskView shortcut trigger
+
+Change-Id: I2bebc25cd67e8d4d6f3486f566f140f49c619881
+---
+ quickstep/res/values-zh-rCN/strings.xml       |   1 +
+ quickstep/res/values-zh-rHK/strings.xml       |   1 +
+ quickstep/res/values-zh-rTW/strings.xml       |   1 +
+ quickstep/res/values/strings.xml              |   2 +
+ .../android/quickstep/AbsSwipeUpHandler.java  | 389 ++++++++++++++++++
+ .../android/quickstep/TaskOverlayFactory.java |  11 +
+ .../quickstep/TaskShortcutFactory.java        |  89 ++++
+ .../OtherActivityInputConsumer.java           |   4 +
+ .../views/MiniWindowDropTargetView.java       | 136 ++++++
+ 9 files changed, 634 insertions(+)
+ create mode 100644 quickstep/src/com/android/quickstep/views/MiniWindowDropTargetView.java
+
+diff --git a/quickstep/res/values-zh-rCN/strings.xml b/quickstep/res/values-zh-rCN/strings.xml
+index 8139c51..2866f3a 100644
+--- a/quickstep/res/values-zh-rCN/strings.xml
++++ b/quickstep/res/values-zh-rCN/strings.xml
+@@ -21,6 +21,7 @@
+     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="recent_task_option_pin" msgid="7929860679018978258">"固定"</string>
+     <string name="recent_task_option_freeform" msgid="48863056265284071">"自由窗口"</string>
++    <string name="recent_task_option_mini_window">"打开为小窗"</string>
+     <string name="recent_task_option_desktop" msgid="8280879717125435668">"桌面"</string>
+     <string name="recent_task_option_external_display" msgid="4533840664313389484">"移至外接显示屏"</string>
+     <string name="recent_task_option_remove_task" msgid="803559928027541555">"清除"</string>
+diff --git a/quickstep/res/values-zh-rHK/strings.xml b/quickstep/res/values-zh-rHK/strings.xml
+index c1d500b..ebba6c8 100644
+--- a/quickstep/res/values-zh-rHK/strings.xml
++++ b/quickstep/res/values-zh-rHK/strings.xml
+@@ -21,6 +21,7 @@
+     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="recent_task_option_pin" msgid="7929860679018978258">"固定"</string>
+     <string name="recent_task_option_freeform" msgid="48863056265284071">"自由形式"</string>
++    <string name="recent_task_option_mini_window">"彈出視窗"</string>
+     <string name="recent_task_option_desktop" msgid="8280879717125435668">"桌面"</string>
+     <string name="recent_task_option_external_display" msgid="4533840664313389484">"移至外部顯示屏"</string>
+     <string name="recent_task_option_remove_task" msgid="803559928027541555">"清除"</string>
+diff --git a/quickstep/res/values-zh-rTW/strings.xml b/quickstep/res/values-zh-rTW/strings.xml
+index 919c435..8337b5b 100644
+--- a/quickstep/res/values-zh-rTW/strings.xml
++++ b/quickstep/res/values-zh-rTW/strings.xml
+@@ -21,6 +21,7 @@
+     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="recent_task_option_pin" msgid="7929860679018978258">"固定"</string>
+     <string name="recent_task_option_freeform" msgid="48863056265284071">"自由形式"</string>
++    <string name="recent_task_option_mini_window">"彈出視窗"</string>
+     <string name="recent_task_option_desktop" msgid="8280879717125435668">"電腦模式"</string>
+     <string name="recent_task_option_external_display" msgid="4533840664313389484">"移至外接螢幕"</string>
+     <string name="recent_task_option_remove_task" msgid="803559928027541555">"清除"</string>
+diff --git a/quickstep/res/values/strings.xml b/quickstep/res/values/strings.xml
+index ce599f6..de8ad7e 100644
+--- a/quickstep/res/values/strings.xml
++++ b/quickstep/res/values/strings.xml
+@@ -26,6 +26,8 @@
+     <string name="recent_task_option_pin">Pin</string>
+     <!-- Title for an option to enter freeform mode for a given app -->
+     <string name="recent_task_option_freeform">Freeform</string>
++    <!-- Title for an option to open a given app in a mini window -->
++    <string name="recent_task_option_mini_window">Pop-up window</string>
+     <!-- Title and content description for an option to enter desktop windowing mode for a given app -->
+     <string name="recent_task_option_desktop">Desktop</string>
+     <!-- Title and content description for an option to move app to external display. -->
+diff --git a/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java b/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java
+index cac4a95..70da3f9 100644
+--- a/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java
++++ b/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java
+@@ -17,6 +17,7 @@ package com.android.quickstep;
+ 
+ import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
+ import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
++import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED_WINDOW_EXT;
+ import static android.view.Surface.ROTATION_0;
+ import static android.view.Surface.ROTATION_270;
+ import static android.view.Surface.ROTATION_90;
+@@ -31,6 +32,7 @@ import static com.android.launcher3.BaseActivity.EVENT_DESTROYED;
+ import static com.android.launcher3.BaseActivity.EVENT_STARTED;
+ import static com.android.launcher3.BaseActivity.INVISIBLE_BY_STATE_HANDLER;
+ import static com.android.launcher3.BaseActivity.STATE_HANDLER_INVISIBILITY_FLAGS;
++import static com.android.launcher3.Flags.enableRefactorTaskThumbnail;
+ import static com.android.launcher3.Flags.msdlFeedback;
+ import static com.android.launcher3.Flags.refactorTaskbarUiState;
+ import static com.android.launcher3.PagedView.INVALID_PAGE;
+@@ -73,21 +75,31 @@ import android.animation.AnimatorListenerAdapter;
+ import android.animation.AnimatorSet;
+ import android.animation.ValueAnimator;
+ import android.app.ActivityManager;
++import android.app.ActivityOptions;
+ import android.app.TaskInfo;
+ import android.app.WindowConfiguration;
+ import android.content.Context;
+ import android.content.Intent;
++import android.graphics.Bitmap;
++import android.graphics.Color;
+ import android.content.res.Resources;
+ import android.graphics.Matrix;
+ import android.graphics.PointF;
+ import android.graphics.Rect;
+ import android.graphics.RectF;
+ import android.os.IBinder;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.RemoteException;
+ import android.os.SystemClock;
++import android.provider.Settings;
+ import android.util.Log;
+ import android.util.Pair;
+ import android.util.TimeUtils;
++import android.util.TypedValue;
++import android.text.TextUtils;
+ import android.view.Choreographer;
++import android.view.Gravity;
+ import android.view.MotionEvent;
+ import android.view.RemoteAnimationTarget;
+ import android.view.SurfaceControl;
+@@ -97,11 +109,13 @@ import android.view.ViewGroup;
+ import android.view.ViewTreeObserver.OnDrawListener;
+ import android.view.ViewTreeObserver.OnScrollChangedListener;
+ import android.view.WindowInsets;
++import android.view.WindowManagerGlobal;
+ import android.view.animation.Interpolator;
+ import android.widget.Toast;
+ import android.window.DesktopExperienceFlags;
+ import android.window.DesktopModeFlags;
+ import android.window.PictureInPictureSurfaceTransaction;
++import android.window.SplashScreen;
+ import android.window.TransitionInfo;
+ import android.window.WindowAnimationState;
+ 
+@@ -143,6 +157,7 @@ import com.android.launcher3.util.NavigationMode;
+ import com.android.launcher3.util.SafeCloseable;
+ import com.android.launcher3.util.TraceHelper;
+ import com.android.launcher3.util.VibratorWrapper;
++import com.android.launcher3.views.BaseDragLayer;
+ import com.android.quickstep.GestureState.GestureEndTarget;
+ import com.android.quickstep.RemoteTargetGluer.RemoteTargetHandle;
+ import com.android.quickstep.util.ActiveGestureErrorDetector;
+@@ -162,12 +177,16 @@ import com.android.quickstep.util.SwipePipToHomeAnimator;
+ import com.android.quickstep.util.TaskViewSimulator;
+ import com.android.quickstep.util.TransformParams;
+ import com.android.quickstep.views.DesktopTaskView;
++import com.android.quickstep.views.MiniWindowDropTargetView;
+ import com.android.quickstep.views.RecentsView;
+ import com.android.quickstep.views.RecentsViewContainer;
+ import com.android.quickstep.views.TaskContainer;
+ import com.android.quickstep.views.TaskView;
+ import com.android.quickstep.views.TaskViewType;
+ import com.android.quickstep.window.RecentsWindowManager;
++import com.android.systemui.shared.recents.view.AppTransitionAnimationSpecCompat;
++import com.android.systemui.shared.recents.view.AppTransitionAnimationSpecsFuture;
++import com.android.systemui.shared.recents.view.RecentsTransition;
+ import com.android.systemui.contextualeducation.GestureType;
+ import com.android.systemui.shared.recents.model.ThumbnailData;
+ import com.android.systemui.shared.system.ActivityManagerWrapper;
+@@ -188,10 +207,12 @@ import kotlin.Unit;
+ 
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Optional;
+ import java.util.OptionalInt;
++import java.util.Set;
+ import java.util.function.Consumer;
+ 
+ /**
+@@ -320,6 +341,18 @@ public abstract class AbsSwipeUpHandler<
+ 
+     private static final int REJECT_HOME_ANIM_DURATION_MS = 200;
+     private static final float REJECT_HOME_ANIM_MINIMUM_SHIFT = 0.1f;
++    private static final float MINI_WINDOW_SHOW_SHIFT = 0.10f;
++    private static final float MINI_WINDOW_REVEAL_RANGE = 0.18f;
++    private static final int MINI_WINDOW_DROP_TARGET_SIZE_DP = 72;
++    private static final int MINI_WINDOW_DROP_TARGET_TOP_MARGIN_DP = 12;
++    private static final int MINI_WINDOW_DROP_TARGET_RIGHT_MARGIN_DP = 18;
++    private static final Handler MINI_WINDOW_ANIMATION_HANDLER = new Handler(Looper.getMainLooper());
++    private static final Set<String> MINI_WINDOW_SYSTEM_BLACKLIST = Set.of(
++            "android",
++            "com.android.chrome",
++            "com.android.packageinstaller",
++            "com.google.android.gms",
++            "com.google.android.packageinstaller");
+ 
+     protected TaskAnimationManager mTaskAnimationManager;
+     // Either RectFSpringAnim (if animating home) or ObjectAnimator (from mCurrentShift) otherwise
+@@ -345,6 +378,14 @@ public abstract class AbsSwipeUpHandler<
+     private boolean mGestureStarted;
+     private boolean mLogDirectionUpOrLeft = true;
+     private boolean mIsLikelyToStartNewTask;
++    private boolean mMiniWindowEligible;
++    private boolean mMiniWindowArmed;
++    private boolean mMiniWindowLaunchRequested;
++    private boolean mMiniWindowHapticPlayed;
++    private boolean mHasTouchPosition;
++    private float mLastTouchX;
++    private float mLastTouchY;
++    @Nullable private MiniWindowDropTargetView mMiniWindowDropTargetView;
+ 
+     private final long mTouchTimeMs;
+     private long mLauncherFrameDrawnTime;
+@@ -597,6 +638,9 @@ public abstract class AbsSwipeUpHandler<
+             return true;
+         }
+ 
++        if (mContainer != null) {
++            removeMiniWindowDropTargetsFromDragLayer(mContainer.getDragLayer());
++        }
+         if (mContainer != null) {
+             if (mStateCallback.hasStates(STATE_GESTURE_COMPLETED)) {
+                 // If the activity has restarted between setting the page scroll settling callback
+@@ -613,6 +657,7 @@ public abstract class AbsSwipeUpHandler<
+         }
+         mWasLauncherAlreadyVisible = isHomeStarted;
+         mContainer = container;
++        removeMiniWindowDropTargetsFromDragLayer(mContainer.getDragLayer());
+         // Override the visibility of the activity until the gesture actually starts and we swipe
+         // up, or until we transition home and the home animation is composed
+         if (isHomeStarted) {
+@@ -740,6 +785,7 @@ public abstract class AbsSwipeUpHandler<
+ 
+         container.getRootView().setOnApplyWindowInsetsListener(this);
+         mStateCallback.setState(STATE_LAUNCHER_STARTED);
++        updateMiniWindowDropTargetState();
+     }
+ 
+     private void onLauncherBindToService() {
+@@ -950,6 +996,7 @@ public abstract class AbsSwipeUpHandler<
+         if (mIsLikelyToStartNewTask != isLikelyToStartNewTask) {
+             mIsLikelyToStartNewTask = isLikelyToStartNewTask;
+             maybeUpdateRecentsAttachedState(animate);
++            updateMiniWindowDropTargetState();
+         }
+     }
+ 
+@@ -1020,6 +1067,7 @@ public abstract class AbsSwipeUpHandler<
+     public void onCurrentShiftUpdated() {
+         updateSysUiFlags(mCurrentShift.value);
+         applyScrollAndTransform();
++        updateMiniWindowDropTargetState();
+ 
+         updateLauncherTransitionProgress();
+     }
+@@ -1214,6 +1262,7 @@ public abstract class AbsSwipeUpHandler<
+      */
+     @UiThread
+     public void onGestureCancelled() {
++        clearMiniWindowDropTargetState();
+         updateDisplacement(0);
+         mStateCallback.setStateOnUiThread(STATE_GESTURE_COMPLETED);
+         handleNormalGestureEnd(
+@@ -1236,7 +1285,13 @@ public abstract class AbsSwipeUpHandler<
+                 .getDimension(R.dimen.quickstep_fling_threshold_speed);
+         boolean isFling = mGestureStarted && !mIsMotionPaused
+                 && Math.abs(endVelocityPxPerMs) > flingThreshold;
++        final boolean launchMiniWindow = shouldLaunchMiniWindowOnRelease();
+         mStateCallback.setStateOnUiThread(STATE_GESTURE_COMPLETED);
++        removeMiniWindowDropTargetViewImmediately();
++        if (launchMiniWindow) {
++            launchTaskAsMiniWindow();
++            return;
++        }
+         boolean isVelocityVertical = Math.abs(velocityPxPerMs.y) > Math.abs(velocityPxPerMs.x);
+         if (isVelocityVertical) {
+             mLogDirectionUpOrLeft = velocityPxPerMs.y < 0;
+@@ -2331,6 +2386,7 @@ public abstract class AbsSwipeUpHandler<
+ 
+     @UiThread
+     private void resumeLastTask() {
++        clearMiniWindowDropTargetState();
+         if (mRecentsAnimationController != null) {
+             mRecentsAnimationController.finish(
+                     /* toHome= */ false,
+@@ -2344,6 +2400,7 @@ public abstract class AbsSwipeUpHandler<
+ 
+     @UiThread
+     private void finishRejectHome() {
++        clearMiniWindowDropTargetState();
+         if (mRecentsAnimationController != null) {
+             mRecentsAnimationController.finish(
+                     /* toHome=  */ false,
+@@ -2396,6 +2453,7 @@ public abstract class AbsSwipeUpHandler<
+     }
+ 
+     private void reset() {
++        clearMiniWindowDropTargetState();
+         mStateCallback.setStateOnUiThread(STATE_HANDLER_INVALIDATED);
+         if (mContainer != null) {
+             mContainer.removeEventCallback(EVENT_DESTROYED, mLauncherOnDestroyCallback);
+@@ -2420,6 +2478,7 @@ public abstract class AbsSwipeUpHandler<
+     }
+ 
+     private void invalidateHandler() {
++        clearMiniWindowDropTargetState();
+         if (!mContainerInterface.isInLiveTileMode() || mGestureState.getEndTarget() != RECENTS) {
+             mInputConsumerProxy.destroy();
+             mTaskAnimationManager.setLiveTileCleanUpHandler(null);
+@@ -2651,6 +2710,329 @@ public abstract class AbsSwipeUpHandler<
+                 || app.windowConfiguration.getActivityType() == ACTIVITY_TYPE_HOME;
+     }
+ 
++    private void updateMiniWindowEligibility() {
++        String packageName = mGestureState.getRunningTask() == null
++                ? null
++                : mGestureState.getRunningTask().getPackageName();
++        mMiniWindowEligible = !TextUtils.isEmpty(packageName)
++                && !MINI_WINDOW_SYSTEM_BLACKLIST.contains(packageName)
++                && !isPackageInMiniWindowBlacklist(packageName)
++                && mGestureState.getTopRunningTaskId() != -1;
++    }
++
++    private boolean isPackageInMiniWindowBlacklist(String packageName) {
++        String blacklist = Settings.System.getString(
++                mContext.getContentResolver(), Settings.System.POP_UP_NOTIFICATION_BLACKLIST);
++        if (TextUtils.isEmpty(blacklist)) {
++            return false;
++        }
++        for (String blockedPackage : blacklist.split(";")) {
++            if (packageName.equals(blockedPackage)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private void ensureMiniWindowDropTarget() {
++        if (!mMiniWindowEligible || mContainer == null || mMiniWindowDropTargetView != null) {
++            return;
++        }
++        removeMiniWindowDropTargetsFromDragLayer(mContainer.getDragLayer());
++        MiniWindowDropTargetView dropTargetView =
++                new MiniWindowDropTargetView(mContainer.asContext());
++        BaseDragLayer.LayoutParams lp = new BaseDragLayer.LayoutParams(
++                pxFromDp(MINI_WINDOW_DROP_TARGET_SIZE_DP),
++                pxFromDp(MINI_WINDOW_DROP_TARGET_SIZE_DP));
++        lp.gravity = Gravity.TOP | Gravity.END;
++        WindowInsets insets = mContainer.getDragLayer().getRootWindowInsets();
++        int topInset = insets == null ? 0 : insets.getInsets(WindowInsets.Type.systemBars()).top;
++        lp.topMargin = topInset + pxFromDp(MINI_WINDOW_DROP_TARGET_TOP_MARGIN_DP);
++        lp.rightMargin = pxFromDp(MINI_WINDOW_DROP_TARGET_RIGHT_MARGIN_DP);
++        mContainer.getDragLayer().addView(dropTargetView, lp);
++        mMiniWindowDropTargetView = dropTargetView;
++    }
++
++    private void updateMiniWindowDropTargetState() {
++        updateMiniWindowEligibility();
++        if (!canEnterMiniWindowInteraction()) {
++            clearMiniWindowDropTargetState();
++            return;
++        }
++        ensureMiniWindowDropTarget();
++        if (mMiniWindowDropTargetView == null) {
++            return;
++        }
++
++        boolean shouldShow = shouldShowMiniWindowDropTarget();
++        mMiniWindowDropTargetView.setVisibility(shouldShow ? View.VISIBLE : View.INVISIBLE);
++        if (!shouldShow) {
++            resetMiniWindowArmedState();
++            return;
++        }
++
++        mMiniWindowDropTargetView.setRevealProgress(getMiniWindowRevealProgress());
++
++        if (!mHasTouchPosition) {
++            return;
++        }
++
++        updateMiniWindowArmedState();
++    }
++
++    private boolean shouldLaunchMiniWindowOnRelease() {
++        return isMiniWindowReleaseTriggerSatisfied();
++    }
++
++    private boolean canEnterMiniWindowInteraction() {
++        return mMiniWindowEligible && mContainer != null && mGestureStarted
++                && !mStateCallback.hasStates(STATE_GESTURE_COMPLETED)
++                && !mMiniWindowLaunchRequested;
++    }
++
++    private boolean shouldShowMiniWindowDropTarget() {
++        return !mIsLikelyToStartNewTask && mCurrentShift.value > MINI_WINDOW_SHOW_SHIFT;
++    }
++
++    private float getMiniWindowRevealProgress() {
++        return Utilities.boundToRange(
++                (mCurrentShift.value - MINI_WINDOW_SHOW_SHIFT) / MINI_WINDOW_REVEAL_RANGE,
++                0f,
++                1f);
++    }
++
++    /**
++     * Release-to-launch is intentionally decoupled from swipe progress. Once the target is shown,
++     * only the armed state decides whether ACTION_UP launches the current task into mini-window.
++     */
++    private boolean isMiniWindowReleaseTriggerSatisfied() {
++        return mMiniWindowEligible && mMiniWindowArmed && !mMiniWindowLaunchRequested;
++    }
++
++    private void updateMiniWindowArmedState() {
++        boolean inTarget = mMiniWindowDropTargetView.containsTouch(
++                mLastTouchX, mLastTouchY, mMiniWindowArmed);
++        if (inTarget == mMiniWindowArmed) {
++            return;
++        }
++        mMiniWindowArmed = inTarget;
++        mMiniWindowDropTargetView.setArmed(inTarget);
++        if (inTarget && !mMiniWindowHapticPlayed) {
++            VibratorWrapper.INSTANCE.get(mContext).vibrate(OVERVIEW_HAPTIC);
++            mMiniWindowHapticPlayed = true;
++        } else if (!inTarget) {
++            mMiniWindowHapticPlayed = false;
++        }
++    }
++
++    private void resetMiniWindowArmedState() {
++        mMiniWindowArmed = false;
++        mMiniWindowHapticPlayed = false;
++        mMiniWindowDropTargetView.setArmed(false);
++    }
++
++    private void launchTaskAsMiniWindow() {
++        int taskId = mGestureState.getTopRunningTaskId();
++        if (taskId == -1) {
++            return;
++        }
++        TaskView launchTaskView = getMiniWindowLaunchTaskView(taskId);
++        TaskContainer launchTaskContainer = getMiniWindowLaunchTaskContainer(launchTaskView, taskId);
++        mMiniWindowLaunchRequested = true;
++        clearMiniWindowDropTargetState();
++        prepareLauncherForMiniWindowLaunch();
++
++        Runnable startMiniWindow = () -> {
++            prepareMiniWindowLaunchTransition(launchTaskView, launchTaskContainer, taskId);
++            ActivityOptions options = ActivityOptions.makeBasic();
++            options.setLaunchWindowingMode(WINDOWING_MODE_PINNED_WINDOW_EXT);
++            options.setSplashScreenStyle(SplashScreen.SPLASH_SCREEN_STYLE_ICON);
++            ActivityManagerWrapper.getInstance().startActivityFromRecents(taskId, options);
++            reset();
++            invalidateHandler();
++        };
++
++        if (mRecentsView != null) {
++            mRecentsView.switchToScreenshot(() -> mRecentsView.finishRecentsAnimation(
++                    /* toHome= */ true,
++                    /* shouldPip= */ false,
++                    () -> {
++                        if (mContainer != null) {
++                            mContainer.returnToHomescreen();
++                        }
++                        mRecentsView.getHandler().post(startMiniWindow);
++                    }));
++        } else if (mRecentsAnimationController != null) {
++            mRecentsAnimationController.finish(
++                    /* toHome= */ true,
++                    () -> {
++                        if (mContainer != null) {
++                            mContainer.returnToHomescreen();
++                        }
++                        startMiniWindow.run();
++                    },
++                    /* reason= */ new ActiveGestureLog.CompoundString(
++                            "AbsSwipeUpHandler.launchTaskAsMiniWindow"));
++        } else {
++            if (mContainer != null) {
++                mContainer.returnToHomescreen();
++            }
++            startMiniWindow.run();
++        }
++    }
++
++    private void prepareLauncherForMiniWindowLaunch() {
++        final GestureEndTarget endTarget = REJECT_HOME;
++        mGestureState.setEndTarget(endTarget, false /* isAtomic */);
++        mAnimationFactory.setEndTarget(endTarget);
++        if (mContainerInterface.getTaskbarInteractor() != null) {
++            mContainerInterface.getTaskbarInteractor().setUserIsNotGoingHome(false);
++        }
++    }
++
++    @Nullable
++    private TaskView getMiniWindowLaunchTaskView(int taskId) {
++        if (mRecentsView == null) {
++            return null;
++        }
++        TaskView runningTaskView = mRecentsView.getRunningTaskView();
++        if (runningTaskView != null && runningTaskView.containsTaskId(taskId)) {
++            return runningTaskView;
++        }
++        TaskView currentPageTaskView = mRecentsView.getCurrentPageTaskView();
++        if (currentPageTaskView != null && currentPageTaskView.containsTaskId(taskId)) {
++            return currentPageTaskView;
++        }
++        return mRecentsView.getTaskViewByTaskId(taskId);
++    }
++
++    @Nullable
++    private TaskContainer getMiniWindowLaunchTaskContainer(@Nullable TaskView taskView, int taskId) {
++        if (taskView == null) {
++            return null;
++        }
++        for (TaskContainer taskContainer : taskView.getTaskContainers()) {
++            if (taskContainer.getTask().key.id == taskId) {
++                return taskContainer;
++            }
++        }
++        return taskView.getTaskContainers().isEmpty() ? null : taskView.getTaskContainers().get(0);
++    }
++
++    private void prepareMiniWindowLaunchTransition(
++            @Nullable TaskView taskView,
++            @Nullable TaskContainer taskContainer,
++            int taskId) {
++        if (mRecentsView == null || taskView == null || taskContainer == null) {
++            return;
++        }
++        Bitmap thumbnail = createMiniWindowLaunchThumbnail(taskContainer, taskView);
++        if (thumbnail == null) {
++            return;
++        }
++
++        final Rect taskBounds = getMiniWindowLaunchTaskBounds(taskContainer, taskView);
++        final Runnable animStartedListener = () -> {
++            mRecentsView.setIgnoreResetTask(taskId);
++            taskView.setAlpha(0f);
++        };
++        AppTransitionAnimationSpecsFuture future =
++                new AppTransitionAnimationSpecsFuture(MINI_WINDOW_ANIMATION_HANDLER) {
++                    @Override
++                    public List<AppTransitionAnimationSpecCompat> composeSpecs() {
++                        return Collections.singletonList(
++                                new AppTransitionAnimationSpecCompat(taskId, thumbnail, taskBounds));
++                    }
++                };
++        try {
++            WindowManagerGlobal.getWindowManagerService()
++                    .overridePendingAppTransitionMultiThumbFuture(
++                            future.getFuture(),
++                            RecentsTransition.wrapStartedListener(
++                                    MINI_WINDOW_ANIMATION_HANDLER, animStartedListener),
++                            true /* scaleUp */,
++                            mGestureState.getDisplayId());
++        } catch (RemoteException e) {
++            Log.w(TAG, "Failed to override pending app transition for mini-window launch", e);
++        }
++    }
++
++    @Nullable
++    private Bitmap createMiniWindowLaunchThumbnail(TaskContainer taskContainer, TaskView taskView) {
++        if (enableRefactorTaskThumbnail()) {
++            return taskContainer.getThumbnail();
++        }
++        float alpha = taskContainer.getThumbnailViewDeprecated().getDimAlpha();
++        taskContainer.getThumbnailViewDeprecated().setDimAlpha(0);
++        View snapShotView = taskContainer.getSnapshotView();
++        Bitmap thumbnail = RecentsTransition.drawViewIntoHardwareBitmap(
++                snapShotView.getWidth(),
++                snapShotView.getHeight(),
++                snapShotView,
++                taskView.getScaleX(),
++                Color.BLACK);
++        taskContainer.getThumbnailViewDeprecated().setDimAlpha(alpha);
++        return thumbnail;
++    }
++
++    private Rect getMiniWindowLaunchTaskBounds(TaskContainer taskContainer, TaskView taskView) {
++        final int[] position = new int[2];
++        View snapShotView = taskContainer.getSnapshotView();
++        snapShotView.getLocationOnScreen(position);
++        final int width = (int) (snapShotView.getWidth() * taskView.getScaleX());
++        final int height = (int) (snapShotView.getHeight() * taskView.getScaleY());
++        return new Rect(position[0], position[1], position[0] + width, position[1] + height);
++    }
++
++    private void clearMiniWindowDropTargetState() {
++        View dragLayer = mContainer == null ? null : mContainer.getDragLayer();
++        if (mMiniWindowDropTargetView != null) {
++            resetMiniWindowArmedState();
++        }
++        mHasTouchPosition = false;
++        removeMiniWindowDropTargetViewImmediately();
++        removeMiniWindowDropTargetsFromDragLayer(dragLayer);
++    }
++
++    private void removeMiniWindowDropTargetViewImmediately() {
++        View dragLayer = mContainer == null ? null : mContainer.getDragLayer();
++        if (mMiniWindowDropTargetView != null) {
++            ViewGroup parent = (ViewGroup) mMiniWindowDropTargetView.getParent();
++            if (parent != null) {
++                parent.removeView(mMiniWindowDropTargetView);
++            }
++            mMiniWindowDropTargetView = null;
++        }
++        removeMiniWindowDropTargetsFromDragLayer(dragLayer);
++    }
++
++    private void removeMiniWindowDropTargetsFromDragLayer(@Nullable View dragLayer) {
++        if (!(dragLayer instanceof ViewGroup dragLayerGroup)) {
++            return;
++        }
++        for (int i = dragLayerGroup.getChildCount() - 1; i >= 0; i--) {
++            View child = dragLayerGroup.getChildAt(i);
++            if (child instanceof MiniWindowDropTargetView && child != mMiniWindowDropTargetView) {
++                dragLayerGroup.removeViewAt(i);
++            }
++        }
++        if (mMiniWindowDropTargetView == null) {
++            for (int i = dragLayerGroup.getChildCount() - 1; i >= 0; i--) {
++                View child = dragLayerGroup.getChildAt(i);
++                if (child instanceof MiniWindowDropTargetView) {
++                    dragLayerGroup.removeViewAt(i);
++                }
++            }
++        }
++    }
++
++    private int pxFromDp(int dp) {
++        return Math.round(TypedValue.applyDimension(
++                TypedValue.COMPLEX_UNIT_DIP,
++                dp,
++                mContext.getResources().getDisplayMetrics()));
++    }
++
+     protected void performHapticFeedback() {
+         if (msdlFeedback()) {
+             mMSDLPlayerWrapper.playToken(MSDLToken.SWIPE_THRESHOLD_INDICATOR);
+@@ -2671,6 +3053,13 @@ public abstract class AbsSwipeUpHandler<
+         mGestureEndCallback = gestureEndCallback;
+     }
+ 
++    public void updateTouchPoint(float x, float y) {
++        mHasTouchPosition = true;
++        mLastTouchX = x;
++        mLastTouchY = y;
++        updateMiniWindowDropTargetState();
++    }
++
+     public void setGestureAnimationEndCallback(Runnable gestureAnimationEndCallback) {
+         mGestureAnimationEndCallback = gestureAnimationEndCallback;
+     }
+diff --git a/quickstep/src/com/android/quickstep/TaskOverlayFactory.java b/quickstep/src/com/android/quickstep/TaskOverlayFactory.java
+index e0586c5..9f70ba1 100644
+--- a/quickstep/src/com/android/quickstep/TaskOverlayFactory.java
++++ b/quickstep/src/com/android/quickstep/TaskOverlayFactory.java
+@@ -124,6 +124,8 @@ public class TaskOverlayFactory {
+     private static final TaskShortcutFactory[] PER_TASK_MENU_OPTIONS = new TaskShortcutFactory[]{
+             TaskShortcutFactory.APP_INFO,
+             TaskShortcutFactory.SPLIT_SELECT,
++            TaskShortcutFactory.LOCK_TOGGLE,
++            TaskShortcutFactory.MINI_WINDOW,
+             TaskShortcutFactory.PIN,
+             TaskShortcutFactory.INSTALL,
+             TaskShortcutFactory.FREE_FORM,
+@@ -428,6 +430,12 @@ public class TaskOverlayFactory {
+                 endLiveTileMode(() -> saveScreenshot(mTask));
+             }
+ 
++            public void onClearAll() {
++                RecentsView recentsView = mTaskContainer.getTaskView().getRecentsView();
++                if (recentsView == null) return;
++                recentsView.dismissAllTasksFromActions();
++            }
++
+             public void onSplit() {
+                 endLiveTileMode(TaskOverlay.this::enterSplitSelect);
+             }
+@@ -446,6 +454,9 @@ public class TaskOverlayFactory {
+         /** User has indicated they want to screenshot the current task. */
+         void onScreenshot();
+ 
++        /** User has indicated they want to clear all tasks. */
++        void onClearAll();
++
+         /** User wants to start split screen with current app. */
+         void onSplit();
+ 
+diff --git a/quickstep/src/com/android/quickstep/TaskShortcutFactory.java b/quickstep/src/com/android/quickstep/TaskShortcutFactory.java
+index 3c5633e..d2e4e67 100644
+--- a/quickstep/src/com/android/quickstep/TaskShortcutFactory.java
++++ b/quickstep/src/com/android/quickstep/TaskShortcutFactory.java
+@@ -17,6 +17,7 @@
+ package com.android.quickstep;
+ 
+ import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
++import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED_WINDOW_EXT;
+ import static android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
+ import static android.view.Display.DEFAULT_DISPLAY;
+ 
+@@ -26,6 +27,7 @@ import static com.android.launcher3.logging.StatsLogManager.LauncherEvent.LAUNCH
+ import static com.android.launcher3.util.SplitConfigurationOptions.STAGE_POSITION_BOTTOM_OR_RIGHT;
+ 
+ import android.app.ActivityOptions;
++import android.content.ComponentName;
+ import android.graphics.Bitmap;
+ import android.graphics.Color;
+ import android.graphics.Rect;
+@@ -33,6 +35,7 @@ import android.os.Handler;
+ import android.os.Looper;
+ import android.os.RemoteException;
+ import android.provider.Settings;
++import android.text.TextUtils;
+ import android.util.Log;
+ import android.view.View;
+ import android.view.WindowInsets;
+@@ -66,7 +69,9 @@ import com.android.systemui.shared.system.ActivityManagerWrapper;
+ import com.android.wm.shell.shared.desktopmode.DesktopModeStatus;
+ 
+ import java.util.Collections;
++import java.util.HashSet;
+ import java.util.List;
++import java.util.Set;
+ import java.util.function.Function;
+ import java.util.stream.Collectors;
+ 
+@@ -405,6 +410,52 @@ public interface TaskShortcutFactory {
+         }
+     };
+ 
++    TaskShortcutFactory MINI_WINDOW = new TaskShortcutFactory() {
++        @Override
++        public List<SystemShortcut> getShortcuts(RecentsViewContainer container,
++                TaskContainer taskContainer) {
++            final Task task = taskContainer.getTask();
++            if (!task.isDockable || isBlacklisted(container, task)) {
++                return null;
++            }
++
++            return Collections.singletonList(new MiniWindowSystemShortcut(container,
++                    taskContainer));
++        }
++
++        private boolean isBlacklisted(RecentsViewContainer container, Task task) {
++            final String packageName = getPackageName(task);
++            if (TextUtils.isEmpty(packageName)) {
++                return true;
++            }
++            if (SYSTEM_NOTIFICATION_BLACKLIST.contains(packageName)) {
++                return true;
++            }
++
++            final String blacklist = Settings.System.getString(
++                    container.asContext().getContentResolver(),
++                    Settings.System.POP_UP_NOTIFICATION_BLACKLIST);
++            if (TextUtils.isEmpty(blacklist)) {
++                return false;
++            }
++
++            for (String blockedPackage : blacklist.split(";")) {
++                if (packageName.equals(blockedPackage)) {
++                    return true;
++                }
++            }
++            return false;
++        }
++
++        private String getPackageName(Task task) {
++            final ComponentName topComponent = task.getTopComponent();
++            if (topComponent != null) {
++                return topComponent.getPackageName();
++            }
++            return task.key.getPackageName();
++        }
++    };
++
+     TaskShortcutFactory PIN = new TaskShortcutFactory() {
+         @Override
+         public List<SystemShortcut> getShortcuts(RecentsViewContainer container,
+@@ -422,6 +473,34 @@ public interface TaskShortcutFactory {
+             return Collections.singletonList(new PinSystemShortcut(container, taskContainer));
+         }
+     };
++    class MiniWindowSystemShortcut extends SystemShortcut<RecentsViewContainer> {
++
++        private final TaskContainer mTaskContainer;
++
++        MiniWindowSystemShortcut(RecentsViewContainer target, TaskContainer taskContainer) {
++            super(R.drawable.ic_select_windows, R.string.recent_task_option_mini_window, target,
++                    taskContainer.getItemInfo(), taskContainer.getTaskView());
++            mTaskContainer = taskContainer;
++        }
++
++        @Override
++        public void onClick(View view) {
++            dismissTaskMenuView();
++            RecentsView rv = mTarget.getOverviewPanel();
++            rv.switchToScreenshot(() -> {
++                rv.finishRecentsAnimation(true /* toHome */, false /* shouldPip */, () -> {
++                    mTarget.returnToHomescreen();
++                    rv.getHandler().post(() -> {
++                        final ActivityOptions options = ActivityOptions.makeBasic();
++                        options.setLaunchWindowingMode(WINDOWING_MODE_PINNED_WINDOW_EXT);
++                        options.setSplashScreenStyle(SplashScreen.SPLASH_SCREEN_STYLE_ICON);
++                        ActivityManagerWrapper.getInstance().startActivityFromRecents(
++                                mTaskContainer.getTask().key.id, options);
++                    });
++                });
++            });
++        }
++    }
+ 
+     class PinSystemShortcut extends SystemShortcut<RecentsViewContainer> {
+ 
+@@ -448,6 +527,16 @@ public interface TaskShortcutFactory {
+         }
+     }
+ 
++    Set<String> SYSTEM_NOTIFICATION_BLACKLIST = new HashSet<String>() {
++        {
++            add("android");
++            add("com.android.chrome");
++            add("com.android.packageinstaller");
++            add("com.google.android.gms");
++            add("com.google.android.packageinstaller");
++        }
++    };
++
+     TaskShortcutFactory INSTALL = new TaskShortcutFactory() {
+         @Override
+         public List<SystemShortcut> getShortcuts(RecentsViewContainer container,
+diff --git a/quickstep/src/com/android/quickstep/inputconsumers/OtherActivityInputConsumer.java b/quickstep/src/com/android/quickstep/inputconsumers/OtherActivityInputConsumer.java
+index 65a76e5..f82294a 100644
+--- a/quickstep/src/com/android/quickstep/inputconsumers/OtherActivityInputConsumer.java
++++ b/quickstep/src/com/android/quickstep/inputconsumers/OtherActivityInputConsumer.java
+@@ -391,6 +391,7 @@ public class OtherActivityInputConsumer extends ContextWrapper implements InputC
+                 }
+ 
+                 if (mInteractionHandler != null) {
++                    mInteractionHandler.updateTouchPoint(ev.getRawX(), ev.getRawY());
+                     if (mPassedWindowMoveSlop) {
+                         // Move
+                         mInteractionHandler.updateDisplacement(displacement - mStartDisplacement);
+@@ -411,6 +412,9 @@ public class OtherActivityInputConsumer extends ContextWrapper implements InputC
+             }
+             case ACTION_CANCEL:
+             case ACTION_UP: {
++                if (mInteractionHandler != null) {
++                    mInteractionHandler.updateTouchPoint(ev.getRawX(), ev.getRawY());
++                }
+                 if (DEBUG_FAILED_QUICKSWITCH && !mPassedWindowMoveSlop) {
+                     float displacementX = mLastPos.x - mDownPos.x;
+                     float displacementY = mLastPos.y - mDownPos.y;
+diff --git a/quickstep/src/com/android/quickstep/views/MiniWindowDropTargetView.java b/quickstep/src/com/android/quickstep/views/MiniWindowDropTargetView.java
+new file mode 100644
+index 0000000..f4b66c4
+--- /dev/null
++++ b/quickstep/src/com/android/quickstep/views/MiniWindowDropTargetView.java
+@@ -0,0 +1,136 @@
++/*
++ * Copyright (C) 2026 Neko-LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.quickstep.views;
++
++import android.content.Context;
++import android.graphics.Color;
++import android.graphics.Outline;
++import android.graphics.drawable.GradientDrawable;
++import android.util.TypedValue;
++import android.view.Gravity;
++import android.view.View;
++import android.view.ViewOutlineProvider;
++import android.widget.FrameLayout;
++import android.widget.ImageView;
++
++import com.android.launcher3.R;
++
++/** Visual drop target used to arm mini-window launch during swipe-up from apps. */
++public class MiniWindowDropTargetView extends FrameLayout {
++
++    private static final float BASE_ALPHA = 0.42f;
++    private static final float MAX_ALPHA = 0.96f;
++    private static final float BASE_SCALE = 0.94f;
++    private static final float ARMED_SCALE = 1.06f;
++
++    private final float mCornerRadiusPx;
++    private final float mMagneticMarginPx;
++    private final float mStickyMarginPx;
++
++    private final GradientDrawable mBackgroundDrawable;
++    private final ImageView mIconView;
++
++    private boolean mArmed;
++    private float mRevealProgress;
++
++    public MiniWindowDropTargetView(Context context) {
++        super(context);
++
++        mCornerRadiusPx = dpToPx(18);
++        mMagneticMarginPx = dpToPx(18);
++        mStickyMarginPx = dpToPx(30);
++
++        mBackgroundDrawable = new GradientDrawable();
++        mBackgroundDrawable.setColor(Color.WHITE);
++        mBackgroundDrawable.setCornerRadius(mCornerRadiusPx);
++        mBackgroundDrawable.setAlpha(Math.round(BASE_ALPHA * 255f));
++        setBackground(mBackgroundDrawable);
++
++        setClipToOutline(true);
++        setOutlineProvider(new ViewOutlineProvider() {
++            @Override
++            public void getOutline(View view, Outline outline) {
++                outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), mCornerRadiusPx);
++            }
++        });
++
++        mIconView = new ImageView(context);
++        mIconView.setImageResource(R.drawable.ic_select_windows);
++        mIconView.setColorFilter(Color.argb(200, 0, 0, 0));
++        LayoutParams lp = new LayoutParams((int) dpToPx(28), (int) dpToPx(28));
++        lp.gravity = Gravity.CENTER;
++        addView(mIconView, lp);
++
++        setScaleX(BASE_SCALE);
++        setScaleY(BASE_SCALE);
++        setVisibility(INVISIBLE);
++    }
++
++    public void setRevealProgress(float progress) {
++        mRevealProgress = clamp(progress);
++        applyState();
++    }
++
++    public void setArmed(boolean armed) {
++        if (mArmed == armed) {
++            return;
++        }
++        mArmed = armed;
++        animate().cancel();
++        animate()
++                .scaleX(armed ? ARMED_SCALE : BASE_SCALE + (0.04f * mRevealProgress))
++                .scaleY(armed ? ARMED_SCALE : BASE_SCALE + (0.04f * mRevealProgress))
++                .setDuration(140)
++                .start();
++        applyState();
++    }
++
++    public boolean containsTouch(float x, float y, boolean sticky) {
++        if (getVisibility() != VISIBLE) {
++            return false;
++        }
++        float left = getX();
++        float top = getY();
++        float right = left + getWidth();
++        float bottom = top + getHeight();
++        float margin = sticky ? mStickyMarginPx : mMagneticMarginPx;
++        return x >= left - margin && x <= right + margin
++                && y >= top - margin && y <= bottom + margin;
++    }
++
++    private void applyState() {
++        float alpha = BASE_ALPHA + ((MAX_ALPHA - BASE_ALPHA) * mRevealProgress);
++        if (mArmed) {
++            alpha = Math.max(alpha, 0.92f);
++        }
++        mBackgroundDrawable.setAlpha(Math.round(alpha * 255f));
++        mIconView.setAlpha(mArmed ? 1f : 0.74f + (0.26f * mRevealProgress));
++        if (!mArmed) {
++            setScaleX(BASE_SCALE + (0.04f * mRevealProgress));
++            setScaleY(BASE_SCALE + (0.04f * mRevealProgress));
++        }
++    }
++
++    private float clamp(float value) {
++        return Math.max(0f, Math.min(1f, value));
++    }
++
++    private float dpToPx(float dp) {
++        return TypedValue.applyDimension(
++                TypedValue.COMPLEX_UNIT_DIP, dp, getResources().getDisplayMetrics());
++    }
++}
+-- 
+2.43.0
+

@@ -1,0 +1,90 @@
+From 68b14c67bcbb4fee22b595973fc4ff1ec18133ef Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 12:42:34 +0800
+Subject: [PATCH] Neko LineageOS: Fix up! Crash on en_GB and hu_ZZ locale and
+ Accessibility Feature enabled
+
+Change-Id: I2d737ced98524cb7ebe65a55f17a158e56941d6a
+---
+ java/res/values/cm_strings.xml                |  2 --
+ java/res/values/strings.xml                   |  5 +++++
+ .../latin/utils/SubtypeLocaleUtils.java       | 21 ++++++++++++++++---
+ 3 files changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/java/res/values/cm_strings.xml b/java/res/values/cm_strings.xml
+index f161122..eb2b8ce 100644
+--- a/java/res/values/cm_strings.xml
++++ b/java/res/values/cm_strings.xml
+@@ -25,8 +25,6 @@ are used to. This keyboard does not provide a dictionary, and it is not tied to
+ language among those that use the Latin alphabet. This keyboard is laid out in the Bépo
+ disposition rather than other common dispositions for Latin languages. [CHAR LIMIT=25] -->
+     <string name="subtype_no_language_bepo">Alphabet (Bépo)</string>
+-    <string name="subtype_hu_ZZ">Hungarian (QWERTY)</string>
+-
+     <string name="keyboard_theme_material_follow_system">Material - follow system settings</string>
+ 
+     <!-- Title of the settings for setting keyboard height -->
+diff --git a/java/res/values/strings.xml b/java/res/values/strings.xml
+index ba3bedf..f449845 100644
+--- a/java/res/values/strings.xml
++++ b/java/res/values/strings.xml
+@@ -238,6 +238,8 @@
+     <string name="subtype_es_US">Spanish (US)</string>
+     <!-- Description for Hinglish (https://en.wikipedia.org/wiki/Hinglish) keyboard subtype [CHAR LIMIT=25] -->
+     <string name="subtype_hi_ZZ">Hinglish</string>
++    <!-- Description for Hungarian (QWERTY) keyboard subtype [CHAR LIMIT=25] -->
++    <string name="subtype_hu_ZZ">Hungarian (QWERTY)</string>
+     <!-- Description for Serbian (Latin) keyboard subtype [CHAR LIMIT=25]
+          (Latin) can be an abbreviation to fit in the CHAR LIMIT. -->
+     <string name="subtype_sr_ZZ">Serbian (Latin)</string>
+@@ -256,6 +258,9 @@
+     <!-- Description for Hinglish (https://en.wikipedia.org/wiki/Hinglish) keyboard subtype with explicit keyboard layout [CHAR LIMIT=25]
+          This should be identical to subtype_hi_ZZ aside from the trailing (%s). -->
+     <string name="subtype_with_layout_hi_ZZ">Hinglish (<xliff:g id="KEYBOARD_LAYOUT" example="QWERTY">%s</xliff:g>)</string>
++    <!-- Description for Hungarian (QWERTY) keyboard subtype with explicit keyboard layout [CHAR LIMIT=25]
++         This should be identical to subtype_hu_ZZ aside from the trailing (%s). -->
++    <string name="subtype_with_layout_hu_ZZ">Hungarian (<xliff:g id="KEYBOARD_LAYOUT" example="QWERTY">%s</xliff:g>)</string>
+     <!-- Description for Serbian (Latin) keyboard subtype with explicit keyboard layout [CHAR LIMIT=25]
+          This should be identical to subtype_sr_ZZ aside from the trailing (%s). -->
+     <string name="subtype_with_layout_sr_ZZ">Serbian (<xliff:g id="KEYBOARD_LAYOUT" example="QWERTY">%s</xliff:g>)</string>
+diff --git a/java/src/com/android/inputmethod/latin/utils/SubtypeLocaleUtils.java b/java/src/com/android/inputmethod/latin/utils/SubtypeLocaleUtils.java
+index 54a3fc3..96dfa21 100644
+--- a/java/src/com/android/inputmethod/latin/utils/SubtypeLocaleUtils.java
++++ b/java/src/com/android/inputmethod/latin/utils/SubtypeLocaleUtils.java
+@@ -222,15 +222,30 @@ public final class SubtypeLocaleUtils {
+         }
+ 
+         final String displayName;
+-        if (exceptionalNameResId != null) {
++        if (exceptionalNameResId != null && exceptionalNameResId != 0) {
+             final RunInLocale<String> getExceptionalName = new RunInLocale<String>() {
+                 @Override
+                 protected String job(final Resources res) {
+-                    return res.getString(exceptionalNameResId);
++                    try {
++                        return res.getString(exceptionalNameResId);
++                    } catch (Resources.NotFoundException e) {
++                        Log.w(TAG, "Missing exceptional locale resource: locale=" + localeString
++                                + " resId=" + exceptionalNameResId);
++                        return null;
++                    }
+                 }
+             };
+-            displayName = getExceptionalName.runInLocale(sResources, displayLocale);
++            final String exceptionalDisplayName =
++                    getExceptionalName.runInLocale(sResources, displayLocale);
++            displayName = exceptionalDisplayName != null
++                    ? exceptionalDisplayName
++                    : LocaleUtils.constructLocaleFromString(localeString)
++                            .getDisplayName(displayLocale);
+         } else {
++            if (exceptionalNameResId != null) {
++                Log.w(TAG, "Invalid exceptional locale resource id: locale=" + localeString
++                        + " resId=" + exceptionalNameResId);
++            }
+             displayName = LocaleUtils.constructLocaleFromString(localeString)
+                     .getDisplayName(displayLocale);
+         }
+-- 
+2.43.0
+

@@ -1,0 +1,35 @@
+From 20823e665ffa90a88bcf6e00f16a3caa95169424 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 3 Jul 2026 12:04:42 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Start adb_root only when
+ override on debuggable is on
+
+In some cases it is still needed for developers to access adb_root in user build, then this commit will enable dev to
+enable this service by setting ro.debuggable to 1
+
+Change-Id: I4d5e59aa0115e32ecc071bcd37c793793e011560
+---
+ root/adb_root.rc | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/root/adb_root.rc b/root/adb_root.rc
+index 8c65c0b..ddd1c8b 100644
+--- a/root/adb_root.rc
++++ b/root/adb_root.rc
+@@ -2,6 +2,13 @@ service adb_root /system_ext/bin/adb_root
+     class main
+     user root
+     group root
++    disabled
++
++on init && property:ro.debuggable=1
++    start adb_root
++
++on property:ro.debuggable=1
++    start adb_root
+ 
+ on post-fs-data
+     mkdir /data/adbroot 0700 root root
+-- 
+2.43.0
+
