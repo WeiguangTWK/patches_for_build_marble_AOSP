@@ -1,0 +1,113 @@
+From 0ee89294643b7d86a1aca729eff6707d1dc6ed24 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 16:33:59 +0800
+Subject: [PATCH] Neko LineageOS: Fix up! Truncates Very Large Text when
+ posting it from clipboard to SystemUI using share shortcut
+
+When you try to copy VERY LARGE text and share (e.g. share logs from Termux of LogFox) systemui will crash for type overflow
+
+This commit makes system truncates it before share
+
+Change-Id: I3d907ffd03bdd8b689bd5981ae0c553bf2c3a830
+---
+ .../clipboardoverlay/ActionIntentCreatorTest.kt       | 11 +++++++++++
+ .../clipboardoverlay/DefaultIntentCreatorTest.java    | 11 +++++++++++
+ .../systemui/clipboardoverlay/ActionIntentCreator.kt  |  4 +++-
+ .../clipboardoverlay/DefaultIntentCreator.java        |  7 ++++++-
+ 4 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/ActionIntentCreatorTest.kt b/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/ActionIntentCreatorTest.kt
+index f13f7f47a..b89ab82d2 100644
+--- a/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/ActionIntentCreatorTest.kt
++++ b/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/ActionIntentCreatorTest.kt
+@@ -266,6 +266,17 @@ class ActionIntentCreatorTest : SysuiTestCase() {
+         assertEquals("text/plain", target?.type)
+     }
+ 
++    @Test
++    fun test_getShareIntent_truncatesVeryLargeText() {
++        val longText = "a".repeat(300_000)
++        val clipData = ClipData.newPlainText("Test", longText)
++        val intent = creator.getShareIntent(clipData, context)
++
++        val target = intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
++        val sharedText = target?.getStringExtra(Intent.EXTRA_TEXT)
++        assertEquals(100_000, sharedText?.length)
++    }
++
+     // Assert that the given flags are set
+     private fun assertFlags(intent: Intent, flags: Int) {
+         assertTrue((intent.flags and flags) == flags)
+diff --git a/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/DefaultIntentCreatorTest.java b/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/DefaultIntentCreatorTest.java
+index 16b779399..e266ea333 100644
+--- a/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/DefaultIntentCreatorTest.java
++++ b/packages/SystemUI/multivalentTests/src/com/android/systemui/clipboardoverlay/DefaultIntentCreatorTest.java
+@@ -197,6 +197,17 @@ public class DefaultIntentCreatorTest extends SysuiTestCase {
+         assertEquals("text/plain", target.getType());
+     }
+ 
++    @Test
++    public void test_getShareIntent_truncatesVeryLargeText() {
++        String longText = "a".repeat(300_000);
++        ClipData clipData = ClipData.newPlainText("Test", longText);
++        Intent intent = mIntentCreator.getShareIntent(clipData, getContext());
++
++        Intent target = intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent.class);
++        String sharedText = target.getStringExtra(Intent.EXTRA_TEXT);
++        assertEquals(100_000, sharedText.length());
++    }
++
+     // Assert that the given flags are set
+     private void assertFlags(Intent intent, int flags) {
+         assertTrue((intent.getFlags() & flags) == flags);
+diff --git a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ActionIntentCreator.kt b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ActionIntentCreator.kt
+index a344826ec..01a72c074 100644
+--- a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ActionIntentCreator.kt
++++ b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/ActionIntentCreator.kt
+@@ -74,7 +74,8 @@ constructor(
+                 putExtra(Intent.EXTRA_STREAM, uri)
+                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+             } else {
+-                putExtra(Intent.EXTRA_TEXT, clipData.getItemAt(0).coerceToText(context).toString())
++                val shareText = clipData.getItemAt(0).coerceToText(context).toString()
++                putExtra(Intent.EXTRA_TEXT, shareText.take(MAX_SHARE_TEXT_LENGTH))
+                 setType("text/plain")
+             }
+         }
+@@ -161,6 +162,7 @@ constructor(
+             .getOrNull()
+ 
+     companion object {
++        private const val MAX_SHARE_TEXT_LENGTH = 100_000
+         private const val EXTRA_EDIT_SOURCE: String = "edit_source"
+         private const val EDIT_SOURCE_CLIPBOARD: String = "clipboard"
+         private const val REMOTE_COPY_ACTION: String = "android.intent.action.REMOTE_COPY"
+diff --git a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/DefaultIntentCreator.java b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/DefaultIntentCreator.java
+index 994f9f8d5..d85e0ae2f 100644
+--- a/packages/SystemUI/src/com/android/systemui/clipboardoverlay/DefaultIntentCreator.java
++++ b/packages/SystemUI/src/com/android/systemui/clipboardoverlay/DefaultIntentCreator.java
+@@ -36,6 +36,7 @@ import javax.inject.Inject;
+ 
+ @SysUISingleton
+ public class DefaultIntentCreator implements IntentCreator {
++    private static final int MAX_SHARE_TEXT_LENGTH = 100_000;
+     private static final String EXTRA_EDIT_SOURCE = "edit_source";
+     private static final String EDIT_SOURCE_CLIPBOARD = "clipboard";
+     private static final String REMOTE_COPY_ACTION = "android.intent.action.REMOTE_COPY";
+@@ -71,8 +72,12 @@ public class DefaultIntentCreator implements IntentCreator {
+             shareIntent.putExtra(Intent.EXTRA_STREAM, uri);
+             shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+         } else {
++            String shareText = clipData.getItemAt(0).coerceToText(context).toString();
++            if (shareText.length() > MAX_SHARE_TEXT_LENGTH) {
++                shareText = shareText.substring(0, MAX_SHARE_TEXT_LENGTH);
++            }
+             shareIntent.putExtra(
+-                    Intent.EXTRA_TEXT, clipData.getItemAt(0).coerceToText(context).toString());
++                    Intent.EXTRA_TEXT, shareText);
+             shareIntent.setType("text/plain");
+         }
+         Intent chooserIntent = Intent.createChooser(shareIntent, null)
+-- 
+2.43.0
+

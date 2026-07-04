@@ -1,0 +1,140 @@
+From b683a62afb9d5a1d3c0c5fb50a2169a135744eee Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 14:14:02 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Rename framework resource
+ filename to avoid detection
+
+To avoid detection we have to rename files to not let detectors (e.g. Native Detector & Duck Detector) hit custom rom detection
+
+Change-Id: I27dce0e4b2df7f1390436fd5fa5222d64be52292
+---
+ cmds/idmap2/idmap2d/Idmap2Service.cpp                    | 2 +-
+ core/java/android/app/LoadedApk.java                     | 5 +++++
+ core/java/android/content/res/AssetManager.java          | 9 ++++++---
+ .../com/android/internal/content/om/OverlayConfig.java   | 4 +++-
+ core/jni/fd_utils.cpp                                    | 5 ++++-
+ libs/androidfw/AssetManager.cpp                          | 2 +-
+ 6 files changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/cmds/idmap2/idmap2d/Idmap2Service.cpp b/cmds/idmap2/idmap2d/Idmap2Service.cpp
+index ee2656edf..7f3a45333 100644
+--- a/cmds/idmap2/idmap2d/Idmap2Service.cpp
++++ b/cmds/idmap2/idmap2d/Idmap2Service.cpp
+@@ -62,7 +62,7 @@ using PolicyBitmask = android::ResTable_overlayable_policy_header::PolicyBitmask
+ namespace {
+ 
+ constexpr std::string_view kFrameworkPath = "/system/framework/framework-res.apk";
+-constexpr std::string_view kLineagePath = "/system/framework/org.lineageos.platform-res.apk";
++const std::string kLineagePath = std::string("/system/framework/") + "org.system." + "platform-res.apk";
+ 
+ Status ok() {
+   return Status::ok();
+diff --git a/core/java/android/app/LoadedApk.java b/core/java/android/app/LoadedApk.java
+index a55729e0c..fe1f3058b 100644
+--- a/core/java/android/app/LoadedApk.java
++++ b/core/java/android/app/LoadedApk.java
+@@ -1537,6 +1537,11 @@ public final class LoadedApk {
+                 for (int i = 0, n = packageIdentifiers.size(); i < n; i++) {
+                     final int id = packageIdentifiers.keyAt(i);
+                     if (id == 0x01 || id == 0x7f || id == 0x3f) {
++                        if (id == 0x3f) {
++                            Slog.w(TAG, "Skipping rewriteRValues for reserved package 0x3f in "
++                                    + mPackageName + "; entry=" + packageIdentifiers.valueAt(i)
++                                    + ", assignedPackageIdentifiers=" + packageIdentifiers);
++                        }
+                         continue;
+                     }
+ 
+diff --git a/core/java/android/content/res/AssetManager.java b/core/java/android/content/res/AssetManager.java
+index a500ced2c..2d081f0fe 100644
+--- a/core/java/android/content/res/AssetManager.java
++++ b/core/java/android/content/res/AssetManager.java
+@@ -84,7 +84,6 @@ public final class AssetManager implements AutoCloseable {
+     public static final String FRAMEWORK_APK_PATH = getFrameworkApkPath();
+     private static final String FRAMEWORK_APK_PATH_DEVICE = "/system/framework/framework-res.apk";
+     private static final String FRAMEWORK_APK_PATH_RAVENWOOD = "ravenwood-data/framework-res.apk";
+-    private static final String LINEAGE_APK_PATH = "/system/framework/org.lineageos.platform-res.apk";
+ 
+     private static final Object sSync = new Object();
+ 
+@@ -292,8 +291,7 @@ public final class AssetManager implements AutoCloseable {
+             for (String idmapPath : systemIdmapPaths) {
+                 apkAssets.add(ApkAssets.loadOverlayFromPath(idmapPath, ApkAssets.PROPERTY_SYSTEM));
+             }
+-            apkAssets.add(ApkAssets.loadFromPath(LINEAGE_APK_PATH, ApkAssets.PROPERTY_SYSTEM));
+-
++            apkAssets.add(ApkAssets.loadFromPath(getLineageApkPath(), ApkAssets.PROPERTY_SYSTEM));
+             sSystemApkAssetsSet = new ArraySet<>(apkAssets);
+             sSystemApkAssets = apkAssets.toArray(new ApkAssets[0]);
+             if (sSystem == null) {
+@@ -1876,4 +1874,9 @@ public final class AssetManager implements AutoCloseable {
+     private static native void nativeApplyStyleWithArray(long ptr, long themePtr,
+             @AttrRes int defStyleAttr, @StyleRes int defStyleRes,
+             long xmlParserPtr, @NonNull int[] inAttrs, int[] outData, int[] outIndices);
++
++    private static String getLineageApkPath() {
++        return "/system/framework/"
++                + "org.system." + "platform-res.apk";
++    }
+ }
+diff --git a/core/java/com/android/internal/content/om/OverlayConfig.java b/core/java/com/android/internal/content/om/OverlayConfig.java
+index 537cd0f09..0571382d7 100644
+--- a/core/java/com/android/internal/content/om/OverlayConfig.java
++++ b/core/java/com/android/internal/content/om/OverlayConfig.java
+@@ -67,6 +67,8 @@ import javax.xml.parsers.ParserConfigurationException;
+ @VisibleForTesting(visibility = VisibleForTesting.Visibility.PACKAGE)
+ public class OverlayConfig {
+     static final String TAG = "OverlayConfig";
++    private static final String LINEAGE_PLATFORM_RES_PATH = "/system/framework/"
++            + "org.system." + "platform-res.apk";
+ 
+     // The default priority of an overlay that has not been configured. Overlays with default
+     // priority have a higher precedence than configured overlays.
+@@ -539,7 +541,7 @@ public class OverlayConfig {
+ 
+         for (Map.Entry<String, String> target : new HashMap<String, String>() {{
+                 put(AssetManager.FRAMEWORK_APK_PATH, "android");
+-                put("/system/framework/org.lineageos.platform-res.apk", "lineageos.platform");
++                put(LINEAGE_PLATFORM_RES_PATH, "lineageos.platform");
+         }}.entrySet()) {
+             final String targetPath = target.getKey();
+             final String targetPackageName = target.getValue();
+diff --git a/core/jni/fd_utils.cpp b/core/jni/fd_utils.cpp
+index 74e44c760..d1a9d142c 100644
+--- a/core/jni/fd_utils.cpp
++++ b/core/jni/fd_utils.cpp
+@@ -33,6 +33,9 @@
+ #include <android-base/strings.h>
+ 
+ // Static allowlist of open paths that the zygote is allowed to keep open.
++static const char* kLineageResApkPath = "/system/framework/"
++        "org.system."
++        "platform-res.apk";
+ static const char* kPathAllowlist[] = {
+         "/dev/null",
+         "/dev/socket/zygote",
+@@ -44,7 +47,7 @@ static const char* kPathAllowlist[] = {
+         "/sys/kernel/debug/tracing/trace_marker",
+         "/sys/kernel/tracing/trace_marker",
+         "/system/framework/framework-res.apk",
+-        "/system/framework/org.lineageos.platform-res.apk",
++        kLineageResApkPath,
+         "/dev/urandom",
+         "/dev/ion",
+         "/dev/dri/renderD129", // Fixes b/31172436
+diff --git a/libs/androidfw/AssetManager.cpp b/libs/androidfw/AssetManager.cpp
+index 348a609ec..4362bbc7f 100644
+--- a/libs/androidfw/AssetManager.cpp
++++ b/libs/androidfw/AssetManager.cpp
+@@ -63,7 +63,7 @@ static const bool kIsDebug = false;
+ static const char* kAssetsRoot = "assets";
+ static const char* kAppZipName = NULL; //"classes.jar";
+ static const char* kSystemAssets = "framework/framework-res.apk";
+-static const char* kLineageAssets = "framework/org.lineageos.platform-res.apk";
++static const char* kLineageAssets = "framework/" "org.system." "platform-res.apk";
+ static const char* kResourceCache = "resource-cache";
+ 
+ static const char* kExcludeExtension = ".EXCLUDE";
+-- 
+2.43.0
+

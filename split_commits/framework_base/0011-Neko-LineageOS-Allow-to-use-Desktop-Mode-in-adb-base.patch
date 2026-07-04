@@ -1,0 +1,200 @@
+From f28ede3de29cdca52a4576323f43d5e5f9542cd3 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 16:13:18 +0800
+Subject: [PATCH] Neko LineageOS: Allow to use Desktop Mode in adb-based
+ Virtual Display
+
+AOSP's origional restrict on Desktop Mode is quite tight causing even you can trigger Desktop Mode and Freeform won't work
+
+I removed some of restriction when using virtual display like scrcpy
+
+Change-Id: Ic38688b25971b7dbcceb2825dc06c6581b74620b
+---
+ .../desktopmode/DesktopTasksController.kt     | 46 +++++++++++++++++--
+ .../display/DisplayTopologyCoordinator.java   | 11 ++++-
+ .../com/android/server/wm/DisplayContent.java |  8 +++-
+ .../server/wm/DisplayWindowSettings.java      |  9 ++++
+ .../android/server/wm/TaskDisplayArea.java    |  8 ++++
+ .../server/wm/WindowManagerService.java       | 21 +++++++--
+ 6 files changed, 93 insertions(+), 10 deletions(-)
+
+diff --git a/libs/WindowManager/Shell/src/com/android/wm/shell/desktopmode/DesktopTasksController.kt b/libs/WindowManager/Shell/src/com/android/wm/shell/desktopmode/DesktopTasksController.kt
+index b6fd5fc45..afa0fbc71 100644
+--- a/libs/WindowManager/Shell/src/com/android/wm/shell/desktopmode/DesktopTasksController.kt
++++ b/libs/WindowManager/Shell/src/com/android/wm/shell/desktopmode/DesktopTasksController.kt
+@@ -2500,11 +2500,51 @@ class DesktopTasksController(
+         displayId: Int,
+         userId: Int = shellController.currentUserId,
+     ) {
+-        val repository = userRepositories.getProfile(userId)
+-        val wct = WindowContainerTransaction()
+         val displayLayout = displayController.getDisplayLayout(displayId) ?: return
+         val bounds = calculateDefaultDesktopTaskBounds(displayLayout)
+-        val deskId = getOrCreateDefaultDeskId(displayId, userId) ?: return
++        if (
++            !DesktopExperienceFlags.ENABLE_MULTIPLE_DESKTOPS_BACKEND.isTrue ||
++                !DesktopExperienceFlags.ENABLE_DEFAULT_DESK_WITHOUT_WARMUP_MIGRATION.isTrue
++        ) {
++            startLaunchIntentTransitionInternal(
++                intent = intent,
++                options = options,
++                displayId = displayId,
++                userId = userId,
++                displayLayout = displayLayout,
++                bounds = bounds,
++                deskId = getOrCreateDefaultDeskId(displayId, userId) ?: return,
++            )
++            return
++        }
++        mainScope.launch {
++            try {
++                startLaunchIntentTransitionInternal(
++                    intent = intent,
++                    options = options,
++                    displayId = displayId,
++                    userId = userId,
++                    displayLayout = displayLayout,
++                    bounds = bounds,
++                    deskId = getOrCreateDefaultDeskIdSuspending(displayId, userId),
++                )
++            } catch (t: Throwable) {
++                logE("Failed to start launch intent transition: %s", t.message)
++            }
++        }
++    }
++
++    private fun startLaunchIntentTransitionInternal(
++        intent: Intent,
++        options: Bundle,
++        displayId: Int,
++        userId: Int,
++        displayLayout: DisplayLayout,
++        bounds: Rect,
++        deskId: Int,
++    ) {
++        val repository = userRepositories.getProfile(userId)
++        val wct = WindowContainerTransaction()
+         if (DesktopModeFlags.ENABLE_CASCADING_WINDOWS.isTrue) {
+             val stableBounds = Rect().also { displayLayout.getStableBounds(it) }
+             cascadeWindow(
+diff --git a/services/core/java/com/android/server/display/DisplayTopologyCoordinator.java b/services/core/java/com/android/server/display/DisplayTopologyCoordinator.java
+index ac6c4c7fa..78683ffe8 100644
+--- a/services/core/java/com/android/server/display/DisplayTopologyCoordinator.java
++++ b/services/core/java/com/android/server/display/DisplayTopologyCoordinator.java
+@@ -301,11 +301,18 @@ class DisplayTopologyCoordinator {
+         if (info == null) {
+             return false;
+         }
++        final boolean isTrustedPublicSystemDecorVirtualDisplay =
++                info.type == Display.TYPE_VIRTUAL
++                        && (info.flags & Display.FLAG_TRUSTED) != 0
++                        && (info.flags & Display.FLAG_PRIVATE) == 0
++                        && (info.flags & Display.FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS) != 0;
+         if (info.type != Display.TYPE_INTERNAL && info.type != Display.TYPE_EXTERNAL
+-                && info.type != Display.TYPE_OVERLAY) {
++                && info.type != Display.TYPE_OVERLAY
++                && !isTrustedPublicSystemDecorVirtualDisplay) {
+             if (shouldLog) {
+                 Slog.d(TAG, "Display " + info.displayId + " not allowed in topology because "
+-                        + "type is not INTERNAL, EXTERNAL or OVERLAY");
++                        + "type is not INTERNAL, EXTERNAL, OVERLAY or trusted public system-decor"
++                        + " VIRTUAL");
+             }
+             return false;
+         }
+diff --git a/services/core/java/com/android/server/wm/DisplayContent.java b/services/core/java/com/android/server/wm/DisplayContent.java
+index 6b10c1d6e..dad3f089d 100644
+--- a/services/core/java/com/android/server/wm/DisplayContent.java
++++ b/services/core/java/com/android/server/wm/DisplayContent.java
+@@ -5811,7 +5811,13 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+             return false;
+         }
+         return switch (windowingMode) {
+-            case WINDOWING_MODE_FREEFORM -> mAtmService.mSupportsFreeformWindowManagement;
++            case WINDOWING_MODE_FREEFORM ->
++                    mAtmService.mSupportsFreeformWindowManagement
++                            || (mDisplay.getType() == Display.TYPE_VIRTUAL
++                            && isTrusted()
++                            && !isPrivate()
++                            && (mDisplay.getFlags()
++                            & FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS) != 0);
+             case WINDOWING_MODE_PINNED -> mAtmService.mSupportsPictureInPicture;
+             case WINDOWING_MODE_MULTI_WINDOW -> mAtmService.mSupportsMultiWindow;
+             default -> true;
+diff --git a/services/core/java/com/android/server/wm/DisplayWindowSettings.java b/services/core/java/com/android/server/wm/DisplayWindowSettings.java
+index 9004a6d4a..56ce010a0 100644
+--- a/services/core/java/com/android/server/wm/DisplayWindowSettings.java
++++ b/services/core/java/com/android/server/wm/DisplayWindowSettings.java
+@@ -257,6 +257,15 @@ class DisplayWindowSettings {
+             // Default display should show system decors.
+             return true;
+         }
++        if (dc.getDisplay().getType() == Display.TYPE_VIRTUAL
++                && dc.isTrusted()
++                && !dc.isPrivate()
++                && (dc.getDisplay().getFlags()
++                & Display.FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS) != 0) {
++            // Trusted public virtual displays may advertise fixed system decorations without
++            // participating in content mode switching. Treat them as topology participants.
++            return true;
++        }
+ 
+         final DisplayInfo displayInfo = dc.getDisplayInfo();
+         final SettingsProvider.SettingsEntry settings = mSettingsProvider.getSettings(displayInfo);
+diff --git a/services/core/java/com/android/server/wm/TaskDisplayArea.java b/services/core/java/com/android/server/wm/TaskDisplayArea.java
+index 677b7dcda..a88a3c6d5 100644
+--- a/services/core/java/com/android/server/wm/TaskDisplayArea.java
++++ b/services/core/java/com/android/server/wm/TaskDisplayArea.java
+@@ -1280,6 +1280,14 @@ final class TaskDisplayArea extends DisplayArea<WindowContainer> {
+         }
+ 
+         if (!supportsFreeform && windowingMode == WINDOWING_MODE_FREEFORM) {
++            if (mDisplayContent != null
++                    && mDisplayContent.getDisplay().getType() == android.view.Display.TYPE_VIRTUAL
++                    && mDisplayContent.isTrusted()
++                    && !mDisplayContent.isPrivate()
++                    && (mDisplayContent.getDisplay().getFlags()
++                    & android.view.Display.FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS) != 0) {
++                return true;
++            }
+             return false;
+         }
+ 
+diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
+index 7be068fab..903850f7f 100644
+--- a/services/core/java/com/android/server/wm/WindowManagerService.java
++++ b/services/core/java/com/android/server/wm/WindowManagerService.java
+@@ -8047,13 +8047,26 @@ public class WindowManagerService extends IWindowManager.Stub
+                         + "for a display that does not exist: %d", displayId);
+                 return false;
+             }
+-            if (!displayContent.isSystemDecorationsSupported()) {
++            final boolean systemDecorSupported = displayContent.isSystemDecorationsSupported();
++            final boolean freeformSupported =
++                    displayContent.isWindowingModeSupported(WINDOWING_MODE_FREEFORM);
++            final boolean defaultDisplay = displayContent.isDefaultDisplay;
++            final boolean allowContentModeSwitch = displayContent.allowContentModeSwitch();
++            final boolean trustedVirtualDisplay = displayContent.getDisplay().getType()
++                    == Display.TYPE_VIRTUAL
++                    && displayContent.isTrusted()
++                    && !displayContent.isPrivate()
++                    && (displayContent.getDisplay().getFlags()
++                    & Display.FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS) != 0;
++            if (!systemDecorSupported || !freeformSupported) {
+                 return false;
+             }
+-            if (!displayContent.isWindowingModeSupported(WINDOWING_MODE_FREEFORM)) {
+-                return false;
++            if (defaultDisplay || allowContentModeSwitch) {
++                return true;
+             }
+-            return displayContent.isDefaultDisplay || displayContent.allowContentModeSwitch();
++            // Trusted public virtual displays may opt into desktop mode by always showing their
++            // own system decorations instead of participating in content mode switching.
++            return trustedVirtualDisplay;
+         }
+     }
+ 
+-- 
+2.43.0
+

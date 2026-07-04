@@ -1,0 +1,388 @@
+From b4d1b85738d5cb23c4a15a36a1056174c60ccc2c Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 09:48:15 +0800
+Subject: [PATCH] Neko LineageOS: Allow Updater app to recognize Full update
+ and incremental update
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Usually there is only Full update in LineageOS OFFICIAL, but when it comes to update engine of AOSP it allow user to
+install incremental update to reduce file size to download. For incremental update there should be a 'base version' of it to
+judge whether this update is suitable for currently running version which is missing in LineageOS updater. I add the
+ability to judge by introduce a new key 'minBaseTimestamp'
+
+Only dislay when incremental updates satisfy minBaseTimestamp ≤ CurrentBuildTime(ro.build.date.utc) ≤ UpdateTimestamp(datetime)
+
+Change-Id: I85a82020de72971ec6e2875c9dd9b19cdc3bd97e
+---
+ .../java/org/lineageos/updater/data/Update.kt |  9 +-
+ .../updater/data/UpdatesRepository.kt         | 11 +++
+ .../updater/data/source/local/UpdateEntity.kt |  5 +
+ .../data/source/local/UpdatesDatabase.kt      | 12 ++-
+ .../data/source/network/NetworkUpdate.kt      |  2 +
+ .../lineageos/updater/updates/UpdateItem.kt   |  4 +
+ .../updater/updates/state/UpdateItemState.kt  |  1 +
+ .../updates/state/UpdateItemStateMapper.kt    |  7 ++
+ app/src/main/res/values-zh-rCN/strings.xml    |  2 +
+ app/src/main/res/values/strings.xml           |  2 +
+ .../4.json                                    | 92 +++++++++++++++++++
+ 11 files changed, 143 insertions(+), 4 deletions(-)
+ create mode 100644 schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/4.json
+
+diff --git a/app/src/main/java/org/lineageos/updater/data/Update.kt b/app/src/main/java/org/lineageos/updater/data/Update.kt
+index ea5dbdd..c330535 100644
+--- a/app/src/main/java/org/lineageos/updater/data/Update.kt
++++ b/app/src/main/java/org/lineageos/updater/data/Update.kt
+@@ -23,6 +23,7 @@ data class Update(
+     val speed: Long = 0,
+     val status: UpdateStatus = UpdateStatus.UNKNOWN,
+     val timestamp: Long = 0,
++    val minBaseTimestamp: Long = 0,
+     val type: String? = null,
+     val version: String = "",
+ ) {
+@@ -41,6 +42,7 @@ data class Update(
+     fun withSpeed(v: Long) = copy(speed = v)
+     fun withStatus(v: UpdateStatus) = copy(status = v)
+     fun withTimestamp(v: Long) = copy(timestamp = v)
++    fun withMinBaseTimestamp(v: Long) = copy(minBaseTimestamp = v)
+     fun withType(v: String?) = copy(type = v)
+     fun withVersion(v: String) = copy(version = v)
+ 
+@@ -62,6 +64,7 @@ data class Update(
+         private var speed: Long = 0,
+         private var status: UpdateStatus = UpdateStatus.UNKNOWN,
+         private var timestamp: Long = 0,
++        private var minBaseTimestamp: Long = 0,
+         private var type: String? = null,
+         private var version: String = "",
+     ) {
+@@ -69,7 +72,8 @@ data class Update(
+             update.isAvailableOnline, update.downloadId, update.downloadUrl,
+             update.eta, update.file, update.fileSize, update.isFinalizing,
+             update.installProgress, update.name, update.osPatchLevel, update.osSdkLevel,
+-            update.progress, update.speed, update.status, update.timestamp, update.type,
++            update.progress, update.speed, update.status, update.timestamp,
++            update.minBaseTimestamp, update.type,
+             update.version,
+         )
+ 
+@@ -88,12 +92,13 @@ data class Update(
+         fun setSpeed(v: Long) = apply { speed = v }
+         fun setStatus(v: UpdateStatus) = apply { status = v }
+         fun setTimestamp(v: Long) = apply { timestamp = v }
++        fun setMinBaseTimestamp(v: Long) = apply { minBaseTimestamp = v }
+         fun setType(v: String?) = apply { type = v }
+         fun setVersion(v: String) = apply { version = v }
+         fun build() = Update(
+             isAvailableOnline, downloadId, downloadUrl, eta, file, fileSize,
+             isFinalizing, installProgress, name, osPatchLevel, osSdkLevel, progress, speed,
+-            status, timestamp, type, version,
++            status, timestamp, minBaseTimestamp, type, version,
+         )
+     }
+ 
+diff --git a/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt b/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt
+index c659394..1b279fa 100644
+--- a/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt
++++ b/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt
+@@ -103,6 +103,17 @@ class UpdatesRepository(
+             Log.d(TAG, "${update.name} has type ${update.type}")
+             return false
+         }
++
++        if (update.minBaseTimestamp > 0 &&
++            DeviceInfoUtils.buildDateTimestamp < update.minBaseTimestamp
++        ) {
++            Log.d(
++                TAG,
++                "${update.name} requires base ${update.minBaseTimestamp}, current build is " +
++                    DeviceInfoUtils.buildDateTimestamp
++            )
++            return false
++        }
+         return true
+     }
+ }
+diff --git a/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt b/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt
+index 98b4dc4..4c2c23d 100644
+--- a/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt
++++ b/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt
+@@ -33,6 +33,9 @@ data class UpdateEntity(
+     @ColumnInfo(name = "timestamp")
+     val timestamp: Long,
+ 
++    @ColumnInfo(name = "min_base_timestamp")
++    val minBaseTimestamp: Long,
++
+     @ColumnInfo(name = "type")
+     val type: String?,
+ 
+@@ -60,6 +63,7 @@ fun Update.toEntity() = UpdateEntity(
+     status = status.persistentStatus,
+     path = file?.absolutePath,
+     timestamp = timestamp,
++    minBaseTimestamp = minBaseTimestamp,
+     type = type,
+     version = version,
+     size = fileSize,
+@@ -74,6 +78,7 @@ fun UpdateEntity.toUpdate() = Update(
+     status = UpdateStatus.fromPersistentStatus(status),
+     file = path?.let { File(it) },
+     timestamp = timestamp,
++    minBaseTimestamp = minBaseTimestamp,
+     type = type,
+     version = version,
+     fileSize = size,
+diff --git a/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt b/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt
+index f00b69a..4d6b9e5 100644
+--- a/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt
++++ b/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt
+@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
+  *
+  * Use [UpdatesLocalDataSource] to interact with data.
+  */
+-@Database(entities = [UpdateEntity::class], version = 3, exportSchema = true)
++@Database(entities = [UpdateEntity::class], version = 4, exportSchema = true)
+ abstract class UpdatesDatabase : RoomDatabase() {
+     abstract fun updateDao(): UpdateDao
+ 
+@@ -65,6 +65,14 @@ abstract class UpdatesDatabase : RoomDatabase() {
+             }
+         }
+ 
++        private val MIGRATION_3_4 = object : Migration(3, 4) {
++            override fun migrate(db: SupportSQLiteDatabase) {
++                db.execSQL(
++                    "ALTER TABLE `updates` ADD COLUMN `min_base_timestamp` INTEGER NOT NULL DEFAULT 0"
++                )
++            }
++        }
++
+         @JvmStatic
+         fun getInstance(context: Context): UpdatesDatabase = instance ?: synchronized(this) {
+             instance ?: Room.databaseBuilder(
+@@ -72,7 +80,7 @@ abstract class UpdatesDatabase : RoomDatabase() {
+                 UpdatesDatabase::class.java,
+                 "updates.db"
+             )
+-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
++                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                 .build()
+                 .also { instance = it }
+         }
+diff --git a/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt b/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt
+index 93d5938..8c5d7c1 100644
+--- a/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt
++++ b/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt
+@@ -20,6 +20,7 @@ data class NetworkUpdate(
+     // @SerialName("date") val date: String,
+     @SerialName("datetime") val datetime: Long,
+     @SerialName("files") val files: List<NetworkUpdateFile>,
++    @SerialName("min_base_datetime") val minBaseDatetime: Long = 0,
+     @SerialName("os_patch_level") val osPatchLevel: String? = null,
+     @SerialName("os_sdk_level") val osSdkLevel: Int? = null,
+     // @SerialName("ota_property_files") val otaPropertyFiles: String? = null,
+@@ -50,6 +51,7 @@ fun NetworkUpdate.toUpdate(): Update {
+         downloadId = files[0].sha256,
+         name = files[0].filename,
+         timestamp = datetime,
++        minBaseTimestamp = minBaseDatetime,
+         type = type,
+         fileSize = files[0].size,
+         downloadUrl = files[0].url,
+diff --git a/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt b/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt
+index a2dbda3..8ae9acd 100644
+--- a/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt
++++ b/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt
+@@ -148,6 +148,7 @@ fun UpdateItem(
+                             }
+ 
+                             null -> {
++                                Text(text = state.updateType)
+                                 Text(text = stringResource(R.string.list_update_size, state.fileSize))
+                                 if (state.androidUpdateInfo.isNotEmpty()) {
+                                     Text(text = state.androidUpdateInfo)
+@@ -251,6 +252,7 @@ private fun UpdateItemIdleCollapsedPreview() {
+                 buildVersion = "LineageOS 23.2",
+                 status = "",
+                 isLocal = false,
++                updateType = "Full update",
+                 fileSize = "1.1 GB",
+                 androidUpdateInfo = "Android 16",
+                 securityUpdate = "Jan 2026",
+@@ -284,6 +286,7 @@ private fun UpdateItemIdleExpandedPreview() {
+                 buildVersion = "LineageOS 23.2",
+                 status = "",
+                 isLocal = false,
++                updateType = "Incremental update",
+                 fileSize = "1.1 GB",
+                 androidUpdateInfo = "Major Android upgrade",
+                 securityUpdate = "Jan 2026",
+@@ -317,6 +320,7 @@ private fun UpdateItemDownloadingPreview() {
+                 buildVersion = "LineageOS 23.2",
+                 status = "Downloading",
+                 isLocal = false,
++                updateType = "Incremental update",
+                 fileSize = "1.1 GB",
+                 androidUpdateInfo = "Android 16",
+                 securityUpdate = "Jan 2026",
+diff --git a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt
+index 2a2bd7e..b5342d2 100644
+--- a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt
++++ b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt
+@@ -15,6 +15,7 @@ data class UpdateItemState(
+     val buildVersion: String,
+     val status: String,
+ 
++    val updateType: String,
+     val fileSize: String,
+     val androidUpdateInfo: String,
+     val securityUpdate: String,
+diff --git a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt
+index 93a18e1..ad184ec 100644
+--- a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt
++++ b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt
+@@ -157,6 +157,13 @@ class UpdateItemStateMapper(
+                 update.version,
+             ),
+             status = state.titleRes?.let { context.getString(it) } ?: "",
++            updateType = context.getString(
++                if (update.minBaseTimestamp > 0) {
++                    R.string.update_type_incremental
++                } else {
++                    R.string.update_type_full
++                }
++            ),
+             fileSize = Formatter.formatShortFileSize(context, update.fileSize),
+             androidUpdateInfo = when {
+                 update.osSdkLevel == null -> ""
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index d169a0a..f15a828 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -66,6 +66,8 @@
+     <string name="list_download_progress_eta_newer">已下载 <xliff:g id="filesize_without_unit" example="12.2">%1$s</xliff:g>，共 <xliff:g id="filesize_without_unit" example="310 MB">%2$s</xliff:g> (<xliff:g id="eta" example="3 minutes left">%3$s</xliff:g>)</string>
+     <string name="list_verifying_update">正在验证更新</string>
+     <string name="list_no_updates">未找到更新。要手动检查更新，请使用刷新按钮。</string>
++    <string name="update_type_incremental">增量更新</string>
++    <string name="update_type_full">全量更新</string>
+     <string name="action_download">下载</string>
+     <string name="action_pause">暂停</string>
+     <string name="action_resume">继续</string>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index cae05ac..51d0b47 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -135,6 +135,8 @@
+     <string name="list_verifying_update">Verifying update</string>
+     <string name="see_more">See %1$d more</string>
+     <string name="see_less">See less</string>
++    <string name="update_type_incremental">Incremental update</string>
++    <string name="update_type_full">Full update</string>
+ 
+     <string name="action_download">Download</string>
+     <string name="action_pause">Pause</string>
+diff --git a/schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/4.json b/schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/4.json
+new file mode 100644
+index 0000000..71cae10
+--- /dev/null
++++ b/schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/4.json
+@@ -0,0 +1,92 @@
++{
++  "formatVersion": 1,
++  "database": {
++    "version": 4,
++    "identityHash": "fc43a6a0d15650479fc529fb3e7b909a",
++    "entities": [
++      {
++        "tableName": "updates",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`download_id` TEXT NOT NULL, `status` INTEGER NOT NULL, `path` TEXT, `timestamp` INTEGER NOT NULL, `min_base_timestamp` INTEGER NOT NULL, `type` TEXT, `version` TEXT NOT NULL, `size` INTEGER NOT NULL, `name` TEXT NOT NULL, `os_patch_level` TEXT, `os_sdk_level` INTEGER, `download_url` TEXT, PRIMARY KEY(`download_id`))",
++        "fields": [
++          {
++            "fieldPath": "downloadId",
++            "columnName": "download_id",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "status",
++            "columnName": "status",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "path",
++            "columnName": "path",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "timestamp",
++            "columnName": "timestamp",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "minBaseTimestamp",
++            "columnName": "min_base_timestamp",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "type",
++            "columnName": "type",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "version",
++            "columnName": "version",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "size",
++            "columnName": "size",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "name",
++            "columnName": "name",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "osPatchLevel",
++            "columnName": "os_patch_level",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "osSdkLevel",
++            "columnName": "os_sdk_level",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "downloadUrl",
++            "columnName": "download_url",
++            "affinity": "TEXT"
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": false,
++          "columnNames": [
++            "download_id"
++          ]
++        }
++      }
++    ],
++    "setupQueries": [
++      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
++      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'fc43a6a0d15650479fc529fb3e7b909a')"
++    ]
++  }
++}
+\ No newline at end of file
+-- 
+2.43.0
+

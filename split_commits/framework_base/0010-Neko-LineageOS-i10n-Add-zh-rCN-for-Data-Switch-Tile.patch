@@ -1,0 +1,24 @@
+From e1840adf0c7b40de17dc069994bd4fac45845a31 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 15:50:28 +0800
+Subject: [PATCH] Neko LineageOS: [i10n] Add zh-rCN for Data Switch Tile
+
+Change-Id: Id5a4a7f63b4bf6dc3cc4de41805b8ba19b67c4d6
+---
+ packages/SystemUI/res/values-zh-rCN/cm_strings.xml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/packages/SystemUI/res/values-zh-rCN/cm_strings.xml b/packages/SystemUI/res/values-zh-rCN/cm_strings.xml
+index 3e31f3eff..b69058f83 100644
+--- a/packages/SystemUI/res/values-zh-rCN/cm_strings.xml
++++ b/packages/SystemUI/res/values-zh-rCN/cm_strings.xml
+@@ -77,5 +77,6 @@
+     <string name="screenrecord_skip_time_summary">关闭3秒倒计时</string>
+     <string name="screenrecord_hevc_switch_label">HEVC编码</string>
+     <string name="screenrecord_hevc_switch_summary">使用效率更高的HEVC编码器</string>
++    <string name="qs_data_switch_label">切换上网卡</string>
+     <string name="face_unlock_recognizing">正在识别人脸...</string>
+ </resources>
+-- 
+2.43.0
+

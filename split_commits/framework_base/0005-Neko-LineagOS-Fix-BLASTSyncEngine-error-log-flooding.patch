@@ -1,0 +1,67 @@
+From dd1e374557621cde721038e5529c120a53af925d Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 12:32:53 +0800
+Subject: [PATCH] Neko LineagOS: Fix BLASTSyncEngine error log flooding
+
+When collecting logs I noticed a lot of errors thrown from BLASTSyncEngine, as I check the source code I found that
+this part BLASTSyncEngine is not intended for 5.10- Kernel, so I removed them
+
+This fix is highly optional, you cak skip it since this issue doesn't actually affect anything
+
+Change-Id: I17141b602cf83cbfbecafb4bce6747e3d10e3cbe
+---
+ .../android/server/wm/BLASTSyncEngine.java    | 38 -------------------
+ 1 file changed, 38 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/BLASTSyncEngine.java b/services/core/java/com/android/server/wm/BLASTSyncEngine.java
+index 2c7582c3f..2afad7e3c 100644
+--- a/services/core/java/com/android/server/wm/BLASTSyncEngine.java
++++ b/services/core/java/com/android/server/wm/BLASTSyncEngine.java
+@@ -242,44 +242,6 @@ class BLASTSyncEngine {
+             }
+ 
+ 
+-
+-            boolean shouldSkipHome = false;
+-            if (!mRootMembers.isEmpty()) {
+-                final WindowContainer<?> firstMember = mRootMembers.valueAt(0);
+-                final DisplayContent dc = firstMember.getDisplayContent();
+-
+-                // Check if mini window exists on display
+-                final Task miniWindowTask = dc != null ? dc.getTask(t ->
+-                    t.getWindowConfiguration().isMiniExtWindowMode()) : null;
+-
+-                if (miniWindowTask != null) {
+-                    // Only skip if mini window is NOT part of the transition
+-                    // (if it's part of transition, it means mini window is closing/changing)
+-                    boolean miniWindowInTransition = false;
+-                    for (int i = mRootMembers.size() - 1; i >= 0; --i) {
+-                        final WindowContainer wc = mRootMembers.valueAt(i);
+-                        if (wc == miniWindowTask || (wc.getParent() != null && wc.getParent().asTask() == miniWindowTask)) {
+-                            miniWindowInTransition = true;
+-                            break;
+-                        }
+-                    }
+-
+-                    if (!miniWindowInTransition) {
+-                        // Mini window exists but not changing - safe to skip home
+-                        shouldSkipHome = true;
+-                        Slog.e(TAG, "SyncGroup " + mSyncId + ": Mini window stable, will skip home sync");
+-                    } else {
+-                        Slog.e(TAG, "SyncGroup " + mSyncId + ": Mini window in transition, waiting for all");
+-                    }
+-                }
+-            }
+-
+-            if (shouldSkipHome) {
+-                finishNow();
+-                return true;
+-            }
+-
+-
+             for (int i = mRootMembers.size() - 1; i >= 0; --i) {
+                 final WindowContainer wc = mRootMembers.valueAt(i);
+                 if (!wc.isSyncFinished(this)) {
+-- 
+2.43.0
+

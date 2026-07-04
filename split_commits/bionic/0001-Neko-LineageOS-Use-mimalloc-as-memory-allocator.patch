@@ -1,0 +1,68 @@
+From c06dc6b7d6425829ad10d371785fe42e29636995 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 11:16:22 +0800
+Subject: [PATCH] Neko LineageOS: Use mimalloc as memory allocator
+
+According Docs from [Microsoft](https://github.com/microsoft/mimalloc#benchmark-results-on-a-16-core-amd-5950x-zen3)
+we can get up to 20x performance improve compared to jemalloc. Also mimalloc is the one got highly ranked by Pandora Devs
+
+For more detail on how to integrate it to your build, check [guide](https://github.com/WeiguangTWK/android_external_mimalloc#integration-for-aosp)
+
+Change-Id: I33405103189fd0d32874dfaf057832d68f97712d
+---
+ libc/Android.bp             | 4 ++++
+ libc/bionic/malloc_common.h | 7 ++++++-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index efba83b..d058040 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -173,8 +173,10 @@ cc_defaults {
+ 
+     whole_static_libs: [
+         "libscudo",
++        "libmimalloc",
+     ],
+     cflags: [
++        "-DUSE_MIMALLOC",
+         "-DUSE_SCUDO",
+     ],
+     header_libs: ["gwp_asan_headers"],
+@@ -187,6 +189,7 @@ cc_defaults {
+             ],
+             exclude_static_libs: [
+                 "libscudo",
++                "libmimalloc",
+             ],
+         },
+     },
+@@ -1738,6 +1741,7 @@ cc_library_headers {
+         "//external/scudo",
+         "//system/core/property_service/libpropertyinfoparser",
+         "//system/extras/toolchain-extras",
++        "//external/mimalloc",
+     ],
+ 
+     stl: "none",
+diff --git a/libc/bionic/malloc_common.h b/libc/bionic/malloc_common.h
+index 4afcc4a..4294b82 100644
+--- a/libc/bionic/malloc_common.h
++++ b/libc/bionic/malloc_common.h
+@@ -55,7 +55,12 @@ __END_DECLS
+ 
+ #else // __has_feature(hwaddress_sanitizer)
+ 
+-#if defined(USE_SCUDO)
++#if defined(USE_MIMALLOC)
++
++#include <mimalloc_adapt.h>
++#define Malloc(function)  mimalloc_ ## function
++
++#elif defined(USE_SCUDO)
+ 
+ #include "scudo.h"
+ #define Malloc(function)  scudo_ ## function
+-- 
+2.43.0
+

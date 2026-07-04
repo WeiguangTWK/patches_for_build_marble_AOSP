@@ -1,0 +1,420 @@
+From 03ac87ca00a32ce50426301b66f6a586c49abc29 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 15:34:53 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection?] Fix up! Dynamic Resource ID
+ conflict caused apps crash issue
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+In LineageOS, the packageid of LineageOS SDK is fixed at 0x3f. At this case when apps (e.g. Alipay) tried also use
+dynamic resource addressed at 0x3f will lead to accidentally read resource of LineageSDK then cause crash
+
+We fix it by adding a gate and create a 'shadow package', when a user application tries to read resource at 0x3f,
+system will passthrough it to the resource of the application itself instead of hit Lineage SDK one
+
+java.lang.RuntimeException: Unable to start activity ComponentInfo{com.eg.android.AlipayGphone/com.alipay.mobile.chatapp.ui.PersonalChatMsgActivity_}
+	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:4496)
+	at android.app.ActivityThread.handleLaunchActivity(ActivityThread.java:4699)
+	at android.app.servertransaction.LaunchActivityItem.execute(LaunchActivityItem.java:224)
+	at android.app.servertransaction.TransactionExecutor.executeNonLifecycleItem(TransactionExecutor.java:133)
+	at android.app.servertransaction.TransactionExecutor.executeTransactionItems(TransactionExecutor.java:103)
+	at android.app.servertransaction.TransactionExecutor.execute(TransactionExecutor.java:80)
+	at android.app.ActivityThread$H.handleMessage(ActivityThread.java:2961)
+	at com.alipay.stability.workaround.app.ActivityThreadHProxy.__handleMessage_stub_private(SourceFile:37)
+	at com.alipay.stability.workaround.app.ActivityThreadHProxy.__handleMessage_stub(Unknown Source:30)
+	at com.alipay.dexaop.perf.CallbackHandleMessageChain.proceed1(SourceFile:15)
+	at com.alipay.dexaop.monitor.chain.interceptors.RunningObjectInterceptor.intercept1(Unknown Source:89)
+	at com.alipay.dexaop.perf.CallbackHandleMessageChain.proceed1(SourceFile:30)
+	at com.alipay.dexaop.DexAOPEntrySettings.android_os_Handler_Callback_handleMessage_proxy(SourceFile:13)
+	at com.alipay.dexaop.DexAOPEntry.android_os_Handler_Callback_handleMessage_proxy(SourceFile:1)
+	at com.alipay.stability.workaround.app.ActivityThreadHProxy.handleMessage(Unknown Source:46)
+	at android.os.Handler.dispatchMessage(Handler.java:128)
+	at android.os.Looper.dispatchMessage(Looper.java:333)
+	at android.os.Looper.loopOnce(Looper.java:263)
+	at android.os.Looper.loop(Looper.java:367)
+	at android.app.ActivityThread.main(ActivityThread.java:9287)
+	at java.lang.reflect.Method.invoke(Native Method)
+	at com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:566)
+	at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:929)
+Caused by: android.content.res.Resources$NotFoundException: resourceId=[0x3f090041][1057554497], packageId=[63], mPackageIDs=[size=39: 37,40,46,90,91,92,98,110,122,127,141,147,167,172,176,183,191,221,244,248,277,280,292,312,322,380,395,400,423,427,447,474,524,625,698,722,747,784,831], bundle=Bundle: VERSION=5,name=application_resources,version=10.8.70.8000,location=/data/app/~~dVocPZSpOEK4ysuNhU2f_g==/com.eg.android.AlipayGphone-E_bzACGWnYuI7fXjTpCjSQ==/base.apk, size=-1, md5=null, mDescription={_depends.size=109, bad cookies:}, assignedPackageIDs=[size=92: 1,2,3,4,5,6,7,8,9,10,11,12,37,40,41,42,43,44,45,46,47,48,49,50,51,52,53,55,56,57,58,59,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,80,81,82,83,84,87,88,89,90,91,92,93,95,96,97,98,99,100,101,102,103,105,106,107,108,109,110,111,112,113,114,115,116,117,118,120,121,122,123,124,125,127], bundleLocation=null, assetsManager=android.content.res.AssetManager@82bc834, useOriginAssets=false >>> are you using correct Context?
+	at com.alipay.mobile.quinox.resources.BundleResources.handleNotFoundException(SourceFile:50)
+	at com.alipay.mobile.quinox.resources.BundleResources.handleNotFoundException(SourceFile:1)
+	at com.alipay.mobile.quinox.resources.BundleResources.getLayout(SourceFile:99)
+	at android.view.LayoutInflater.inflate(LayoutInflater.java:460)
+	at android.view.LayoutInflater.inflate(LayoutInflater.java:413)
+	at com.alipay.mobile.chatuisdk.ext.quickmenu.QuickMenuUtil.refreshQuickMenu(SourceFile:8)
+	at com.alipay.mobile.chatapp.ui.PersonalChatMsgActivity_.X3(SourceFile:598)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity$h0.__run_stub_private(SourceFile:476)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity$h0.__run_stub(Unknown Source:17)
+	at com.alipay.dexaop.perf.RunnableRunChain.proceed0(SourceFile:13)
+	at com.alipay.mobile.framework.aop.TaskMonitorPerfInterceptor.intercept0(Unknown Source:56)
+	at com.alipay.dexaop.perf.RunnableRunChain.proceed0(SourceFile:24)
+	at com.alipay.mobile.framework.aop.PointAroundPerfInterceptor.intercept0(Unknown Source:74)
+	at com.alipay.dexaop.perf.RunnableRunChain.proceed0(SourceFile:24)
+	at com.alipay.dexaop.monitor.chain.interceptors.RunningObjectInterceptor.intercept0(Unknown Source:79)
+	at com.alipay.dexaop.perf.RunnableRunChain.proceed0(SourceFile:24)
+	at com.alipay.dexaop.DexAOPEntrySettings.java_lang_Runnable_run_proxy(SourceFile:12)
+	at com.alipay.dexaop.DexAOPEntry.java_lang_Runnable_run_proxy(SourceFile:1)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity$h0.run(Unknown Source:32)
+	at android.app.Activity.runOnUiThread(Activity.java:8309)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity.G0(SourceFile:48)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity.I1(SourceFile:1694)
+	at com.alipay.mobile.chatapp.ui.PersonalChatMsgActivity_.I1(SourceFile:48)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity.S1(SourceFile:1017)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity.__onCreate_stub_private(SourceFile:1393)
+	at com.alipay.mobile.chatapp.ui.ChatMsgBaseActivity.onCreate(Unknown Source:31)
+	at android.app.Activity.performCreate(Activity.java:9306)
+	at android.app.Activity.performCreate(Activity.java:9284)
+	at android.app.Instrumentation.callActivityOnCreate(Instrumentation.java:1541)
+	at com.alipay.mobile.quinox.activity.QuinoxInstrumentation.callActivityOnCreate(SourceFile:628)
+	at android.app.ActivityThread.performLaunchActivity(ActivityThread.java:4480)
+	... 22 more
+Caused by: android.content.res.Resources$NotFoundException: File 短信 from xml type layout resource ID #0x3f090041
+	at android.content.res.ResourcesImpl.loadXmlResourceParser(ResourcesImpl.java:1447)
+	at android.content.res.Resources.loadXmlResourceParser(Resources.java:2618)
+	at android.content.res.Resources.loadXmlResourceParser(Resources.java:2575)
+	at android.content.res.Resources.getLayout(Resources.java:1289)
+	at com.alipay.mobile.quinox.resources.BundleResources.getLayout(SourceFile:45)
+	... 50 more
+Caused by: java.io.FileNotFoundException: 短信
+	at android.content.res.AssetManager.nativeOpenXmlAsset(Native Method)
+	at android.content.res.AssetManager.openXmlBlockAsset(AssetManager.java:1246)
+	at android.content.res.ResourcesImpl.loadXmlResourceParser(ResourcesImpl.java:1431)
+
+Change-Id: I738c1763d40b11914a6e8a116cb7d962f0479942
+---
+ libs/androidfw/AssetManager2.cpp              | 81 +++++++++++++++++--
+ libs/androidfw/ResourceTypes.cpp              | 16 ++--
+ .../include/androidfw/AssetManager2.h         |  9 +++
+ .../include/androidfw/ResourceTypes.h         |  5 ++
+ libs/androidfw/tests/AssetManager2_test.cpp   | 25 ++++++
+ libs/androidfw/tests/DynamicRefTable_test.cpp | 19 ++++-
+ 6 files changed, 143 insertions(+), 12 deletions(-)
+
+diff --git a/libs/androidfw/AssetManager2.cpp b/libs/androidfw/AssetManager2.cpp
+index 1186772ca..5750c9cb9 100644
+--- a/libs/androidfw/AssetManager2.cpp
++++ b/libs/androidfw/AssetManager2.cpp
+@@ -46,9 +46,23 @@ namespace {
+ 
+ constexpr int32_t kDefaultDisplayId = 0;
+ constexpr int32_t kDefaultDeviceId = 0;
++constexpr uint8_t kSystemPackageId = 0x01;
++constexpr uint8_t kLineageSdkPackageId = 0x3f;
++constexpr uint8_t kAppPackageId = 0x7f;
+ 
+ using EntryValue = std::variant<Res_value, incfs::verified_map_ptr<ResTable_map_entry>>;
+ 
++bool IsLineageSdkPackage(const LoadedPackage& package, const ApkAssets& apk_assets) {
++  if (package.GetPackageId() != kLineageSdkPackageId) {
++    return false;
++  }
++  if (package.GetPackageName() == "lineageos.platform") {
++    return true;
++  }
++  const std::optional<std::string_view> path = apk_assets.GetPath();
++  return path.has_value() && *path == "/system/framework/org.system.platform-res.apk";
++}
++
+ /* NOTE: table_entry has been verified in LoadedPackage::GetEntryFromOffset(),
+  * and so access to ->value() and ->map_entry() are safe here
+  */
+@@ -130,6 +144,11 @@ void AssetManager2::PresetApkAssets(ApkAssetsList apk_assets) {
+   BuildDynamicRefTable(apk_assets);
+ }
+ 
++bool AssetManager2::IsBetterPackageForSameRuntimeId(bool candidate_shadows_lineage_package,
++                                                    bool current_best_shadows_lineage_package) {
++  return candidate_shadows_lineage_package && !current_best_shadows_lineage_package;
++}
++
+ bool AssetManager2::SetApkAssets(std::initializer_list<ApkAssetsPtr> apk_assets,
+                                  bool invalidate_caches) {
+   return SetApkAssets(ApkAssetsList(apk_assets.begin(), apk_assets.size()), invalidate_caches);
+@@ -170,8 +189,22 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+     apk_assets_cookies[apk_assets[i].get()] = static_cast<ApkAssetsCookie>(i);
+   }
+ 
+-  // 0x01 is reserved for the android package.
+   int next_package_id = 0x02;
++  const auto next_dynamic_package_id = [&]() -> int {
++    while (next_package_id < static_cast<int>(package_ids_.size()) &&
++           (next_package_id == kSystemPackageId || next_package_id == kAppPackageId ||
++            next_package_id == kLineageSdkPackageId ||
++            package_ids_[next_package_id] != 0xff)) {
++      if (next_package_id == kLineageSdkPackageId) {
++        LOG(WARNING) << "Skipping reserved Lineage package ID 0x3f while assigning a dynamic "
++                        "runtime package ID";
++      }
++      ++next_package_id;
++    }
++    CHECK(next_package_id < static_cast<int>(package_ids_.size()))
++        << "exhausted dynamic package ids";
++    return next_package_id++;
++  };
+   for (const ApkAssets* apk_assets : sorted_apk_assets) {
+     std::shared_ptr<OverlayDynamicRefTable> overlay_ref_table;
+     if (auto loaded_idmap = apk_assets->GetLoadedIdmap()) {
+@@ -205,10 +238,14 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+ 
+     const LoadedArsc* loaded_arsc = apk_assets->GetLoadedArsc();
+     for (const std::unique_ptr<const LoadedPackage>& package : loaded_arsc->GetPackages()) {
++      const bool shadows_lineage_package =
++          package->GetPackageId() == kLineageSdkPackageId &&
++          !IsLineageSdkPackage(*package, *apk_assets);
++
+       // Get the package ID or assign one if a shared library.
+       int package_id;
+       if (package->IsDynamic()) {
+-        package_id = next_package_id++;
++        package_id = next_dynamic_package_id();
+       } else {
+         package_id = package->GetPackageId();
+       }
+@@ -221,12 +258,23 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+         DynamicRefTable* ref_table = new_group.dynamic_ref_table.get();
+         ref_table->mAssignedPackageId = package_id;
+         ref_table->mAppAsLib = package->IsDynamic() && package->GetPackageId() == 0x7f;
++        ref_table->setFallbackToAssignedPackageId(shadows_lineage_package);
++      } else if (shadows_lineage_package) {
++        package_groups_[idx].dynamic_ref_table->setFallbackToAssignedPackageId(true);
+       }
+ 
+       // Add the package to the set of packages with the same ID.
+       PackageGroup* package_group = &package_groups_[idx];
+-      package_group->packages_.emplace_back().loaded_package_ = package.get();
+-      package_group->cookies_.push_back(apk_assets_cookies[apk_assets]);
++      if (shadows_lineage_package) {
++        package_group->packages_.insert(package_group->packages_.begin(), ConfiguredPackage{});
++        package_group->packages_.front().loaded_package_ = package.get();
++        package_group->packages_.front().shadows_lineage_package_ = true;
++        package_group->cookies_.insert(package_group->cookies_.begin(), apk_assets_cookies[apk_assets]);
++      } else {
++        package_group->packages_.emplace_back().loaded_package_ = package.get();
++        package_group->packages_.back().shadows_lineage_package_ = false;
++        package_group->cookies_.push_back(apk_assets_cookies[apk_assets]);
++      }
+ 
+       // Add the package name -> build time ID mappings.
+       for (const DynamicPackageEntry& entry : package->GetDynamicPackageMap()) {
+@@ -235,7 +283,8 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+             package_name, static_cast<uint8_t>(entry.package_id));
+       }
+ 
+-      if (auto apk_assets_path = apk_assets->GetPath()) {
++      const std::optional<std::string_view> apk_assets_path = apk_assets->GetPath();
++      if (apk_assets_path) {
+         // Overlay target ApkAssets must have been created using path based load apis.
+         target_assets_package_ids.emplace(*apk_assets_path, package_id);
+       }
+@@ -247,6 +296,12 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+   for (const auto& group : package_groups_) {
+     const std::string& package_name = group.packages_[0].loaded_package_->GetPackageName();
+     const auto name_16 = String16(package_name.c_str(), package_name.size());
++    if (group.dynamic_ref_table->mAssignedPackageId == kLineageSdkPackageId ||
++        package_name == "lineageos.platform") {
++      LOG(WARNING) << base::StringPrintf(
++          "AssetManager2 final package group: package=%s assigned_runtime_id=0x%02x",
++          package_name.c_str(), group.dynamic_ref_table->mAssignedPackageId);
++    }
+     for (auto&& inner_group : package_groups_) {
+       inner_group.dynamic_ref_table->addMapping(name_16,
+                                                 group.dynamic_ref_table->mAssignedPackageId);
+@@ -843,6 +898,10 @@ base::expected<FindEntryResult, NullOrIOError> AssetManager2::FindEntry(
+     }
+   }
+ 
++  if (UNLIKELY(!final_result.has_value())) {
++    return base::unexpected(std::nullopt);
++  }
++
+   if (UNLIKELY(logging_enabled)) {
+     last_resolution_.cookie = final_result->cookie;
+     last_resolution_.type_string_ref = final_result->type_string_ref;
+@@ -863,6 +922,7 @@ base::expected<FindEntryResult, NullOrIOError> AssetManager2::FindEntryInternal(
+   const bool logging_enabled = resource_resolution_logging_enabled_;
+   ApkAssetsCookie best_cookie = kInvalidCookie;
+   const LoadedPackage* best_package = nullptr;
++  bool best_package_shadows_lineage = false;
+   incfs::verified_map_ptr<ResTable_type> best_type;
+   const ResTable_config* best_config = nullptr;
+   uint32_t best_offset = 0U;
+@@ -919,6 +979,16 @@ base::expected<FindEntryResult, NullOrIOError> AssetManager2::FindEntryInternal(
+       Resolution::Step::Type resolution_type;
+       if (best_config == nullptr) {
+         resolution_type = Resolution::Step::Type::INITIAL;
++      } else if (IsBetterPackageForSameRuntimeId(loaded_package_impl.shadows_lineage_package_,
++                                                 best_package_shadows_lineage)) {
++        resolution_type = Resolution::Step::Type::BETTER_MATCH;
++      } else if (IsBetterPackageForSameRuntimeId(best_package_shadows_lineage,
++                                                 loaded_package_impl.shadows_lineage_package_)) {
++        if (UNLIKELY(logging_enabled)) {
++          last_resolution_.steps.push_back(Resolution::Step{Resolution::Step::Type::SKIPPED,
++                                                            cookie, this_config.toString()});
++        }
++        continue;
+       } else if (this_config.isBetterThan(*best_config, &desired_config)) {
+         resolution_type = Resolution::Step::Type::BETTER_MATCH;
+       } else if (package_is_loader && this_config.compare(*best_config) == 0) {
+@@ -949,6 +1019,7 @@ base::expected<FindEntryResult, NullOrIOError> AssetManager2::FindEntryInternal(
+ 
+       best_cookie = cookie;
+       best_package = loaded_package;
++      best_package_shadows_lineage = loaded_package_impl.shadows_lineage_package_;
+       best_type = type;
+       best_config = &this_config;
+       best_offset = offset.value();
+diff --git a/libs/androidfw/ResourceTypes.cpp b/libs/androidfw/ResourceTypes.cpp
+index 1867c1909..c0eeeee9e 100644
+--- a/libs/androidfw/ResourceTypes.cpp
++++ b/libs/androidfw/ResourceTypes.cpp
+@@ -7359,14 +7359,18 @@ status_t DynamicRefTable::lookupResourceId(uint32_t* resId) const {
+     // Do a proper lookup.
+     uint8_t translatedId = mLookupTable[packageId];
+     if (translatedId == 0) {
+-        ALOGW("DynamicRefTable(0x%02x): No mapping for build-time package ID 0x%02x.",
+-                (uint8_t)mAssignedPackageId, (uint8_t)packageId);
+-        for (size_t i = 0; i < 256; i++) {
+-            if (mLookupTable[i] != 0) {
+-                ALOGW("e[0x%02x] -> 0x%02x", (uint8_t)i, mLookupTable[i]);
++        if (mFallbackToAssignedPackageId && mAssignedPackageId == LINEAGESDK_PACKAGE_ID) {
++            translatedId = mAssignedPackageId;
++        } else {
++            ALOGW("DynamicRefTable(0x%02x): No mapping for build-time package ID 0x%02x.",
++                    (uint8_t)mAssignedPackageId, (uint8_t)packageId);
++            for (size_t i = 0; i < 256; i++) {
++                if (mLookupTable[i] != 0) {
++                    ALOGW("e[0x%02x] -> 0x%02x", (uint8_t)i, mLookupTable[i]);
++                }
+             }
++            return UNKNOWN_ERROR;
+         }
+-        return UNKNOWN_ERROR;
+     }
+ 
+     *resId = (res & 0x00ffffff) | (((uint32_t) translatedId) << 24);
+diff --git a/libs/androidfw/include/androidfw/AssetManager2.h b/libs/androidfw/include/androidfw/AssetManager2.h
+index 994696e0e..d0e0836fc 100644
+--- a/libs/androidfw/include/androidfw/AssetManager2.h
++++ b/libs/androidfw/include/androidfw/AssetManager2.h
+@@ -79,6 +79,7 @@ struct FindEntryResult;
+ // AssetManager2 provides caching of resources retrieved via the underlying ApkAssets.
+ class AssetManager2 {
+   friend Theme;
++  friend class AssetManager2Test;
+ 
+  public:
+   struct ResourceName {
+@@ -377,6 +378,11 @@ class AssetManager2 {
+       // A pointer to the immutable, loaded package info.
+       const LoadedPackage* loaded_package_;
+ 
++      // True when this package uses the reserved Lineage package ID 0x3f but is not actually
++      // lineageos.platform. These packages must win over the real Lineage package when both
++      // expose the same runtime package ID.
++      bool shadows_lineage_package_ = false;
++
+       // A mutable AssetManager-specific list of configurations that match the AssetManager's
+       // current configuration. This is used as an optimization to avoid checking every single
+       // candidate configuration when looking up resources.
+@@ -442,6 +448,9 @@ class AssetManager2 {
+       const ResTable_config& desired_config, bool stop_at_first_match,
+       bool ignore_configuration) const;
+ 
++  static bool IsBetterPackageForSameRuntimeId(bool candidate_shadows_lineage_package,
++                                              bool current_best_shadows_lineage_package);
++
+   // Assigns package IDs to all shared library ApkAssets.
+   // Should be called whenever the ApkAssets are changed.
+   void BuildDynamicRefTable(ApkAssetsList assets);
+diff --git a/libs/androidfw/include/androidfw/ResourceTypes.h b/libs/androidfw/include/androidfw/ResourceTypes.h
+index cb47034ee..82a7cd931 100644
+--- a/libs/androidfw/include/androidfw/ResourceTypes.h
++++ b/libs/androidfw/include/androidfw/ResourceTypes.h
+@@ -2032,6 +2032,10 @@ public:
+ 
+     void addMapping(uint8_t buildPackageId, uint8_t runtimePackageId);
+ 
++    void setFallbackToAssignedPackageId(bool enabled) {
++        mFallbackToAssignedPackageId = enabled;
++    }
++
+     using AliasMap = std::vector<std::pair<uint32_t, uint32_t>>;
+     void setAliases(AliasMap aliases) {
+         mAliasId = std::move(aliases);
+@@ -2053,6 +2057,7 @@ public:
+     uint8_t mLookupTable[256];
+     uint8_t mAssignedPackageId;
+     bool mAppAsLib;
++    bool mFallbackToAssignedPackageId = false;
+     KeyedVector<String16, uint8_t> mEntries;
+     AliasMap mAliasId;
+ };
+diff --git a/libs/androidfw/tests/AssetManager2_test.cpp b/libs/androidfw/tests/AssetManager2_test.cpp
+index 7e1a0add6..7d7bec948 100644
+--- a/libs/androidfw/tests/AssetManager2_test.cpp
++++ b/libs/androidfw/tests/AssetManager2_test.cpp
+@@ -234,6 +234,31 @@ TEST_F(AssetManager2Test, AssignsOverlayPackageIdLast) {
+   ASSERT_EQ(0x02, get_first_package_id(lib_one_assets_));
+ }
+ 
++TEST_F(AssetManager2Test, SkipsReservedOccupiedPackageIdsForDynamicPackages) {
++  AssetManager2 assetmanager;
++
++  std::vector<AssetManager2::ApkAssetsPtr> apk_assets = {app_assets_};
++  for (int i = 0; i < 126; ++i) {
++    apk_assets.push_back(appaslib_assets_);
++  }
++  assetmanager.SetApkAssets(apk_assets);
++
++  int package_count = 0;
++  assetmanager.ForEachPackage([&package_count](const std::string&, uint8_t) {
++    ++package_count;
++    return true;
++  });
++
++  EXPECT_EQ(127, package_count);
++}
++
++TEST_F(AssetManager2Test, PrefersShadowLineagePackageForSameRuntimeId) {
++  EXPECT_TRUE(AssetManager2::IsBetterPackageForSameRuntimeId(true, false));
++  EXPECT_FALSE(AssetManager2::IsBetterPackageForSameRuntimeId(false, true));
++  EXPECT_FALSE(AssetManager2::IsBetterPackageForSameRuntimeId(false, false));
++  EXPECT_FALSE(AssetManager2::IsBetterPackageForSameRuntimeId(true, true));
++}
++
+ TEST_F(AssetManager2Test, GetSharedLibraryResourceName) {
+   AssetManager2 assetmanager;
+   assetmanager.SetApkAssets({lib_one_assets_});
+diff --git a/libs/androidfw/tests/DynamicRefTable_test.cpp b/libs/androidfw/tests/DynamicRefTable_test.cpp
+index 5acc46a3c..0af1bbac8 100644
+--- a/libs/androidfw/tests/DynamicRefTable_test.cpp
++++ b/libs/androidfw/tests/DynamicRefTable_test.cpp
+@@ -113,4 +113,21 @@ TEST(DynamicRefTableTest, DoNotLookupNonDynamicAttributes) {
+   EXPECT_EQ(value2.data, 0x03010000);
+ };
+ 
+-} // namespace android
+\ No newline at end of file
++TEST(DynamicRefTableTest, FallbackToAssignedPackageIdWhenEnabled) {
++  DynamicRefTable shadow_lineage_table(0x3f, /* appAsLib */ false);
++  shadow_lineage_table.setFallbackToAssignedPackageId(true);
++
++  uint32_t res_id = 0x25010000;
++  ASSERT_EQ(shadow_lineage_table.lookupResourceId(&res_id), NO_ERROR);
++  EXPECT_EQ(res_id, 0x3f010000);
++}
++
++TEST(DynamicRefTableTest, MissingMappingStillFailsWhenFallbackDisabled) {
++  DynamicRefTable regular_table(0x3f, /* appAsLib */ false);
++
++  uint32_t res_id = 0x25010000;
++  ASSERT_EQ(regular_table.lookupResourceId(&res_id), UNKNOWN_ERROR);
++  EXPECT_EQ(res_id, 0x25010000);
++}
++
++} // namespace android
+-- 
+2.43.0
+

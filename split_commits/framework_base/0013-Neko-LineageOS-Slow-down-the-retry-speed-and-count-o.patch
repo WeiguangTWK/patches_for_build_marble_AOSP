@@ -1,0 +1,33 @@
+From e25ddfceca4f415553f4929b7ab2e16ef11a8705 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 4 Jul 2026 16:43:28 +0800
+Subject: [PATCH] Neko LineageOS: Slow down the retry speed and count of Face
+ unlock
+
+Some user reported that power consumption is high with screen off, so we tweaked about face unlock one
+
+Change-Id: Ibdba0ad00f89287dd1a002f0d6dae464b8f8c2bb
+---
+ .../data/repository/DeviceEntryFaceAuthRepository.kt          | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/src/com/android/systemui/deviceentry/data/repository/DeviceEntryFaceAuthRepository.kt b/packages/SystemUI/src/com/android/systemui/deviceentry/data/repository/DeviceEntryFaceAuthRepository.kt
+index 212bb8ec8..491460c0a 100644
+--- a/packages/SystemUI/src/com/android/systemui/deviceentry/data/repository/DeviceEntryFaceAuthRepository.kt
++++ b/packages/SystemUI/src/com/android/systemui/deviceentry/data/repository/DeviceEntryFaceAuthRepository.kt
+@@ -751,10 +751,10 @@ constructor(
+         const val DEFAULT_CANCEL_SIGNAL_TIMEOUT = 3000L
+ 
+         /** Number of allowed retries whenever there is a face hardware error */
+-        const val HAL_ERROR_RETRY_MAX = 5
++        const val HAL_ERROR_RETRY_MAX = 2
+ 
+         /** Timeout before retries whenever there is a HAL error. */
+-        const val HAL_ERROR_RETRY_TIMEOUT = 500L // ms
++        const val HAL_ERROR_RETRY_TIMEOUT = 1500L // ms
+     }
+ 
+     override fun dump(pw: PrintWriter, args: Array<out String>) {
+-- 
+2.43.0
+
