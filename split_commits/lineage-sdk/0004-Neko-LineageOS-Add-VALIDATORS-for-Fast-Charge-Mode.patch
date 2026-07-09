@@ -1,0 +1,83 @@
+From dd12255f74c8a3150895d17c01d39e95c734814e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 12:18:42 +0800
+Subject: [PATCH] Neko LineageOS: Add VALIDATORS for Fast Charge Mode
+
+Change-Id: I61988c3399016893485e00b4bd419071855570fd
+---
+ .../lineageos/providers/LineageSettings.java  | 45 +++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/sdk/src/java/lineageos/providers/LineageSettings.java b/sdk/src/java/lineageos/providers/LineageSettings.java
+index 63764ad..3e4fea1 100644
+--- a/sdk/src/java/lineageos/providers/LineageSettings.java
++++ b/sdk/src/java/lineageos/providers/LineageSettings.java
+@@ -2106,6 +2106,42 @@ public final class LineageSettings {
+         public static final Validator ENABLE_TASKBAR_VALIDATOR =
+                 sBooleanValidator;
+ 
++        /**
++         * Whether TEE soft debug mode is enabled.
++         */
++        public static final String TEE_SOFT_DEBUG_ENABLED = "tee_soft_debug_enabled";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_ENABLED_VALIDATOR = sBooleanValidator;
++
++        /**
++         * Pipe-delimited target package list used by TEE soft debug.
++         */
++        public static final String TEE_SOFT_DEBUG_TARGET_PACKAGES =
++                "tee_soft_debug_target_packages";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_TARGET_PACKAGES_VALIDATOR =
++                sAlwaysTrueValidator;
++
++        /**
++         * Absolute keybox XML path used by TEE soft debug.
++         */
++        public static final String TEE_SOFT_DEBUG_KEYBOX_PATH = "tee_soft_debug_keybox_path";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_KEYBOX_PATH_VALIDATOR =
++                sAlwaysTrueValidator;
++
++        /**
++         * Inline keybox XML content used by TEE soft debug.
++         */
++        public static final String TEE_SOFT_DEBUG_KEYBOX_XML = "tee_soft_debug_keybox_xml";
++
++        /** @hide */
++        public static final Validator TEE_SOFT_DEBUG_KEYBOX_XML_VALIDATOR =
++                sAlwaysTrueValidator;
++
+         /**
+          * I can haz more bukkits
+          * @hide
+@@ -2194,6 +2230,7 @@ public final class LineageSettings {
+             VALIDATORS.put(CHARGING_CONTROL_TARGET_TIME, CHARGING_CONTROL_TARGET_TIME_VALIDATOR);
+             VALIDATORS.put(CHARGING_CONTROL_LIMIT, CHARGING_CONTROL_LIMIT_VALIDATOR);
+             VALIDATORS.put(FAST_CHARGE_MODE, FAST_CHARGE_MODE_VALIDATOR);
++            VALIDATORS.put(FAST_CHARGE_SESSION_MODE, FAST_CHARGE_SESSION_MODE_VALIDATOR);
+             VALIDATORS.put(BATTERY_LIGHT_ENABLED, BATTERY_LIGHT_ENABLED_VALIDATOR);
+             VALIDATORS.put(BATTERY_LIGHT_FULL_CHARGE_DISABLED,
+                     BATTERY_LIGHT_FULL_CHARGE_DISABLED_VALIDATOR);
+@@ -2283,6 +2320,14 @@ public final class LineageSettings {
+                     CLICK_PARTIAL_SCREENSHOT_VALIDATOR);
+             VALIDATORS.put(ENABLE_TASKBAR,
+                     ENABLE_TASKBAR_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_ENABLED,
++                    TEE_SOFT_DEBUG_ENABLED_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_TARGET_PACKAGES,
++                    TEE_SOFT_DEBUG_TARGET_PACKAGES_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_KEYBOX_PATH,
++                    TEE_SOFT_DEBUG_KEYBOX_PATH_VALIDATOR);
++            VALIDATORS.put(TEE_SOFT_DEBUG_KEYBOX_XML,
++                    TEE_SOFT_DEBUG_KEYBOX_XML_VALIDATOR);
+             VALIDATORS.put(__MAGICAL_TEST_PASSING_ENABLER,
+                     __MAGICAL_TEST_PASSING_ENABLER_VALIDATOR);
+         };
+-- 
+2.43.0
+

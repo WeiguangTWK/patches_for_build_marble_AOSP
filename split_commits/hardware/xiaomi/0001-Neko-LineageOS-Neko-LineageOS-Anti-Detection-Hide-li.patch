@@ -1,0 +1,58 @@
+From 6927511ce5366744e67d50a38a76edecae98d819 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 11:56:55 +0800
+Subject: [PATCH] Neko LineageOS: Neko LineageOS: [Anti Detection] Hide lineage
+ services by renaming them
+
+Change-Id: Ifbe3151fb517c828e7e53c5332f3057954fbb55b
+---
+ aidl/touch/Android.bp                                           | 2 +-
+ aidl/touch/service.cpp                                          | 2 +-
+ ...omi-htpr.xml => vendor.system.touch-service.xiaomi-htpr.xml} | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+ rename aidl/touch/{vendor.lineage.touch-service.xiaomi-htpr.xml => vendor.system.touch-service.xiaomi-htpr.xml} (85%)
+
+diff --git a/aidl/touch/Android.bp b/aidl/touch/Android.bp
+index 22110af..9fb08cf 100644
+--- a/aidl/touch/Android.bp
++++ b/aidl/touch/Android.bp
+@@ -7,7 +7,7 @@ cc_binary {
+     name: "vendor.lineage.touch-service.xiaomi",
+     init_rc: ["vendor.lineage.touch-service.xiaomi.rc"],
+     vintf_fragments: select(soong_config_variable("XIAOMI_TOUCH", "HIGH_TOUCH_POLLING_PATH"), {
+-        any: ["vendor.lineage.touch-service.xiaomi-htpr.xml"],
++        any: ["vendor.system.touch-service.xiaomi-htpr.xml"],
+         default: [],
+     }) + select(soong_config_variable("XIAOMI_TOUCH", "KEY_DISABLER_CONTROL_PATH"), {
+         any: ["vendor.lineage.touch-service.xiaomi-kd.xml"],
+diff --git a/aidl/touch/service.cpp b/aidl/touch/service.cpp
+index b025864..376f265 100644
+--- a/aidl/touch/service.cpp
++++ b/aidl/touch/service.cpp
+@@ -24,7 +24,7 @@ int main() {
+ 
+ #ifdef HTPR_CONTROL_PATH
+     std::shared_ptr<HighTouchPollingRate> htpr = ndk::SharedRefBase::make<HighTouchPollingRate>();
+-    const std::string htpr_instance = std::string(HighTouchPollingRate::descriptor) + "/default";
++    const std::string htpr_instance = "vendor.system.touch.IHighTouchPollingRate/default";
+     status = AServiceManager_addService(htpr->asBinder().get(), htpr_instance.c_str());
+     CHECK_EQ(status, STATUS_OK) << "Failed to add service " << htpr_instance << " " << status;
+ #endif
+diff --git a/aidl/touch/vendor.lineage.touch-service.xiaomi-htpr.xml b/aidl/touch/vendor.system.touch-service.xiaomi-htpr.xml
+similarity index 85%
+rename from aidl/touch/vendor.lineage.touch-service.xiaomi-htpr.xml
+rename to aidl/touch/vendor.system.touch-service.xiaomi-htpr.xml
+index 3c2cd7c..1e3e664 100644
+--- a/aidl/touch/vendor.lineage.touch-service.xiaomi-htpr.xml
++++ b/aidl/touch/vendor.system.touch-service.xiaomi-htpr.xml
+@@ -1,6 +1,6 @@
+ <manifest version="1.0" type="device">
+     <hal format="aidl">
+-        <name>vendor.lineage.touch</name>
++        <name>vendor.system.touch</name>
+         <version>1</version>
+         <interface>
+             <name>IHighTouchPollingRate</name>
+-- 
+2.43.0
+

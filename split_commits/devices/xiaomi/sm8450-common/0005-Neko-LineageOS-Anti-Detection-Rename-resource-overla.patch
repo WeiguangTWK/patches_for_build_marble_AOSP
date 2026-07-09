@@ -1,0 +1,40 @@
+From 92d9f8256167a8fb2237cb44d06c28da2b801be8 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 14:42:05 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Rename resource overlay to
+ prevent detection
+
+Change-Id: I926e206cd358df05319fe6b7d63382631707463f
+---
+ common.mk                  | 2 +-
+ overlay/Lineage/Android.bp | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common.mk b/common.mk
+index 2d901d1..83ef077 100644
+--- a/common.mk
++++ b/common.mk
+@@ -299,7 +299,7 @@ PRODUCT_PACKAGES += \
+     DialerResXiaomi \
+     FrameworksResTarget \
+     FrameworksResXiaomi \
+-    LineageResXiaomi \
++    VendorResXiaomi \
+     SettingsProviderResXiaomi \
+     SettingsResXiaomi \
+     WifiResTarget \
+diff --git a/overlay/Lineage/Android.bp b/overlay/Lineage/Android.bp
+index 3e04ab8..e60a5f5 100644
+--- a/overlay/Lineage/Android.bp
++++ b/overlay/Lineage/Android.bp
+@@ -5,6 +5,6 @@
+ //
+ 
+ runtime_resource_overlay {
+-    name: "LineageResXiaomi",
++    name: "VendorResXiaomi",
+     vendor: true,
+ }
+-- 
+2.43.0
+

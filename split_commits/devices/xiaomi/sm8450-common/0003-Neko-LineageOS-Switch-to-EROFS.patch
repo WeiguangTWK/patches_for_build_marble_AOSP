@@ -1,0 +1,132 @@
+From 0d17739097afe25e2abff70b13d79805de109282 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 14:25:34 +0800
+Subject: [PATCH] Neko LineageOS: Switch to EROFS
+
+EROFS, as a pure read-only filesystem, has better raw read performance compared to EXT4 [Reference](https://lpc.events/event/16/contributions/1338/attachments/935/1843/LPC2022%20-%20EROFS.pdf)
+also together with FEC (Front Error Correction) provided by AVB, users can enjoy far better stability and reliability
+
+In our view it is a good deal to get full-time performance enhance and robustness of system at cost of convenience of
+modding system
+
+Change-Id: I4e085ce1899cbefbd58139d973e05dded3d0f8fd
+---
+ BoardConfigCommon.mk       | 14 +++++++-------
+ common.mk                  |  4 ++--
+ rootdir/etc/fstab.qcom     |  8 ++++++++
+ rootdir/etc/recovery.fstab | 22 ++++++++++++++--------
+ 4 files changed, 31 insertions(+), 17 deletions(-)
+
+diff --git a/BoardConfigCommon.mk b/BoardConfigCommon.mk
+index 3cece97..16e2d60 100644
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -147,12 +147,12 @@ BOARD_SUPER_PARTITION_GROUPS := qti_dynamic_partitions
+ BOARD_QTI_DYNAMIC_PARTITIONS_PARTITION_LIST := odm product system system_ext vendor vendor_dlkm
+ BOARD_QTI_DYNAMIC_PARTITIONS_SIZE := 9122611200 # 0x21FC00000 # BOARD_SUPER_PARTITION_SIZE - overhead (4MiB)
+ 
+-BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_SYSTEM_EXTIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
+-BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := ext4
++BOARD_ODMIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_SYSTEMIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_SYSTEM_EXTIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := erofs
++BOARD_VENDOR_DLKMIMAGE_FILE_SYSTEM_TYPE := erofs
+ 
+ TARGET_COPY_OUT_ODM := odm
+ TARGET_COPY_OUT_PRODUCT := product
+@@ -223,7 +223,7 @@ endif
+ BOARD_AVB_ENABLE := true
+ BOARD_AVB_ALGORITHM := SHA256_RSA2048
+ BOARD_AVB_KEY_PATH := external/avb/test/data/testkey_rsa2048.pem
+-BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 3
++BOARD_AVB_MAKE_VBMETA_IMAGE_ARGS += --flags 0
+ BOARD_AVB_RECOVERY_KEY_PATH := external/avb/test/data/testkey_rsa2048.pem
+ BOARD_AVB_RECOVERY_ALGORITHM := SHA256_RSA2048
+ BOARD_AVB_RECOVERY_ROLLBACK_INDEX := 1
+diff --git a/common.mk b/common.mk
+index 6d65a22..2d901d1 100644
+--- a/common.mk
++++ b/common.mk
+@@ -31,13 +31,13 @@ $(call inherit-product, vendor/xiaomi/sm8450-common/sm8450-common-vendor.mk)
+ AB_OTA_POSTINSTALL_CONFIG += \
+     RUN_POSTINSTALL_system=true \
+     POSTINSTALL_PATH_system=system/bin/otapreopt_script \
+-    FILESYSTEM_TYPE_system=ext4 \
++    FILESYSTEM_TYPE_system=erofs \
+     POSTINSTALL_OPTIONAL_system=true
+ 
+ AB_OTA_POSTINSTALL_CONFIG += \
+     RUN_POSTINSTALL_vendor=true \
+     POSTINSTALL_PATH_vendor=bin/checkpoint_gc \
+-    FILESYSTEM_TYPE_vendor=ext4 \
++    FILESYSTEM_TYPE_vendor=erofs \
+     POSTINSTALL_OPTIONAL_vendor=true
+ 
+ PRODUCT_PACKAGES += \
+diff --git a/rootdir/etc/fstab.qcom b/rootdir/etc/fstab.qcom
+index 87fc04b..2d4b7d8 100644
+--- a/rootdir/etc/fstab.qcom
++++ b/rootdir/etc/fstab.qcom
+@@ -36,11 +36,19 @@
+ 
+ #<src>                                                 <mnt_point>            <type>  <mnt_flags and options>                            <fs_mgr_flags>
+ system                                                  /system                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
++system                                                  /system                erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
+ system_ext                                              /system_ext            ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system_ext                                              /system_ext            erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ product                                                 /product               ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++product                                                 /product               erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ vendor                                                  /vendor                ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor                                                  /vendor                erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ vendor_dlkm                                             /vendor_dlkm           ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor_dlkm                                             /vendor_dlkm           erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ odm                                                     /odm                   ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++odm                                                     /odm                   erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
++mi_ext                                                  /mi_ext                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
++mi_ext                                                  /mi_ext                erofs   ro                                                   wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
+ /dev/block/by-name/metadata                             /metadata              ext4    noatime,nosuid,nodev,discard                         wait,check,formattable,first_stage_mount
+ /dev/block/bootdevice/by-name/persist                   /mnt/vendor/persist    ext4    noatime,nosuid,nodev,barrier=1                       wait,check
+ /dev/block/bootdevice/by-name/userdata                  /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt    latemount,wait,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
+diff --git a/rootdir/etc/recovery.fstab b/rootdir/etc/recovery.fstab
+index 5f3818c..6f478b6 100644
+--- a/rootdir/etc/recovery.fstab
++++ b/rootdir/etc/recovery.fstab
+@@ -26,15 +26,21 @@
+ # IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #device         mount point      fstype        [device2] [length=]
+-system                                                  /system                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system                                                  /system                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
++system                                                  /system                erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey
+ system_ext                                              /system_ext            ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++system_ext                                              /system_ext            erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ product                                                 /product               ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
++product                                                 /product               erofs   ro                                                   wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
+ vendor                                                  /vendor                ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor                                                  /vendor                erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
++vendor_dlkm                                             /vendor_dlkm           ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
++vendor_dlkm                                             /vendor_dlkm           erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
+ odm                                                     /odm                   ext4    ro,barrier=1,discard                                 wait,slotselect,avb,logical,first_stage_mount
+-/dev/block/bootdevice/by-name/metadata                  /metadata              ext4    noatime,nosuid,nodev,discard                         wait,check,formattable,wrappedkey,first_stage_mount
+-/dev/block/bootdevice/by-name/userdata                  /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier    latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
+-/devices/platform/soc/8804000.sdhci/mmc_host*           /storage/sdcard1       vfat    nosuid,nodev                                         wait,voldmanaged=sdcard1:auto,encryptable=footer
+-/devices/platform/soc/*.ssusb/*.dwc3/xhci-hcd.*.auto*   /storage/usbotg        vfat    nosuid,nodev                                         wait,voldmanaged=usbotg:auto
+-/dev/block/mmcblk0p1                       /sdcard         vfat    nosuid,nodev                                               wait
+-/dev/block/bootdevice/by-name/boot         /boot           emmc    defaults                                                   defaults
+-/dev/block/bootdevice/by-name/misc         /misc           emmc    defaults                                                   defaults
++odm                                                     /odm                   erofs   ro                                                   wait,slotselect,avb,logical,first_stage_mount
++mi_ext                                                  /mi_ext                ext4    ro,barrier=1,discard                                 wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
++mi_ext                                                  /mi_ext                erofs   ro                                                   wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail
++/dev/block/by-name/metadata                             /metadata              ext4    noatime,nosuid,nodev,discard                         wait,check,formattable,first_stage_mount
++/dev/block/bootdevice/by-name/rescue                    /cache                 ext4    noatime,nosuid,nodev,barrier=1                       wait
++/dev/block/bootdevice/by-name/userdata                  /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt,gc_merge    latemount,wait,check,formattable,fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized+wrappedkey_v0,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
++/dev/block/bootdevice/by-name/misc                      /misc                  emmc    defaults                                             defaults
+-- 
+2.43.0
+

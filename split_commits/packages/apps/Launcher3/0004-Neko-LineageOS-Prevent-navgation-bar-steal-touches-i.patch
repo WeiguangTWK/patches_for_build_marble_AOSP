@@ -1,0 +1,74 @@
+From c19fc948b69ef4192714c699a7b1b2f128cba2ce Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 13:43:20 +0800
+Subject: [PATCH] Neko LineageOS: Prevent navgation bar steal touches in
+ Desktop Mode
+
+This is spotted when tried to interact with Dock apps in Desktop Mode using Scrcpy
+
+Change-Id: I5a2813be6159ba5bf55e9dff5a8a7662fe6f375e
+---
+ .../taskbar/NavbarButtonsViewController.java          |  3 +++
+ .../taskbar/navbutton/NearestTouchFrame.java          | 11 ++++++++++-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/quickstep/src/com/android/launcher3/taskbar/NavbarButtonsViewController.java b/quickstep/src/com/android/launcher3/taskbar/NavbarButtonsViewController.java
+index bd2fe9a..c537dab 100644
+--- a/quickstep/src/com/android/launcher3/taskbar/NavbarButtonsViewController.java
++++ b/quickstep/src/com/android/launcher3/taskbar/NavbarButtonsViewController.java
+@@ -321,6 +321,9 @@ public class NavbarButtonsViewController implements TaskbarControllers.LoggableT
+         navButtonsViewLayoutParams.width = p.x;
+         navButtonsViewLayoutParams.height = p.y;
+         mNavButtonsView.setLayoutParams(navButtonsViewLayoutParams);
++        // On connected displays, redirecting taps to the nearest nav button can steal touches
++        // from taskbar icons rendered underneath the nav button layer.
++        mNavButtonsView.setIsActiveOverride(mContext.isPrimaryDisplay());
+ 
+         mIsImeRenderingNavButtons = mContext.imeDrawsImeNavBar();
+         if (!mIsImeRenderingNavButtons) {
+diff --git a/quickstep/src/com/android/launcher3/taskbar/navbutton/NearestTouchFrame.java b/quickstep/src/com/android/launcher3/taskbar/navbutton/NearestTouchFrame.java
+index 844f1af..e4e58c4 100644
+--- a/quickstep/src/com/android/launcher3/taskbar/navbutton/NearestTouchFrame.java
++++ b/quickstep/src/com/android/launcher3/taskbar/navbutton/NearestTouchFrame.java
+@@ -43,6 +43,7 @@ public class NearestTouchFrame extends FrameLayout {
+     private final List<View> mClickableChildren = new ArrayList<>();
+     private final List<View> mAttachedChildren = new ArrayList<>();
+     private final boolean mIsActive;
++    private boolean mIsActiveOverride = true;
+     private final int[] mTmpInt = new int[2];
+ 
+     // Offset (as the base) to translate window cords to view cords.
+@@ -74,6 +75,13 @@ public class NearestTouchFrame extends FrameLayout {
+         mIsActive = c.smallestScreenWidthDp < 600;
+     }
+ 
++    /**
++     * Enables or disables nearest-button touch redirection.
++     */
++    public void setIsActiveOverride(boolean isActiveOverride) {
++        mIsActiveOverride = isActiveOverride;
++    }
++
+     @Override
+     protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+         super.onLayout(changed, left, top, right, bottom);
+@@ -177,7 +185,7 @@ public class NearestTouchFrame extends FrameLayout {
+ 
+     @Override
+     public boolean onTouchEvent(MotionEvent event) {
+-        if (mIsActive) {
++        if (mIsActive && mIsActiveOverride) {
+             int x = (int) event.getX();
+             int y = (int) event.getY();
+             if (event.getAction() == MotionEvent.ACTION_DOWN) {
+@@ -206,6 +214,7 @@ public class NearestTouchFrame extends FrameLayout {
+ 
+         pw.println(String.format("%s\tmWindowOffset=%s", prefix, Arrays.toString(mWindowOffset)));
+         pw.println(String.format("%s\tmIsVertical=%s", prefix, mIsVertical));
++        pw.println(String.format("%s\tmIsActiveOverride=%s", prefix, mIsActiveOverride));
+         pw.println(String.format("%s\tmTouchingChild=%s", prefix, mTouchingChild));
+         pw.println(String.format("%s\tmTouchableRegions=%s", prefix,
+                 mTouchableRegions.keySet().stream()
+-- 
+2.43.0
+

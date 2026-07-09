@@ -1,0 +1,159 @@
+From 246b24d6830c06d91632cab40db5ecde66af988c Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 10:16:48 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Hide lineage services by
+ renaming them
+
+Change-Id: I42c54c23fdd00fbbc693477a6a5f10462f59bc9a
+---
+ compatibility_matrices/Android.bp              |  6 +++---
+ ...age.xml => compatibility_matrix.system.xml} | 18 +++++++++++++-----
+ health/aidl/default/Android.bp                 |  2 +-
+ health/aidl/default/service.cpp                |  5 +++--
+ ...> vendor.system.health-service.default.xml} |  6 +++++-
+ ir/Android.bp                                  |  2 +-
+ ... => android.hardware.ir-service.system.xml} |  0
+ 7 files changed, 26 insertions(+), 13 deletions(-)
+ rename compatibility_matrices/{compatibility_matrix.lineage.xml => compatibility_matrix.system.xml} (91%)
+ rename health/aidl/default/{vendor.lineage.health-service.default.xml => vendor.system.health-service.default.xml} (58%)
+ rename ir/{android.hardware.ir-service.lineage.xml => android.hardware.ir-service.system.xml} (100%)
+
+diff --git a/compatibility_matrices/Android.bp b/compatibility_matrices/Android.bp
+index 3ed4681..c103619 100644
+--- a/compatibility_matrices/Android.bp
++++ b/compatibility_matrices/Android.bp
+@@ -4,10 +4,10 @@
+ //
+ 
+ vintf_compatibility_matrix {
+-    name: "framework_compatibility_matrix.lineage.xml",
+-    stem: "compatibility_matrix.lineage.xml",
++    name: "framework_compatibility_matrix.system.xml",
++    stem: "compatibility_matrix.system.xml",
+     srcs: [
+-        "compatibility_matrix.lineage.xml",
++        "compatibility_matrix.system.xml",
+     ],
+     product_specific: true,
+ }
+diff --git a/compatibility_matrices/compatibility_matrix.lineage.xml b/compatibility_matrices/compatibility_matrix.system.xml
+similarity index 91%
+rename from compatibility_matrices/compatibility_matrix.lineage.xml
+rename to compatibility_matrices/compatibility_matrix.system.xml
+index a040337..2bf3be2 100644
+--- a/compatibility_matrices/compatibility_matrix.lineage.xml
++++ b/compatibility_matrices/compatibility_matrix.system.xml
+@@ -14,12 +14,16 @@
+     </hal>
+     <!-- Charging -->
+     <hal format="aidl" optional="true">
+-        <name>vendor.lineage.health</name>
+-        <version>1-2</version>
++        <name>vendor.system.health</name>
++        <version>2</version>
+         <interface>
+             <name>IChargingControl</name>
+             <instance>default</instance>
+         </interface>
++    </hal>
++    <hal format="aidl" optional="true">
++        <name>vendor.system.health</name>
++        <version>2</version>
+         <interface>
+             <name>IFastCharge</name>
+             <instance>default</instance>
+@@ -80,14 +84,18 @@
+     </hal>
+     <!-- Touch -->
+     <hal format="aidl" optional="true">
+-        <name>vendor.lineage.touch</name>
++        <name>vendor.system.touch</name>
+         <version>1</version>
+         <interface>
+-            <name>IGloveMode</name>
++            <name>IHighTouchPollingRate</name>
+             <instance>default</instance>
+         </interface>
++    </hal>
++    <hal format="aidl" optional="true">
++        <name>vendor.lineage.touch</name>
++        <version>1</version>
+         <interface>
+-            <name>IHighTouchPollingRate</name>
++            <name>IGloveMode</name>
+             <instance>default</instance>
+         </interface>
+         <interface>
+diff --git a/health/aidl/default/Android.bp b/health/aidl/default/Android.bp
+index 785f074..77154a1 100644
+--- a/health/aidl/default/Android.bp
++++ b/health/aidl/default/Android.bp
+@@ -58,7 +58,7 @@ cc_binary {
+     vendor: true,
+     relative_install_path: "hw",
+     init_rc: ["vendor.lineage.health-service.default.rc"],
+-    vintf_fragments: ["vendor.lineage.health-service.default.xml"],
++    vintf_fragments: ["vendor.system.health-service.default.xml"],
+     cflags: select(soong_config_variable("lineage_health", "charging_control_charging_path"), {
+         any @ flag_val: ["-DHEALTH_CHARGING_CONTROL_CHARGING_PATH=\"" + flag_val + "\""],
+         default: [],
+diff --git a/health/aidl/default/service.cpp b/health/aidl/default/service.cpp
+index a3df8f7..f937afd 100644
+--- a/health/aidl/default/service.cpp
++++ b/health/aidl/default/service.cpp
+@@ -19,11 +19,12 @@ int main() {
+     std::shared_ptr<ChargingControl> lh = ndk::SharedRefBase::make<ChargingControl>();
+     std::shared_ptr<FastCharge> fc = ndk::SharedRefBase::make<FastCharge>();
+ 
+-    std::string instance = std::string() + ChargingControl::descriptor + "/default";
++    // Keep binder interface unchanged but expose a renamed service instance.
++    std::string instance = "vendor.system.health.IChargingControl/default";
+     binder_status_t status = AServiceManager_addService(lh->asBinder().get(), instance.c_str());
+     CHECK_EQ(status, STATUS_OK);
+ 
+-    instance = std::string() + FastCharge::descriptor + "/default";
++    instance = "vendor.system.health.IFastCharge/default";
+     status = AServiceManager_addService(fc->asBinder().get(), instance.c_str());
+     CHECK_EQ(status, STATUS_OK);
+ 
+diff --git a/health/aidl/default/vendor.lineage.health-service.default.xml b/health/aidl/default/vendor.system.health-service.default.xml
+similarity index 58%
+rename from health/aidl/default/vendor.lineage.health-service.default.xml
+rename to health/aidl/default/vendor.system.health-service.default.xml
+index 148385b..82ea457 100644
+--- a/health/aidl/default/vendor.lineage.health-service.default.xml
++++ b/health/aidl/default/vendor.system.health-service.default.xml
+@@ -1,8 +1,12 @@
+ <manifest version="1.0" type="device">
+     <hal format="aidl">
+-        <name>vendor.lineage.health</name>
++        <name>vendor.system.health</name>
+         <version>2</version>
+         <fqname>IChargingControl/default</fqname>
++    </hal>
++    <hal format="aidl">
++        <name>vendor.system.health</name>
++        <version>2</version>
+         <fqname>IFastCharge/default</fqname>
+     </hal>
+ </manifest>
+diff --git a/ir/Android.bp b/ir/Android.bp
+index 218df73..6957334 100644
+--- a/ir/Android.bp
++++ b/ir/Android.bp
+@@ -8,7 +8,7 @@ cc_binary {
+     relative_install_path: "hw",
+     vendor: true,
+     init_rc: ["android.hardware.ir-service.lineage.rc"],
+-    vintf_fragments: ["android.hardware.ir-service.lineage.xml"],
++    vintf_fragments: ["android.hardware.ir-service.system.xml"],
+     srcs: [
+         "ConsumerIr.cpp",
+         "service.cpp",
+diff --git a/ir/android.hardware.ir-service.lineage.xml b/ir/android.hardware.ir-service.system.xml
+similarity index 100%
+rename from ir/android.hardware.ir-service.lineage.xml
+rename to ir/android.hardware.ir-service.system.xml
+-- 
+2.43.0
+

@@ -1,0 +1,67 @@
+From cf982d8c848ea0173ed3be4eaffd1358919a58c4 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 09:57:48 +0800
+Subject: [PATCH] Neko LineageOS: [Misc] Fix broken Parcelable
+
+- This is supposed to fix Desktop Mode issue, can help with PopUp View issue
+
+Change-Id: Ie125ecb79a0a6d90b7df74ce51f94352de58cd85
+---
+ core/java/android/view/InputChannel.java              | 11 ++++++++++-
+ .../android/server/input/GestureMonitorSpyWindow.java |  4 ++++
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/core/java/android/view/InputChannel.java b/core/java/android/view/InputChannel.java
+index f76b1f896..fc81f97b1 100644
+--- a/core/java/android/view/InputChannel.java
++++ b/core/java/android/view/InputChannel.java
+@@ -36,6 +36,7 @@ public final class InputChannel implements Parcelable {
+     private static final String TAG = "InputChannel";
+ 
+     private static final boolean DEBUG = false;
++    private boolean mServerRetained = false;
+     private static final NativeAllocationRegistry sRegistry =
+             NativeAllocationRegistry.createMalloced(
+                     InputChannel.class.getClassLoader(),
+@@ -187,6 +188,14 @@ public final class InputChannel implements Parcelable {
+         }
+     }
+ 
++    /**
++     * Mark this channel as retained by the server. Server-retained channels
++     * are not disposed during parceling.
++     */
++    public void setServerRetained(boolean retained) {
++        mServerRetained = retained;
++    }
++
+     @Override
+     public void writeToParcel(Parcel out, int flags) {
+         if (out == null) {
+@@ -195,7 +204,7 @@ public final class InputChannel implements Parcelable {
+ 
+         nativeWriteToParcel(out, mPtr);
+ 
+-        if ((flags & PARCELABLE_WRITE_RETURN_VALUE) != 0) {
++        if (!mServerRetained && (flags & PARCELABLE_WRITE_RETURN_VALUE) != 0) {
+             dispose();
+         }
+     }
+diff --git a/services/core/java/com/android/server/input/GestureMonitorSpyWindow.java b/services/core/java/com/android/server/input/GestureMonitorSpyWindow.java
+index a2c8748a9..e56908327 100644
+--- a/services/core/java/com/android/server/input/GestureMonitorSpyWindow.java
++++ b/services/core/java/com/android/server/input/GestureMonitorSpyWindow.java
+@@ -48,6 +48,10 @@ class GestureMonitorSpyWindow {
+             SurfaceControl sc, InputChannel inputChannel) {
+         mMonitorToken = token;
+         mClientChannel = inputChannel;
++
++        // Avoid gesture monitors being disposed
++        mClientChannel.setServerRetained(true);
++
+         mInputSurface = sc;
+ 
+         mApplicationHandle = new InputApplicationHandle(null, name,
+-- 
+2.43.0
+

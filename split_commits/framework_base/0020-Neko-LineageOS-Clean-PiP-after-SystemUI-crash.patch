@@ -1,0 +1,106 @@
+From 3333862bd8649b609d33b99c5c22895a173526bf Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 10:01:55 +0800
+Subject: [PATCH] Neko LineageOS: Clean PiP after SystemUI crash
+
+Change-Id: I23ae14bf548faf39923ec386c235aef85c0d0f77
+---
+ .../wm/shell/pip/PipTaskOrganizer.java        | 40 +++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/libs/WindowManager/Shell/src/com/android/wm/shell/pip/PipTaskOrganizer.java b/libs/WindowManager/Shell/src/com/android/wm/shell/pip/PipTaskOrganizer.java
+index 44c4d7a65..b79ab03e2 100644
+--- a/libs/WindowManager/Shell/src/com/android/wm/shell/pip/PipTaskOrganizer.java
++++ b/libs/WindowManager/Shell/src/com/android/wm/shell/pip/PipTaskOrganizer.java
+@@ -51,6 +51,7 @@ import android.animation.AnimatorListenerAdapter;
+ import android.animation.ValueAnimator;
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
++import android.app.ActivityTaskManager;
+ import android.app.ActivityManager;
+ import android.app.PictureInPictureParams;
+ import android.app.TaskInfo;
+@@ -59,6 +60,7 @@ import android.content.Context;
+ import android.content.pm.ActivityInfo;
+ import android.content.res.Configuration;
+ import android.graphics.Rect;
++import android.os.RemoteException;
+ import android.os.SystemProperties;
+ import android.view.Choreographer;
+ import android.view.Display;
+@@ -101,6 +103,7 @@ import com.android.wm.shell.transition.Transitions;
+ 
+ import java.io.PrintWriter;
+ import java.lang.ref.WeakReference;
++import java.util.List;
+ import java.util.Objects;
+ import java.util.Optional;
+ import java.util.StringJoiner;
+@@ -128,6 +131,7 @@ public class PipTaskOrganizer implements ShellTaskOrganizer.TaskListener,
+      * to portrait PiP in button navigation mode.
+      */
+     private static final int CONTENT_OVERLAY_FADE_OUT_DELAY_MS = 500;
++    private static final int CRASH_RECOVERY_CHECK_DELAY_MS = 3000;
+ 
+     private static final int EXTRA_CONTENT_OVERLAY_FADE_OUT_DELAY_MS =
+             SystemProperties.getInt(
+@@ -370,6 +374,9 @@ public class PipTaskOrganizer implements ShellTaskOrganizer.TaskListener,
+     @Nullable
+     private Rect mSwipeSourceRectHint;
+ 
++    @Nullable
++    private Runnable mRemoveStaledPinnedTaskRunnable;
++
+     public PipTaskOrganizer(Context context,
+             @NonNull ShellInit shellInit,
+             @NonNull SyncTransactionQueue syncTransactionQueue,
+@@ -432,6 +439,13 @@ public class PipTaskOrganizer implements ShellTaskOrganizer.TaskListener,
+         mDisplayController.addDisplayWindowListener(this);
+         mPipTransitionController.registerPipTransitionCallback(
+                 mPipTransitionCallback, mMainExecutor);
++        mPipTransitionState.addOnPipTransitionStateChangedListener((oldState, newState) -> {
++            if (mPipTransitionState.isEnteringPip()
++                    && mRemoveStaledPinnedTaskRunnable != null) {
++                mMainExecutor.removeCallbacks(mRemoveStaledPinnedTaskRunnable);
++                mRemoveStaledPinnedTaskRunnable = null;
++            }
++        });
+     }
+ 
+     public PipTransitionController getTransitionController() {
+@@ -819,6 +833,32 @@ public class PipTaskOrganizer implements ShellTaskOrganizer.TaskListener,
+ 
+         mPipUiEventLoggerLogger.setTaskInfo(mTaskInfo);
+ 
++        mRemoveStaledPinnedTaskRunnable = () -> {
++            final ComponentName toRemove = (info != null && info.topActivity != null)
++                    ? info.topActivity : null;
++            ProtoLog.w(ShellProtoLogGroup.WM_SHELL_PICTURE_IN_PICTURE,
++                    "SystemUI reboot detected, remove staled PiP task %s", toRemove);
++            if (toRemove == null) return;
++            try {
++                final List<ActivityManager.RunningTaskInfo> tasks =
++                        ActivityTaskManager.getService().getTasks(
++                                10 /* maxNum */,
++                                false /* filterOnlyVisibleRecents */,
++                                false /* keepIntentExtra */,
++                                Display.DEFAULT_DISPLAY);
++                for (ActivityManager.RunningTaskInfo task : tasks) {
++                    if (toRemove.equals(task.topActivity)) {
++                        ActivityTaskManager.getService().removeTask(task.taskId);
++                    }
++                }
++            } catch (RemoteException e) {
++                ProtoLog.e(ShellProtoLogGroup.WM_SHELL_PICTURE_IN_PICTURE,
++                        "%s: Failed to remove PiP, %s", TAG, e);
++            }
++        };
++        mMainExecutor.executeDelayed(
++                mRemoveStaledPinnedTaskRunnable, CRASH_RECOVERY_CHECK_DELAY_MS);
++
+         // If the displayId of the task is different than what PipBoundsHandler has, then update
+         // it. This is possible if we entered PiP on an external display.
+         if (info.displayId != mPipDisplayLayoutState.getDisplayId()
+-- 
+2.43.0
+

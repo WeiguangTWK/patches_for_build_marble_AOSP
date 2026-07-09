@@ -1,0 +1,103 @@
+From 976c4adb14f26be3084eb45a7809459308dfa5ee Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 12:17:13 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Hide lineage services by
+ renaming them
+
+Change-Id: Ib0d9c3db676835e9d02ba561eabc56ef4703529a
+---
+ Android.bp                                                | 3 ++-
+ .../internal/health/ChargingControlController.java        | 2 +-
+ sdk/src/java/lineageos/app/LineageContextConstants.java   | 8 ++++----
+ .../java/lineageos/hardware/LineageHardwareManager.java   | 2 +-
+ 4 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/Android.bp b/Android.bp
+index 074a4cc..255c3a1 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -5,6 +5,7 @@
+ 
+ android_app {
+     name: "org.lineageos.platform-res",
++    stem: "org.system.platform-res",
+     use_resource_processor: false,
+     sdk_version: "core_platform",
+     certificate: "platform",
+@@ -19,7 +20,7 @@ android_app {
+     },
+ 
+     // Soong special-cases org.lineageos.platform-res to install this alongside
+-    // the libraries at /system_ext/framework/org.lineageos.platform-res.apk.
++    // the libraries at /system/framework/org.system.platform-res.apk.
+ 
+     aaptflags: [
+         "--private-symbols",
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+index b6a99ef..3ad11ac 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/ChargingControlController.java
+@@ -83,7 +83,7 @@ public class ChargingControlController extends LineageHealthFeature {
+         mContentResolver = mContext.getContentResolver();
+         mChargingControl = IChargingControl.Stub.asInterface(
+                 ServiceManager.waitForDeclaredService(
+-                        IChargingControl.DESCRIPTOR + "/default"));
++                        "vendor.system.health.IChargingControl/default"));
+ 
+         if (mChargingControl == null) {
+             Log.i(TAG, "Lineage Health HAL not found");
+diff --git a/sdk/src/java/lineageos/app/LineageContextConstants.java b/sdk/src/java/lineageos/app/LineageContextConstants.java
+index db56db7..3c9612a 100644
+--- a/sdk/src/java/lineageos/app/LineageContextConstants.java
++++ b/sdk/src/java/lineageos/app/LineageContextConstants.java
+@@ -43,14 +43,14 @@ public final class LineageContextConstants {
+      *
+      * @hide
+      */
+-    public static final String LINEAGE_HARDWARE_SERVICE = "lineagehardware";
++    public static final String LINEAGE_HARDWARE_SERVICE = "hardwareservice";
+ 
+     /**
+      * Manages display color adjustments
+      *
+      * @hide
+      */
+-    public static final String LINEAGE_LIVEDISPLAY_SERVICE = "lineagelivedisplay";
++    public static final String LINEAGE_LIVEDISPLAY_SERVICE = "displayservice";
+ 
+     /**
+      * Use with {@link android.content.Context#getSystemService} to retrieve a
+@@ -61,7 +61,7 @@ public final class LineageContextConstants {
+      *
+      * @hide
+      */
+-    public static final String LINEAGE_TRUST_INTERFACE = "lineagetrust";
++    public static final String LINEAGE_TRUST_INTERFACE = "trustinterface";
+ 
+     /**
+      * Use with {@link android.content.Context#getSystemService} to retrieve a
+@@ -72,7 +72,7 @@ public final class LineageContextConstants {
+      *
+      * @hide
+      */
+-    public static final String LINEAGE_HEALTH_INTERFACE = "lineagehealth";
++    public static final String LINEAGE_HEALTH_INTERFACE = "healthinterface";
+ 
+     /**
+      * Update power menu (GlobalActions)
+diff --git a/sdk/src/java/lineageos/hardware/LineageHardwareManager.java b/sdk/src/java/lineageos/hardware/LineageHardwareManager.java
+index 9e1c894..c7b33f6 100644
+--- a/sdk/src/java/lineageos/hardware/LineageHardwareManager.java
++++ b/sdk/src/java/lineageos/hardware/LineageHardwareManager.java
+@@ -293,7 +293,7 @@ public final class LineageHardwareManager {
+                         IDisplayModes.DESCRIPTOR + "/default");
+             case FEATURE_HIGH_TOUCH_POLLING_RATE:
+                 return ServiceManager.waitForDeclaredService(
+-                        IHighTouchPollingRate.DESCRIPTOR + "/default");
++                        "vendor.system.touch.IHighTouchPollingRate/default");
+             case FEATURE_HIGH_TOUCH_SENSITIVITY:
+                 return ServiceManager.waitForDeclaredService(
+                         IGloveMode.DESCRIPTOR + "/default");
+-- 
+2.43.0
+

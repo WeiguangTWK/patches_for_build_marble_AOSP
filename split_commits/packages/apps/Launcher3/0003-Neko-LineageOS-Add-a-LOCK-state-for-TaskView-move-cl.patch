@@ -1,0 +1,922 @@
+From 14a731218b2fbc71d549fbab3c117be9fd8a1431 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 13:36:19 +0800
+Subject: [PATCH] Neko LineageOS: Add a LOCK state for TaskView & move 'clear
+ all' button
+
+- This feature is inspired by MIUI's design, when drag down the app in TaskView will switch the lock state of the app,
+  Which determine how 'clear all' deal with it
+- Move the 'clear all' button to the bottom area of the screen
+
+Change-Id: Idae834d7e55147d4c2e9a9405f34e147fcfbf5fb
+---
+ .../res/layout/overview_actions_container.xml |  35 ++-
+ quickstep/res/layout/task.xml                 |  11 +
+ quickstep/res/layout/task_grouped.xml         |  11 +
+ quickstep/res/values-zh-rCN/strings.xml       |   2 +
+ quickstep/res/values-zh-rHK/strings.xml       |   2 +
+ quickstep/res/values-zh-rTW/strings.xml       |   2 +
+ quickstep/res/values/strings.xml              |   4 +
+ .../TaskViewLaunchTouchController.kt          |   8 +-
+ .../TaskViewTouchControllerDeprecated.java    |  14 +-
+ .../quickstep/TaskShortcutFactory.java        |  45 +++
+ .../quickstep/views/OverviewActionsView.java  |  56 +++-
+ .../quickstep/views/RecentsDismissUtils.kt    |  58 ++--
+ .../android/quickstep/views/RecentsView.java  | 268 +++++++++++++++++-
+ .../com/android/quickstep/views/TaskView.kt   |   9 +
+ src/com/android/launcher3/LauncherPrefs.kt    |   3 +
+ 15 files changed, 466 insertions(+), 62 deletions(-)
+
+diff --git a/quickstep/res/layout/overview_actions_container.xml b/quickstep/res/layout/overview_actions_container.xml
+index ce54028..0fe9596 100644
+--- a/quickstep/res/layout/overview_actions_container.xml
++++ b/quickstep/res/layout/overview_actions_container.xml
+@@ -26,24 +26,39 @@
+     <LinearLayout
+         android:id="@+id/action_buttons"
+         android:layout_width="wrap_content"
+-        android:layout_height="@dimen/overview_actions_height"
++        android:layout_height="wrap_content"
+         android:layout_gravity="bottom|center_horizontal"
+-        android:orientation="horizontal">
++        android:orientation="vertical">
+ 
+-        <Button
+-            android:id="@+id/action_screenshot"
++        <LinearLayout
+             android:layout_width="wrap_content"
+             android:layout_height="wrap_content"
+-            android:drawableStart="@drawable/ic_screenshot"
+-            android:text="@string/action_screenshot" />
++            android:orientation="horizontal">
++
++            <Button
++                android:id="@+id/action_screenshot"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:drawableStart="@drawable/ic_screenshot"
++                android:text="@string/action_screenshot" />
++
++            <Button
++                android:id="@+id/action_split"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginStart="@dimen/overview_actions_button_spacing"
++                android:text="@string/action_split"
++                android:visibility="gone" />
++        </LinearLayout>
+ 
+         <Button
+-            android:id="@+id/action_split"
++            android:id="@+id/action_clear_all"
+             android:layout_width="wrap_content"
+             android:layout_height="wrap_content"
+-            android:layout_marginStart="@dimen/overview_actions_button_spacing"
+-            android:text="@string/action_split"
+-            android:visibility="gone" />
++            android:layout_gravity="center_horizontal"
++            android:layout_marginTop="@dimen/overview_actions_button_spacing"
++            android:drawableStart="@drawable/ic_remove_no_shadow"
++            android:text="@string/recents_clear_all" />
+ 
+     </LinearLayout>
+ 
+diff --git a/quickstep/res/layout/task.xml b/quickstep/res/layout/task.xml
+index 85edf4e..0c4a445 100644
+--- a/quickstep/res/layout/task.xml
++++ b/quickstep/res/layout/task.xml
+@@ -51,6 +51,17 @@
+         android:layout_height="wrap_content"
+         android:layout_width="wrap_content" />
+ 
++    <ImageView
++        android:id="@+id/lock_state"
++        android:layout_width="@dimen/recents_filter_icon_size"
++        android:layout_height="@dimen/recents_filter_icon_size"
++        android:layout_gravity="end"
++        android:alpha="0.95"
++        android:importantForAccessibility="no"
++        android:src="@drawable/ic_lock"
++        android:tint="@color/overview_button"
++        android:visibility="gone" />
++
+     <include layout="@layout/task_dismiss_button" />
+ 
+     <ViewStub
+diff --git a/quickstep/res/layout/task_grouped.xml b/quickstep/res/layout/task_grouped.xml
+index be9a754..ac00cd3 100644
+--- a/quickstep/res/layout/task_grouped.xml
++++ b/quickstep/res/layout/task_grouped.xml
+@@ -79,6 +79,17 @@
+         android:layout_height="wrap_content"
+         android:layout_width="wrap_content" />
+ 
++    <ImageView
++        android:id="@+id/lock_state"
++        android:layout_width="@dimen/recents_filter_icon_size"
++        android:layout_height="@dimen/recents_filter_icon_size"
++        android:layout_gravity="end"
++        android:alpha="0.95"
++        android:importantForAccessibility="no"
++        android:src="@drawable/ic_lock"
++        android:tint="@color/overview_button"
++        android:visibility="gone" />
++
+     <include layout="@layout/task_dismiss_button" />
+ 
+     <ViewStub
+diff --git a/quickstep/res/values-zh-rCN/strings.xml b/quickstep/res/values-zh-rCN/strings.xml
+index 2866f3a..f813a7e 100644
+--- a/quickstep/res/values-zh-rCN/strings.xml
++++ b/quickstep/res/values-zh-rCN/strings.xml
+@@ -20,6 +20,8 @@
+ <resources xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="recent_task_option_pin" msgid="7929860679018978258">"固定"</string>
++    <string name="recent_task_option_lock">"锁定"</string>
++    <string name="recent_task_option_unlock">"解锁"</string>
+     <string name="recent_task_option_freeform" msgid="48863056265284071">"自由窗口"</string>
+     <string name="recent_task_option_mini_window">"打开为小窗"</string>
+     <string name="recent_task_option_desktop" msgid="8280879717125435668">"桌面"</string>
+diff --git a/quickstep/res/values-zh-rHK/strings.xml b/quickstep/res/values-zh-rHK/strings.xml
+index ebba6c8..56ffa57 100644
+--- a/quickstep/res/values-zh-rHK/strings.xml
++++ b/quickstep/res/values-zh-rHK/strings.xml
+@@ -20,6 +20,8 @@
+ <resources xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="recent_task_option_pin" msgid="7929860679018978258">"固定"</string>
++    <string name="recent_task_option_lock">"鎖定"</string>
++    <string name="recent_task_option_unlock">"解鎖"</string>
+     <string name="recent_task_option_freeform" msgid="48863056265284071">"自由形式"</string>
+     <string name="recent_task_option_mini_window">"彈出視窗"</string>
+     <string name="recent_task_option_desktop" msgid="8280879717125435668">"桌面"</string>
+diff --git a/quickstep/res/values-zh-rTW/strings.xml b/quickstep/res/values-zh-rTW/strings.xml
+index 8337b5b..63163ad 100644
+--- a/quickstep/res/values-zh-rTW/strings.xml
++++ b/quickstep/res/values-zh-rTW/strings.xml
+@@ -20,6 +20,8 @@
+ <resources xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+     <string name="recent_task_option_pin" msgid="7929860679018978258">"固定"</string>
++    <string name="recent_task_option_lock">"鎖定"</string>
++    <string name="recent_task_option_unlock">"解鎖"</string>
+     <string name="recent_task_option_freeform" msgid="48863056265284071">"自由形式"</string>
+     <string name="recent_task_option_mini_window">"彈出視窗"</string>
+     <string name="recent_task_option_desktop" msgid="8280879717125435668">"電腦模式"</string>
+diff --git a/quickstep/res/values/strings.xml b/quickstep/res/values/strings.xml
+index de8ad7e..4a52815 100644
+--- a/quickstep/res/values/strings.xml
++++ b/quickstep/res/values/strings.xml
+@@ -24,6 +24,10 @@
+     <!-- Options for recent tasks -->
+     <!-- Title for an option to keep an app pinned to the screen until it is unpinned -->
+     <string name="recent_task_option_pin">Pin</string>
++    <!-- Title for locking a task so clear all won't dismiss it -->
++    <string name="recent_task_option_lock">Lock</string>
++    <!-- Title for unlocking a task so clear all can dismiss it -->
++    <string name="recent_task_option_unlock">Unlock</string>
+     <!-- Title for an option to enter freeform mode for a given app -->
+     <string name="recent_task_option_freeform">Freeform</string>
+     <!-- Title for an option to open a given app in a mini window -->
+diff --git a/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewLaunchTouchController.kt b/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewLaunchTouchController.kt
+index 6225c47..d3b1c70 100644
+--- a/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewLaunchTouchController.kt
++++ b/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewLaunchTouchController.kt
+@@ -19,7 +19,7 @@ package com.android.launcher3.uioverrides.touchcontrollers
+ import android.content.Context
+ import android.graphics.Rect
+ import android.view.MotionEvent
+-import com.android.app.animation.Interpolators.ZOOM_IN
++import com.android.app.animation.Interpolators.LINEAR
+ import com.android.launcher3.AbstractFloatingView
+ import com.android.launcher3.LauncherAnimUtils
+ import com.android.launcher3.Utilities.EDGE_NAV_BAR
+@@ -29,7 +29,6 @@ import com.android.launcher3.Utilities.isRtl
+ import com.android.launcher3.anim.AnimatorPlaybackController
+ import com.android.launcher3.touch.BaseSwipeDetector
+ import com.android.launcher3.touch.SingleAxisSwipeDetector
+-import com.android.launcher3.util.DisplayController
+ import com.android.launcher3.util.FlingBlockCheck
+ import com.android.launcher3.util.TouchController
+ import com.android.quickstep.views.RecentsView
+@@ -65,7 +64,6 @@ CONTAINER : RecentsViewContainer {
+     private fun canTaskLaunchTaskView(taskView: TaskView?) =
+         taskView != null &&
+             taskView === recentsView.currentPageTaskView &&
+-            DisplayController.getNavigationMode(container).hasGestures &&
+             (!recentsView.showAsGrid() || taskView.isLargeTile) &&
+             recentsView.isTaskInExpectedScrollPosition(taskView)
+ 
+@@ -165,12 +163,12 @@ CONTAINER : RecentsViewContainer {
+         val maxDuration = 2L * secondaryLayerDimension
+         recentsView.clearPendingAnimation()
+         val pendingAnimation =
+-            recentsView.createTaskLaunchAnimation(taskBeingDragged, maxDuration, ZOOM_IN)
++            recentsView.createTaskLockToggleAnimation(taskBeingDragged, maxDuration, LINEAR)
+         // Since the thumbnail is what is filling the screen, based the end displacement on it.
+         taskBeingDragged.getThumbnailBounds(tempRect, /* relativeToDragLayer= */ true)
+         launchEndDisplacement =
+             recentsView.pagedOrientationHandler
+-                .getTaskLaunchLength(secondaryLayerDimension, tempRect)
++                .getTaskDismissLength(secondaryLayerDimension, tempRect)
+                 .toFloat() * verticalFactor
+         playbackController =
+             pendingAnimation.createPlaybackController()?.apply {
+diff --git a/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewTouchControllerDeprecated.java b/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewTouchControllerDeprecated.java
+index b57eba5..acafac6 100644
+--- a/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewTouchControllerDeprecated.java
++++ b/quickstep/src/com/android/launcher3/uioverrides/touchcontrollers/TaskViewTouchControllerDeprecated.java
+@@ -37,7 +37,6 @@ import com.android.launcher3.anim.AnimatorPlaybackController;
+ import com.android.launcher3.anim.PendingAnimation;
+ import com.android.launcher3.touch.BaseSwipeDetector;
+ import com.android.launcher3.touch.SingleAxisSwipeDetector;
+-import com.android.launcher3.util.DisplayController;
+ import com.android.launcher3.util.FlingBlockCheck;
+ import com.android.launcher3.util.TouchController;
+ import com.android.launcher3.util.VibratorWrapper;
+@@ -175,13 +174,11 @@ public class TaskViewTouchControllerDeprecated<
+                         // The task can be dragged up to dismiss it
+                         mAllowGoingUp = true;
+ 
+-                        // The task can be dragged down to open it if:
++                        // The task can be dragged down to toggle lock if:
+                         // - It's the current page
+-                        // - We support gestures to enter overview
+                         // - It's the focused task if in grid view
+                         // - The task is snapped
+                         mAllowGoingDown = taskView == mRecentsView.getCurrentPageTaskView()
+-                                && DisplayController.getNavigationMode(mContainer).hasGestures
+                                 && (!mRecentsView.showAsGrid() || mTaskBeingDragged.isLargeTile())
+                                 && mRecentsView.isTaskInExpectedScrollPosition(taskView);
+ 
+@@ -250,13 +247,14 @@ public class TaskViewTouchControllerDeprecated<
+ 
+             mEndDisplacement = -secondaryTaskDimension;
+         } else {
+-            currentInterpolator = Interpolators.ZOOM_IN;
+-            pa = mRecentsView.createTaskLaunchAnimation(
++            currentInterpolator = Interpolators.LINEAR;
++            pa = mRecentsView.createTaskLockToggleAnimation(
+                     mTaskBeingDragged, maxDuration, currentInterpolator);
+ 
+-            // Since the thumbnail is what is filling the screen, based the end displacement on it.
++            // Match the displacement used by the task lock toggle animation.
+             mTaskBeingDragged.getThumbnailBounds(mTempRect, /*relativeToDragLayer=*/true);
+-            mEndDisplacement = secondaryLayerDimension - mTempRect.bottom;
++            mEndDisplacement = orientationHandler.getTaskDismissLength(secondaryLayerDimension,
++                    mTempRect);
+         }
+         mEndDisplacement *= verticalFactor;
+         mCurrentAnimation = pa.createPlaybackController();
+diff --git a/quickstep/src/com/android/quickstep/TaskShortcutFactory.java b/quickstep/src/com/android/quickstep/TaskShortcutFactory.java
+index d2e4e67..2848286 100644
+--- a/quickstep/src/com/android/quickstep/TaskShortcutFactory.java
++++ b/quickstep/src/com/android/quickstep/TaskShortcutFactory.java
+@@ -473,6 +473,51 @@ public interface TaskShortcutFactory {
+             return Collections.singletonList(new PinSystemShortcut(container, taskContainer));
+         }
+     };
++
++    TaskShortcutFactory LOCK_TOGGLE = new TaskShortcutFactory() {
++        @Override
++        public List<SystemShortcut> getShortcuts(RecentsViewContainer container,
++                TaskContainer taskContainer) {
++            RecentsView recentsView = taskContainer.getTaskView().getRecentsView();
++            if (recentsView == null) {
++                return null;
++            }
++            boolean isLocked = recentsView.isTaskLocked(taskContainer.getTask());
++            return Collections.singletonList(new LockToggleSystemShortcut(
++                    container, taskContainer, isLocked));
++        }
++
++        @Override
++        public boolean showForGroupedTask() {
++            return true;
++        }
++    };
++
++    class LockToggleSystemShortcut extends SystemShortcut<RecentsViewContainer> {
++        private final TaskContainer mTaskContainer;
++        private final boolean mIsLocked;
++
++        public LockToggleSystemShortcut(RecentsViewContainer target,
++                TaskContainer taskContainer, boolean isLocked) {
++            super(R.drawable.ic_lock,
++                    isLocked ? R.string.recent_task_option_unlock
++                            : R.string.recent_task_option_lock,
++                    target, taskContainer.getItemInfo(), taskContainer.getTaskView());
++            mTaskContainer = taskContainer;
++            mIsLocked = isLocked;
++        }
++
++        @Override
++        public void onClick(View view) {
++            RecentsView recentsView = mTaskContainer.getTaskView().getRecentsView();
++            if (recentsView != null) {
++                recentsView.setTaskLocked(mTaskContainer.getTask(), !mIsLocked);
++                mTaskContainer.getTaskView().updateLockStateUi();
++            }
++            dismissTaskMenuView();
++        }
++    }
++
+     class MiniWindowSystemShortcut extends SystemShortcut<RecentsViewContainer> {
+ 
+         private final TaskContainer mTaskContainer;
+diff --git a/quickstep/src/com/android/quickstep/views/OverviewActionsView.java b/quickstep/src/com/android/quickstep/views/OverviewActionsView.java
+index 674ce5b..39db781 100644
+--- a/quickstep/src/com/android/quickstep/views/OverviewActionsView.java
++++ b/quickstep/src/com/android/quickstep/views/OverviewActionsView.java
+@@ -27,6 +27,7 @@ import android.util.Log;
+ import android.view.KeyEvent;
+ import android.view.View;
+ import android.view.View.OnClickListener;
++import android.view.ViewGroup;
+ import android.widget.Button;
+ import android.widget.FrameLayout;
+ import android.widget.LinearLayout;
+@@ -146,6 +147,8 @@ public class OverviewActionsView<T extends OverlayUICallbacks> extends FrameLayo
+ 
+     /** Container for the action buttons below a focused, non-split Overview tile. */
+     protected LinearLayout mActionButtons;
++    private View mScreenshotButton;
++    @Nullable private View mClearAllButton;
+     private Button mSplitButton;
+     /**
+      * The "save app pair" button. Currently this is the only button that is not contained in
+@@ -211,8 +214,13 @@ public class OverviewActionsView<T extends OverlayUICallbacks> extends FrameLayo
+         // The screenshot button is implemented as a Button in launcher3 and NexusLauncher, but is
+         // an ImageButton in go launcher (does not share a common class with Button). Take care when
+         // casting this.
+-        View screenshotButton = findViewById(R.id.action_screenshot);
+-        screenshotButton.setOnClickListener(this);
++        mScreenshotButton = findViewById(R.id.action_screenshot);
++        mScreenshotButton.setOnClickListener(this);
++        mClearAllButton = findViewById(R.id.action_clear_all);
++        if (mClearAllButton != null) {
++            mClearAllButton.setOnClickListener(this);
++            post(this::matchPrimaryActionButtonSize);
++        }
+         mSplitButton = findViewById(R.id.action_split);
+         mSplitButton.setOnClickListener(this);
+         mSaveAppPairButton.setOnClickListener(this);
+@@ -235,6 +243,8 @@ public class OverviewActionsView<T extends OverlayUICallbacks> extends FrameLayo
+         int id = view.getId();
+         if (id == R.id.action_screenshot) {
+             mCallbacks.onScreenshot();
++        } else if (id == R.id.action_clear_all) {
++            mCallbacks.onClearAll();
+         } else if (id == R.id.action_split) {
+             mCallbacks.onSplit();
+         } else if (id == R.id.action_save_app_pair) {
+@@ -409,9 +419,14 @@ public class OverviewActionsView<T extends OverlayUICallbacks> extends FrameLayo
+         }
+ 
+         LayoutParams actionParams = (LayoutParams) actionBar.getLayoutParams();
++        int bottomMargin = getBottomMargin();
++        if (actionBar == mActionButtons && mClearAllButton != null
++                && mClearAllButton.getVisibility() != GONE) {
++            bottomMargin -= getResources().getDimensionPixelSize(R.dimen.overview_actions_height);
++        }
+         actionParams.setMargins(
+                 actionParams.leftMargin, mDp.getOverviewProfile().getActionsTopMarginPx(),
+-                actionParams.rightMargin, getBottomMargin());
++                actionParams.rightMargin, bottomMargin);
+     }
+ 
+     private int getBottomMargin() {
+@@ -454,5 +469,40 @@ public class OverviewActionsView<T extends OverlayUICallbacks> extends FrameLayo
+                 : R.drawable.ic_save_app_pair_up_down;
+         mSaveAppPairButton.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                 appPairIconRes, 0, 0, 0);
++
++        if (mClearAllButton != null) {
++            post(this::matchPrimaryActionButtonSize);
++        }
++    }
++
++    private void matchPrimaryActionButtonSize() {
++        if (mClearAllButton == null || mScreenshotButton == null) {
++            return;
++        }
++        int width = Math.max(mScreenshotButton.getMeasuredWidth(), mClearAllButton.getMeasuredWidth());
++        int height = Math.max(mScreenshotButton.getMeasuredHeight(),
++                mClearAllButton.getMeasuredHeight());
++        if (width <= 0 || height <= 0) {
++            return;
++        }
++
++        ViewGroup.LayoutParams screenshotParams = mScreenshotButton.getLayoutParams();
++        ViewGroup.LayoutParams clearAllParams = mClearAllButton.getLayoutParams();
++        boolean shouldRelayout = false;
++        if (screenshotParams.width != width || screenshotParams.height != height) {
++            screenshotParams.width = width;
++            screenshotParams.height = height;
++            mScreenshotButton.setLayoutParams(screenshotParams);
++            shouldRelayout = true;
++        }
++        if (clearAllParams.width != width || clearAllParams.height != height) {
++            clearAllParams.width = width;
++            clearAllParams.height = height;
++            mClearAllButton.setLayoutParams(clearAllParams);
++            shouldRelayout = true;
++        }
++        if (shouldRelayout) {
++            mActionButtons.requestLayout();
++        }
+     }
+ }
+diff --git a/quickstep/src/com/android/quickstep/views/RecentsDismissUtils.kt b/quickstep/src/com/android/quickstep/views/RecentsDismissUtils.kt
+index e8b1cb5..daa2b08 100644
+--- a/quickstep/src/com/android/quickstep/views/RecentsDismissUtils.kt
++++ b/quickstep/src/com/android/quickstep/views/RecentsDismissUtils.kt
+@@ -28,22 +28,16 @@ import androidx.dynamicanimation.animation.SpringForce
+ import com.android.internal.jank.Cuj
+ import com.android.launcher3.PagedView
+ import com.android.launcher3.R
+-import com.android.launcher3.concurrent.annotations.LightweightBackground
+-import com.android.launcher3.concurrent.annotations.LightweightBackgroundPriority
+ import com.android.launcher3.logging.StatsLogManager.LauncherEvent
+ import com.android.launcher3.util.DynamicResource
+ import com.android.launcher3.util.MSDLPlayerWrapper
+ import com.android.launcher3.util.OverviewReleaseFlags.enableGridOnlyOverview
+ import com.android.launcher3.views.ActivityContext
+-import com.android.quickstep.SystemUiProxy
+ import com.android.quickstep.util.TaskGridNavHelper
+ import com.android.quickstep.views.RecentsView.RECENTS_SCALE_PROPERTY
+ import com.android.quickstep.views.TaskView.Companion.GRID_END_TRANSLATION_X
+-import com.android.systemui.shared.system.ActivityManagerWrapper
+ import com.android.systemui.shared.system.InteractionJankMonitorWrapper
+-import com.android.wm.shell.shared.desktopmode.DesktopModeTransitionSource
+ import com.google.android.msdl.data.model.MSDLToken
+-import com.google.common.util.concurrent.ListeningExecutorService
+ import dagger.assisted.Assisted
+ import dagger.assisted.AssistedFactory
+ import dagger.assisted.AssistedInject
+@@ -60,10 +54,6 @@ class RecentsDismissUtils
+ @AssistedInject
+ constructor(
+     @Assisted private val recentsView: RecentsView<*, *>,
+-    private val systemUiProxy: SystemUiProxy,
+-    @LightweightBackground(LightweightBackgroundPriority.UI)
+-    private val uiHelperExecutor: ListeningExecutorService,
+-    private val activityManagerWrapper: ActivityManagerWrapper,
+     private val msdlPlayerWrapper: MSDLPlayerWrapper,
+ ) {
+     @AssistedFactory
+@@ -322,28 +312,48 @@ constructor(
+ 
+     /** Dismisses all */
+     fun dismissAllTasks() {
+-        val allDismissSprings =
++        if (recentsView.runDismissAllTasksFastPath()) {
++            return
++        }
++        val dismissibleTaskViews =
+             recentsView.mUtils.taskViews
+-                .reversed()
+-                .filter { taskView -> recentsView.isTaskViewVisible(taskView) }
++                .filter { taskView -> !recentsView.isTaskViewLocked(taskView) }
++                .toList()
++        if (dismissibleTaskViews.isEmpty()) {
++            recentsView.startHome()
++            recentsView.onDismissAnimationEnds()
++            InteractionJankMonitorWrapper.end(Cuj.CUJ_LAUNCHER_OVERVIEW_CLEAR_ALL)
++            return
++        }
++        val allDismissSprings =
++            dismissibleTaskViews
++                .asReversed()
+                 .mapNotNull { createDismissedTaskViewSpringAnimation(it) }
+         SpringSet(SpringAnimation(FloatValueHolder()).setSpring(SpringForce(1f)))
+             .playTogether(allDismissSprings)
+             .addEndListener {
+                 with(recentsView) {
+-                    // Remove desktops first, since desks can be empty (so they have no recent
+-                    // tasks), and closing all tasks on a desk doesn't always necessarily mean that
+-                    // the desk will be removed. So, there are no guarantees that the below call to
+-                    // `ActivityManagerWrapper::removeAllRecentTasks()` will be enough.
+-                    systemUiProxy.removeAllDesks(DesktopModeTransitionSource.RECENTS)
+-
+-                    // Remove all the task views now
+                     finishRecentsAnimation(/* toHome */ true, /* shouldPip */ false) {
+-                        uiHelperExecutor.execute { activityManagerWrapper.removeAllRecentTasks() }
+-                        removeAllTaskViews()
+-                        if (!mUtils.isInDesktopFirstMode()) {
+-                            startHome()
++                        if (dismissibleTaskViews.isNotEmpty()) {
++                            mAnyTaskHasBeenDismissed = true
++                        }
++                        dismissibleTaskViews.forEach { taskView ->
++                            taskView.groupTask?.let { removeGroupTaskInternal(it) }
++                            removeViewInLayout(taskView)
++                            mTopRowIdSet.remove(taskView.taskViewId)
++                        }
++                        if (!hasTaskViews()) {
++                            removeView(addDeskButton)
++                            removeView(clearAllButton)
++                        } else {
++                            updateTaskSize()
++                            mUtils.updateChildTaskOrientations()
++                            updateScrollSynchronously()
++                            dispatchScrollChanged()
++                            updateActionsViewFocusedScroll()
+                         }
++                        updateCurrentTaskActionsVisibility()
++                        startHome()
+                         onDismissAnimationEnds()
+                         InteractionJankMonitorWrapper.end(Cuj.CUJ_LAUNCHER_OVERVIEW_CLEAR_ALL)
+                     }
+diff --git a/quickstep/src/com/android/quickstep/views/RecentsView.java b/quickstep/src/com/android/quickstep/views/RecentsView.java
+index 111c99b..94c2017 100644
+--- a/quickstep/src/com/android/quickstep/views/RecentsView.java
++++ b/quickstep/src/com/android/quickstep/views/RecentsView.java
+@@ -151,6 +151,7 @@ import com.android.launcher3.AbstractFloatingView;
+ import com.android.launcher3.BuildConfig;
+ import com.android.launcher3.DeviceProfile;
+ import com.android.launcher3.Insettable;
++import com.android.launcher3.LauncherPrefs;
+ import com.android.launcher3.MotionEventsUtils;
+ import com.android.launcher3.PagedView;
+ import com.android.launcher3.R;
+@@ -569,6 +570,7 @@ public abstract class RecentsView<
+     private final float mFastFlingVelocity;
+     private final int mScrollHapticMinGapMillis;
+     private final RecentsModel mModel;
++    private final LauncherPrefs mLauncherPrefs;
+     private final int mSplitPlaceholderSize;
+     private final int mSplitPlaceholderInset;
+     private final ClearAllButton mClearAllButton;
+@@ -942,6 +944,7 @@ public abstract class RecentsView<
+         mFastFlingVelocity = getResources()
+                 .getDimensionPixelSize(R.dimen.recents_fast_fling_velocity);
+         mModel = RecentsModel.INSTANCE.get(context);
++        mLauncherPrefs = LauncherPrefs.get(context);
+ 
+         mClearAllButton = (ClearAllButton) LayoutInflater.from(context)
+                 .inflate(R.layout.overview_clear_all_button, this, false);
+@@ -2121,6 +2124,7 @@ public abstract class RecentsView<
+             traceEnd(Trace.TRACE_TAG_APP);
+             traceBegin(Trace.TRACE_TAG_APP, "RecentsView.applyLoadPlan.forLoop.addTaskView");
+             addView(taskView);
++            taskView.updateLockStateUi();
+             traceEnd(Trace.TRACE_TAG_APP);
+ 
+             // enables instance filtering if the feature flag for it is on
+@@ -4501,28 +4505,62 @@ public abstract class RecentsView<
+         if (FeatureFlags.IS_STUDIO_BUILD && mPendingAnimation != null) {
+             throw new IllegalStateException("Another pending animation is still running");
+         }
++        if (canDismissAllTasksFastPath()) {
++            return createFastPathDismissAnimation(duration);
++        }
++        List<TaskView> dismissibleTaskViews = new ArrayList<>();
++        for (TaskView taskView : getTaskViews()) {
++            if (!isTaskViewLocked(taskView)) {
++                dismissibleTaskViews.add(taskView);
++            }
++        }
++        if (dismissibleTaskViews.isEmpty()) {
++            PendingAnimation noOpAnimation = new PendingAnimation(duration);
++            mPendingAnimation = noOpAnimation;
++            noOpAnimation.addEndListener(isSuccess -> {
++                if (isSuccess) {
++                    startHome();
++                    onDismissAnimationEnds();
++                    InteractionJankMonitorWrapper.end(Cuj.CUJ_LAUNCHER_OVERVIEW_CLEAR_ALL);
++                }
++                mPendingAnimation = null;
++            });
++            return noOpAnimation;
++        }
+         PendingAnimation anim = new PendingAnimation(duration);
+ 
+-        for (TaskView taskView : getTaskViews()) {
++        for (TaskView taskView : dismissibleTaskViews) {
+             addDismissedTaskAnimations(taskView, duration, anim);
+         }
+ 
+         mPendingAnimation = anim;
+         mPendingAnimation.addEndListener(isSuccess -> {
+             if (isSuccess) {
+-                // Remove desktops first, since desks can be empty (so they have no recent tasks),
+-                // and closing all tasks on a desk doesn't always necessarily mean that the desk
+-                // will be removed. So, there are no guarantees that the below call to
+-                // `ActivityManagerWrapper::removeAllRecentTasks()` will be enough.
+-                SystemUiProxy.INSTANCE.get(getContext()).removeAllDesks(
+-                        DesktopModeTransitionSource.RECENTS);
+-
+-                // Remove all the task views now
+                 finishRecentsAnimation(true /* toHome */, false /* shouldPip */, () -> {
+-                    UI_HELPER_EXECUTOR.getHandler().post(
+-                            ActivityManagerWrapper.getInstance()::removeAllRecentTasks);
+-                    removeAllTaskViews();
++                    if (!dismissibleTaskViews.isEmpty()) {
++                        mAnyTaskHasBeenDismissed = true;
++                    }
++                    for (TaskView taskView : dismissibleTaskViews) {
++                        GroupTask groupTask = taskView.getGroupTask();
++                        if (groupTask != null) {
++                            removeGroupTaskInternal(groupTask);
++                        }
++                        removeViewInLayout(taskView);
++                        mTopRowIdSet.remove(taskView.getTaskViewId());
++                    }
++                    if (!hasTaskViews()) {
++                        removeView(mAddDesktopButton);
++                        removeView(mClearAllButton);
++                    } else {
++                        updateTaskSize();
++                        mUtils.updateChildTaskOrientations();
++                        updateScrollSynchronously();
++                        dispatchScrollChanged();
++                        updateActionsViewFocusedScroll();
++                    }
++                    updateCurrentTaskActionsVisibility();
+                     startHome();
++                    onDismissAnimationEnds();
+                     InteractionJankMonitorWrapper.end(Cuj.CUJ_LAUNCHER_OVERVIEW_CLEAR_ALL);
+                 });
+             }
+@@ -4661,6 +4699,212 @@ public abstract class RecentsView<
+         mContainer.getStatsLogManager().logger().log(LAUNCHER_TASK_CLEAR_ALL);
+     }
+ 
++    public void dismissAllTasksFromActions() {
++        dismissAllTasks(this);
++    }
++
++    public boolean runDismissAllTasksFastPath() {
++        if (!canDismissAllTasksFastPath()) {
++            return false;
++        }
++        runDismissAnimation(createFastPathDismissAnimation(DISMISS_TASK_DURATION));
++        return true;
++    }
++
++    private boolean canDismissAllTasksFastPath() {
++        if (!hasTaskViews()) {
++            return false;
++        }
++        for (TaskView taskView : getTaskViews()) {
++            if (taskView instanceof DesktopTaskView || isTaskViewLocked(taskView)) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private PendingAnimation createFastPathDismissAnimation(long duration) {
++        PendingAnimation anim = new PendingAnimation(duration);
++        for (TaskView taskView : getTaskViews()) {
++            addDismissedTaskAnimations(taskView, duration, anim);
++        }
++
++        mPendingAnimation = anim;
++        mPendingAnimation.addEndListener(isSuccess -> {
++            if (isSuccess) {
++                finishRecentsAnimation(true /* toHome */, false /* shouldPip */, () -> {
++                    mAnyTaskHasBeenDismissed = true;
++                    UI_HELPER_EXECUTOR.execute(
++                            () -> ActivityManagerWrapper.getInstance().removeAllRecentTasks());
++                    removeAllTaskViews();
++                    updateCurrentTaskActionsVisibility();
++                    startHome();
++                    onDismissAnimationEnds();
++                    InteractionJankMonitorWrapper.end(Cuj.CUJ_LAUNCHER_OVERVIEW_CLEAR_ALL);
++                });
++            }
++            mPendingAnimation = null;
++        });
++        return anim;
++    }
++
++    private String getLockKey(@NonNull Task task) {
++        String packageName = task.key.getPackageName();
++        if (packageName == null) {
++            return "";
++        }
++        return task.key.userId + "|" + packageName;
++    }
++
++    private Set<String> getLockedRecentsApps() {
++        Set<String> lockedApps = mLauncherPrefs.get(LauncherPrefs.LOCKED_RECENTS_APPS);
++        return lockedApps == null ? Collections.emptySet() : lockedApps;
++    }
++
++    private void saveLockedRecentsApps(@NonNull Set<String> lockedApps) {
++        mLauncherPrefs.put(LauncherPrefs.LOCKED_RECENTS_APPS, lockedApps);
++    }
++
++    public boolean isTaskLocked(@NonNull Task task) {
++        String key = getLockKey(task);
++        if (key.isEmpty()) {
++            return false;
++        }
++        return getLockedRecentsApps().contains(key);
++    }
++
++    public boolean isTaskViewLocked(@NonNull TaskView taskView) {
++        for (TaskContainer taskContainer : taskView.getTaskContainers()) {
++            if (isTaskLocked(taskContainer.getTask())) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    public void lockTaskView(@Nullable TaskView taskView) {
++        if (taskView == null) {
++            return;
++        }
++        Set<String> lockedApps = new HashSet<>(getLockedRecentsApps());
++        for (TaskContainer taskContainer : taskView.getTaskContainers()) {
++            String key = getLockKey(taskContainer.getTask());
++            if (!key.isEmpty()) {
++                lockedApps.add(key);
++            }
++        }
++        saveLockedRecentsApps(lockedApps);
++        taskView.updateLockStateUi();
++    }
++
++    public void setTaskLocked(@NonNull Task task, boolean isLocked) {
++        String key = getLockKey(task);
++        if (key.isEmpty()) {
++            return;
++        }
++        Set<String> lockedApps = new HashSet<>(getLockedRecentsApps());
++        if (isLocked) {
++            lockedApps.add(key);
++        } else {
++            lockedApps.remove(key);
++        }
++        saveLockedRecentsApps(lockedApps);
++    }
++
++    private void setTaskViewLocked(@Nullable TaskView taskView, boolean isLocked) {
++        if (taskView == null) {
++            return;
++        }
++        Set<String> lockedApps = new HashSet<>(getLockedRecentsApps());
++        for (TaskContainer taskContainer : taskView.getTaskContainers()) {
++            String key = getLockKey(taskContainer.getTask());
++            if (key.isEmpty()) {
++                continue;
++            }
++            if (isLocked) {
++                lockedApps.add(key);
++            } else {
++                lockedApps.remove(key);
++            }
++        }
++        saveLockedRecentsApps(lockedApps);
++    }
++
++    public PendingAnimation createTaskLockToggleAnimation(
++            @NonNull TaskView taskView, long duration, Interpolator interpolator) {
++        if (FeatureFlags.IS_STUDIO_BUILD && mPendingAnimation != null) {
++            throw new IllegalStateException("Another pending animation is still running");
++        }
++        Rect thumbnailBounds = new Rect();
++        taskView.getThumbnailBounds(thumbnailBounds, true /* relativeToDragLayer */);
++        int secondaryLayerDimension =
++                getPagedOrientationHandler().getSecondaryDimension(mContainer.getDragLayer());
++        int verticalFactor = getPagedOrientationHandler().getTaskDragDisplacementFactor(mIsRtl);
++        float endDisplacement =
++                getPagedOrientationHandler().getTaskDismissLength(
++                        secondaryLayerDimension, thumbnailBounds)
++                        * verticalFactor;
++        FloatProperty<TaskView> secondaryViewTranslate =
++                taskView.getSecondaryDismissTranslationProperty();
++        boolean shouldLockTask = !isTaskViewLocked(taskView);
++
++        mPendingAnimation = new PendingAnimation(duration);
++        mPendingAnimation.setFloat(taskView, secondaryViewTranslate, endDisplacement, interpolator);
++        if (taskView.isRunningTask()) {
++            mPendingAnimation.addOnFrameCallback(() -> {
++                if (!mEnableDrawingLiveTile) {
++                    return;
++                }
++                runActionOnRemoteHandles(
++                        remoteTargetHandle ->
++                                remoteTargetHandle.getTaskViewSimulator()
++                                        .taskSecondaryTranslation.value =
++                                        secondaryViewTranslate.get(taskView));
++                redrawLiveTile();
++            });
++        }
++        mPendingAnimation.addEndListener(isSuccess -> {
++            if (isSuccess) {
++                ObjectAnimator reboundAnim =
++                        ObjectAnimator.ofFloat(taskView, secondaryViewTranslate, 0f);
++                reboundAnim.setDuration(280);
++                reboundAnim.setInterpolator(EMPHASIZED_DECELERATE);
++                if (taskView.isRunningTask()) {
++                    reboundAnim.addUpdateListener(animation -> {
++                        if (!mEnableDrawingLiveTile) {
++                            return;
++                        }
++                        runActionOnRemoteHandles(
++                                remoteTargetHandle ->
++                                        remoteTargetHandle.getTaskViewSimulator()
++                                                .taskSecondaryTranslation.value =
++                                                secondaryViewTranslate.get(taskView));
++                        redrawLiveTile();
++                    });
++                }
++                reboundAnim.addListener(new AnimatorListenerAdapter() {
++                    @Override
++                    public void onAnimationEnd(Animator animation) {
++                        setTaskViewLocked(taskView, shouldLockTask);
++                        taskView.updateLockStateUi();
++                    }
++                });
++                reboundAnim.start();
++            } else {
++                secondaryViewTranslate.set(taskView, 0f);
++                if (taskView.isRunningTask() && mEnableDrawingLiveTile) {
++                    runActionOnRemoteHandles(
++                            remoteTargetHandle ->
++                                    remoteTargetHandle.getTaskViewSimulator()
++                                            .taskSecondaryTranslation.value = 0f);
++                    redrawLiveTile();
++                }
++            }
++            mPendingAnimation = null;
++        });
++        return mPendingAnimation;
++    }
++
+     private void dismissCurrentTask() {
+         TaskView taskView = getNextPageTaskView();
+         if (taskView != null) {
+diff --git a/quickstep/src/com/android/quickstep/views/TaskView.kt b/quickstep/src/com/android/quickstep/views/TaskView.kt
+index effda1c..f59ccfd 100644
+--- a/quickstep/src/com/android/quickstep/views/TaskView.kt
++++ b/quickstep/src/com/android/quickstep/views/TaskView.kt
+@@ -46,6 +46,7 @@ import androidx.annotation.VisibleForTesting
+ import androidx.core.animation.doOnCancel
+ import androidx.core.view.isGone
+ import androidx.core.view.isInvisible
++import androidx.core.view.isVisible
+ import androidx.core.view.updateLayoutParams
+ import com.android.app.animation.Interpolators
+ import com.android.app.tracing.traceSection
+@@ -567,6 +568,7 @@ constructor(
+     private val coroutineScope: CoroutineScope = RecentsDependencies.get(context)
+     private val coroutineJobs = mutableListOf<Job>()
+     private var taskDismissButton: FrameLayout? = null
++    private var lockStateView: View? = null
+     private var taskDismissButtonAnimator: ObjectAnimator? = null
+     private var taskDismissButtonEnabled: Boolean = false
+ 
+@@ -873,6 +875,7 @@ constructor(
+         super.onFinishInflate()
+         inflateViewStubs()
+         taskDismissButton = findViewById(R.id.task_dismiss_button)
++        lockStateView = findViewById(R.id.lock_state)
+     }
+ 
+     fun onIntersectScreenEdgeChanged(intersectsScreenEdge: Boolean) {
+@@ -912,6 +915,7 @@ constructor(
+     override fun onAttachedToWindow() =
+         traceSection("TaskView.onAttachedToWindow") {
+             super.onAttachedToWindow()
++            updateLockStateUi()
+             if (enableRefactorTaskThumbnail()) {
+                 // TaskView binds the ViewModel during onBind, and unbinds it in onRecycle. So it
+                 // should start listening here.
+@@ -1161,8 +1165,13 @@ constructor(
+                 }
+             }
+             setOrientationState(orientedState)
++            updateLockStateUi()
+         }
+ 
++    fun updateLockStateUi() {
++        lockStateView?.isVisible = recentsView?.isTaskViewLocked(this) == true
++    }
++
+     private fun applyThumbnailSplashAlpha() {
+         val alpha = getSplashAlphaProgress()
+         taskContainers.forEach { it.updateThumbnailSplashProgress(alpha) }
+diff --git a/src/com/android/launcher3/LauncherPrefs.kt b/src/com/android/launcher3/LauncherPrefs.kt
+index 0295ae7..699a747 100644
+--- a/src/com/android/launcher3/LauncherPrefs.kt
++++ b/src/com/android/launcher3/LauncherPrefs.kt
+@@ -255,6 +255,9 @@ constructor(@ApplicationContext private val encryptedContext: Context) {
+         @JvmField val SHOW_DRAWER_LABELS = backedUpItem("pref_drawer_show_labels", true)
+         @JvmField val SLEEP_GESTURE = backedUpItem("pref_sleep_gesture", false)
+         @JvmField
++        val LOCKED_RECENTS_APPS =
++            nonRestorableItem("pref_locked_recents_apps", emptySet<String>())
++        @JvmField
+         val PROMISE_ICON_IDS = nonRestorableItem(InstallSessionHelper.PROMISE_ICON_IDS, "")
+         @JvmField val WORK_EDU_STEP = backedUpItem("showed_work_profile_edu", 0)
+         @JvmField
+-- 
+2.43.0
+

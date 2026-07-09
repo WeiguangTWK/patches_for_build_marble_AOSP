@@ -1,0 +1,29 @@
+From 141377ae17aa576f3492284a256cc92a6492b5f1 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 14:11:49 +0800
+Subject: [PATCH] Neko LineageOS: Disable framerate limit by default
+
+Highly optional
+
+Change-Id: Ib349c445ad81ac7c1841a53ee1eb0411d436193d
+---
+ device.mk | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/device.mk b/device.mk
+index 386af40..efd687c 100644
+--- a/device.mk
++++ b/device.mk
+@@ -56,6 +56,9 @@ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/properties/build_GL.prop:$(TARGET_COPY_OUT_ODM)/etc/build_GL.prop \
+     $(LOCAL_PATH)/properties/build_IN.prop:$(TARGET_COPY_OUT_ODM)/etc/build_IN.prop
+ 
++PRODUCT_SYSTEM_PROPERTIES += \
++    debug.graphics.game_default_frame_rate.disabled=true
++
+ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/properties/build_CN.prop:$(TARGET_COPY_OUT_RECOVERY)/root/vendor/odm/etc/build_CN.prop \
+     $(LOCAL_PATH)/properties/build_GL.prop:$(TARGET_COPY_OUT_RECOVERY)/root/vendor/odm/etc/build_GL.prop \
+-- 
+2.43.0
+

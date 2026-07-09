@@ -1,0 +1,28 @@
+From 8c237410e3430a246219af46b25c4a167b0cf225 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 13:59:18 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Prevent lineage props
+ getting detected
+
+Change-Id: I470fe900d16246422d942c6faf7b6f1545eb99c2
+---
+ common/private/property_contexts | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/common/private/property_contexts b/common/private/property_contexts
+index 50a7006..6a65717 100644
+--- a/common/private/property_contexts
++++ b/common/private/property_contexts
+@@ -17,7 +17,8 @@ ro.lineage.version                     u:object_r:custom_version_prop:s0
+ ro.lineage.display.version             u:object_r:custom_version_prop:s0
+ ro.lineage.build.version               u:object_r:custom_version_prop:s0
+ ro.lineage.releasetype                 u:object_r:custom_version_prop:s0
+-ro.lineage.device                      u:object_r:custom_version_prop:s0
++ro.lineage.device                      u:object_r:custom_version_prop:s0 exact string
++sys.lineage_settings_system_version    u:object_r:custom_version_prop:s0 exact string
+ 
+ # Force multi-window behavior
+ ro.config.force_multi_window           u:object_r:exported_config_prop:s0 exact bool
+-- 
+2.43.0
+

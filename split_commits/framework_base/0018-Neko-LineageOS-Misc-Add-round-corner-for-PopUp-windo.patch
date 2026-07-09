@@ -1,0 +1,71 @@
+From b73f0a42704569257cdcd5f897ee99bb01d68a48 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 09:50:22 +0800
+Subject: [PATCH] Neko LineageOS: [Misc] Add round corner for PopUp window
+
+Change-Id: I022e55fe07e9565d782027c7984adbeaeb635cfd
+---
+ .../com/android/server/wm/DisplayContent.java | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/java/com/android/server/wm/DisplayContent.java b/services/core/java/com/android/server/wm/DisplayContent.java
+index d4fc89f73..7291597cc 100644
+--- a/services/core/java/com/android/server/wm/DisplayContent.java
++++ b/services/core/java/com/android/server/wm/DisplayContent.java
+@@ -732,6 +732,9 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+     private final InsetsStateController mInsetsStateController;
+     private final InsetsPolicy mInsetsPolicy;
+ 
++    /** Corner radius that windows should have in order to match the display. */
++    private final float mWindowCornerRadius;
++
+     final SparseArray<ShellRoot> mShellRoots = new SparseArray<>();
+     RemoteInsetsControlTarget mRemoteInsetsControlTarget = null;
+     private final IBinder.DeathRecipient mRemoteInsetsDeath =
+@@ -1232,6 +1235,7 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+         if (mWmService.mSystemReady) {
+             mDisplayPolicy.systemReady();
+         }
++        mWindowCornerRadius = mDisplayPolicy.getWindowCornerRadius();
+         mPinnedTaskController = new PinnedTaskController(mWmService, this);
+ 
+         // Set up the policy and build the display area hierarchy.
+@@ -1450,6 +1454,10 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+         return mDisplayId;
+     }
+ 
++    float getWindowCornerRadius() {
++        return mWindowCornerRadius;
++    }
++
+     WindowToken getWindowToken(IBinder binder) {
+         return mTokenMap.get(binder);
+     }
+@@ -4169,7 +4177,6 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+         getInputMonitor().setFocusedAppLw(newFocus);
+         return true;
+     }
+-        PopUpWindowController.getInstance().onAppFocusChanged(mFocusedApp, newTask);
+ 
+     /** Update the top activity and the uids of non-finishing activity */
+     void onRunningActivityChanged() {
+@@ -5948,6 +5955,16 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+         return mA11yOverlayLayer;
+     }
+ 
++    SurfaceControl[] findRoundedCornerOverlays() {
++        List<SurfaceControl> roundedCornerOverlays = new ArrayList<>();
++        for (WindowToken token : mTokenMap.values()) {
++            if (token.mRoundedCornerOverlay && token.isVisible()) {
++                roundedCornerOverlays.add(token.mSurfaceControl);
++            }
++        }
++        return roundedCornerOverlays.toArray(new SurfaceControl[0]);
++    }
++
+     /**
+      * Updates the display's system gesture exclusion.
+      *
+-- 
+2.43.0
+

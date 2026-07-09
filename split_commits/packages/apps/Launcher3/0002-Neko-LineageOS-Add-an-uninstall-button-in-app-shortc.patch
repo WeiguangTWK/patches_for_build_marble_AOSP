@@ -1,0 +1,140 @@
+From 6e5771f603a5f61407281d31df471e8b80a72348 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 13:16:38 +0800
+Subject: [PATCH] Neko LineageOS: Add an uninstall button in app shortcut list
+
+Change-Id: I1f63f402ade71fc05a854caa8fb3f0a3ff495c0f
+---
+ .../uioverrides/QuickstepLauncher.java        |  2 +
+ src/com/android/launcher3/Launcher.java       |  9 ++--
+ .../launcher3/popup/SystemShortcut.java       | 50 +++++++++++++++++++
+ 3 files changed, 57 insertions(+), 4 deletions(-)
+
+diff --git a/quickstep/src/com/android/launcher3/uioverrides/QuickstepLauncher.java b/quickstep/src/com/android/launcher3/uioverrides/QuickstepLauncher.java
+index 3b96a74..bc5e2f3 100644
+--- a/quickstep/src/com/android/launcher3/uioverrides/QuickstepLauncher.java
++++ b/quickstep/src/com/android/launcher3/uioverrides/QuickstepLauncher.java
+@@ -60,6 +60,7 @@ import static com.android.launcher3.popup.SystemShortcut.DONT_SUGGEST_APP;
+ import static com.android.launcher3.popup.SystemShortcut.INSTALL;
+ import static com.android.launcher3.popup.SystemShortcut.PRIVATE_PROFILE_INSTALL;
+ import static com.android.launcher3.popup.SystemShortcut.REMOVE;
++import static com.android.launcher3.popup.SystemShortcut.UNINSTALL;
+ import static com.android.launcher3.popup.SystemShortcut.UNINSTALL_APP;
+ import static com.android.launcher3.popup.SystemShortcut.WIDGETS;
+ import static com.android.launcher3.taskbar.LauncherTaskbarUIController.ALL_APPS_PAGE_PROGRESS_INDEX;
+@@ -555,6 +556,7 @@ public class QuickstepLauncher extends Launcher implements RecentsViewContainer,
+         shortcuts.addAll(getSplitShortcuts());
+         shortcuts.add(WIDGETS);
+         shortcuts.add(INSTALL);
++        shortcuts.add(UNINSTALL);
+         // TODO(b/444744861): Update private space apps to have its own container.
+         boolean isPinnable = itemInfo instanceof ItemInfoWithIcon info
+                 && (info.runtimeStatusFlags & FLAG_NOT_PINNABLE) == 0;
+diff --git a/src/com/android/launcher3/Launcher.java b/src/com/android/launcher3/Launcher.java
+index 66b4d70..7d3c8b9 100644
+--- a/src/com/android/launcher3/Launcher.java
++++ b/src/com/android/launcher3/Launcher.java
+@@ -99,6 +99,7 @@ import static com.android.launcher3.popup.SystemShortcut.ADD_TO_HOME_SCREEN;
+ import static com.android.launcher3.popup.SystemShortcut.APP_INFO;
+ import static com.android.launcher3.popup.SystemShortcut.INSTALL;
+ import static com.android.launcher3.popup.SystemShortcut.REMOVE;
++import static com.android.launcher3.popup.SystemShortcut.UNINSTALL;
+ import static com.android.launcher3.popup.SystemShortcut.WIDGETS;
+ import static com.android.launcher3.states.RotationHelper.REQUEST_LOCK;
+ import static com.android.launcher3.states.RotationHelper.REQUEST_NONE;
+@@ -2965,18 +2966,18 @@ public class Launcher extends StatefulActivity<LauncherState>
+     public Stream<SystemShortcut.Factory> getSupportedShortcuts(ItemInfo itemInfo) {
+         int container = itemInfo.container;
+         if (container == CONTAINER_DESKTOP || container == CONTAINER_HOTSEAT) {
+-            return Stream.of(APP_INFO, WIDGETS, INSTALL, REMOVE);
++            return Stream.of(APP_INFO, WIDGETS, INSTALL, UNINSTALL, REMOVE);
+         } else if (container == CONTAINER_ALL_APPS || container == CONTAINER_ALL_APPS_PREDICTION) {
+             // TODO(b/444744861): Update private space apps to have its own container.
+             boolean isPinnable = itemInfo instanceof ItemInfoWithIcon info
+                     && (info.runtimeStatusFlags & FLAG_NOT_PINNABLE) == 0;
+             if (isPinnable) {
+-                return Stream.of(APP_INFO, WIDGETS, INSTALL, ADD_TO_HOME_SCREEN);
++                return Stream.of(APP_INFO, WIDGETS, INSTALL, UNINSTALL, ADD_TO_HOME_SCREEN);
+             } else {
+-                return Stream.of(APP_INFO, WIDGETS, INSTALL);
++                return Stream.of(APP_INFO, WIDGETS, INSTALL, UNINSTALL);
+             }
+         }
+-        return Stream.of(APP_INFO, WIDGETS, INSTALL);
++        return Stream.of(APP_INFO, WIDGETS, INSTALL, UNINSTALL);
+     }
+ 
+     /**
+diff --git a/src/com/android/launcher3/popup/SystemShortcut.java b/src/com/android/launcher3/popup/SystemShortcut.java
+index 5eab6ba..acc5c59 100644
+--- a/src/com/android/launcher3/popup/SystemShortcut.java
++++ b/src/com/android/launcher3/popup/SystemShortcut.java
+@@ -16,8 +16,10 @@ import android.content.Context;
+ import android.content.Intent;
+ import android.content.pm.ShortcutInfo;
+ import android.graphics.Rect;
++import android.os.Bundle;
+ import android.os.Process;
+ import android.os.UserHandle;
++import android.os.UserManager;
+ import android.util.Log;
+ import android.view.View;
+ import android.view.accessibility.AccessibilityNodeInfo;
+@@ -422,6 +424,54 @@ public abstract class SystemShortcut<T extends ActivityContext> extends ItemInfo
+                 return new DontSuggestApp<>(activity, itemInfo, originalView);
+             };
+ 
++    public static final Factory<ActivityContext> UNINSTALL =
++            (activityContext, itemInfo, originalView) -> {
++                if (originalView == null) {
++                    return null;
++                }
++                UserManager userManager =
++                        originalView.getContext().getSystemService(UserManager.class);
++                if (userManager != null) {
++                    Bundle restrictions = userManager.getUserRestrictions(itemInfo.user);
++                    boolean uninstallDisabled =
++                            restrictions.getBoolean(UserManager.DISALLOW_APPS_CONTROL, false)
++                                    || restrictions.getBoolean(
++                                    UserManager.DISALLOW_UNINSTALL_APPS, false);
++                    if (uninstallDisabled) {
++                        return null;
++                    }
++                }
++                if (Flags.enablePrivateSpace() && UserCache.INSTANCE.get(originalView.getContext())
++                        .getUserInfo(itemInfo.user).isPrivate()) {
++                    // Private Space apps have a dedicated uninstall shortcut.
++                    return null;
++                }
++                ComponentName cn = SecondaryDropTarget.getUninstallTarget(
++                        originalView.getContext(), itemInfo);
++                if (cn == null) {
++                    return null;
++                }
++                return new Uninstall<>(activityContext, itemInfo, originalView, cn);
++            };
++
++    public static class Uninstall<T extends ActivityContext> extends SystemShortcut<T> {
++        @NonNull
++        private final ComponentName mComponentName;
++
++        Uninstall(T target, ItemInfo itemInfo, @NonNull View originalView,
++                @NonNull ComponentName cn) {
++            super(R.drawable.ic_uninstall_no_shadow,
++                    R.string.uninstall_drop_target_label, target, itemInfo, originalView);
++            mComponentName = cn;
++        }
++
++        @Override
++        public void onClick(View view) {
++            dismissTaskMenuView();
++            SecondaryDropTarget.performUninstall(view.getContext(), mComponentName, mItemInfo);
++        }
++    }
++
+     private static class DontSuggestApp<T extends ActivityContext> extends SystemShortcut<T> {
+         DontSuggestApp(T target, ItemInfo itemInfo, View originalView) {
+             super(R.drawable.ic_block_no_shadow, R.string.dismiss_prediction_label, target,
+-- 
+2.43.0
+

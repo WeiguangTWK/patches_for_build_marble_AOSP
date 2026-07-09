@@ -1,0 +1,419 @@
+From 7bd71f10904a7dc195e710c5e43eec12e5b1b23e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 6 Jul 2026 09:05:29 +0800
+Subject: [PATCH] Neko LineageOS: Add anti-burn for statusbar & navigation bar
+
+To enable this feature, you also need to enable config_enableNavHandleScreenOnBurnInProtection & config_enableStatusBarScreenOnBurnInProtection
+
+Change-Id: I9496f89262cebc68577496c13a422e29c1d1ee7e
+---
+ packages/SystemUI/res/values/config.xml       |  12 ++
+ packages/SystemUI/res/values/dimens.xml       |  12 ++
+ .../navigationbar/views/NavigationBar.java    | 110 ++++++++++++++++++
+ .../fragment/CollapsedStatusBarFragment.java  | 106 ++++++++++++++++-
+ 4 files changed, 238 insertions(+), 2 deletions(-)
+
+diff --git a/packages/SystemUI/res/values/config.xml b/packages/SystemUI/res/values/config.xml
+index 81238bf13..01b4b91f3 100644
+--- a/packages/SystemUI/res/values/config.xml
++++ b/packages/SystemUI/res/values/config.xml
+@@ -50,6 +50,18 @@
+     <!-- Whether or not long-pressing on keyguard will display to customize lockscreen -->
+     <bool name="long_press_keyguard_customize_lockscreen_enabled">false</bool>
+ 
++    <!-- Whether to apply burn-in protection to the ordinary screen-on status bar. -->
++    <bool name="config_enableStatusBarScreenOnBurnInProtection">false</bool>
++
++    <!-- Whether to apply burn-in protection to the ordinary screen-on navigation handle. -->
++    <bool name="config_enableNavHandleScreenOnBurnInProtection">false</bool>
++
++    <!-- Delay before screen-on burn-in protection starts moving persistent UI after activity. -->
++    <integer name="config_screenOnBurnInProtectionStartDelayMillis">20000</integer>
++
++    <!-- Update interval for screen-on burn-in protection. -->
++    <integer name="config_screenOnBurnInProtectionUpdateIntervalMillis">60000</integer>
++
+     <bool name="config_dead_zone_flash">false</bool>
+ 
+     <!-- Whether to enable dimming navigation buttons when wallpaper is not visible, should be
+diff --git a/packages/SystemUI/res/values/dimens.xml b/packages/SystemUI/res/values/dimens.xml
+index 28600f5a6..37042d619 100644
+--- a/packages/SystemUI/res/values/dimens.xml
++++ b/packages/SystemUI/res/values/dimens.xml
+@@ -1180,6 +1180,18 @@
+     <dimen name="udfps_burn_in_offset_x">7px</dimen>
+     <dimen name="udfps_burn_in_offset_y">20px</dimen>
+ 
++    <!-- Total horizontal range used for screen-on status bar burn-in protection. -->
++    <dimen name="status_bar_screen_on_burn_in_offset_x">8dp</dimen>
++
++    <!-- Total vertical range used for screen-on status bar burn-in protection. -->
++    <dimen name="status_bar_screen_on_burn_in_offset_y">4dp</dimen>
++
++    <!-- Total horizontal range used for screen-on navigation handle burn-in protection. -->
++    <dimen name="navigation_handle_screen_on_burn_in_offset_x">6dp</dimen>
++
++    <!-- Total vertical range used for screen-on navigation handle burn-in protection. -->
++    <dimen name="navigation_handle_screen_on_burn_in_offset_y">2dp</dimen>
++
+     <!-- The absolute side margins of quick settings -->
+     <dimen name="quick_settings_bottom_margin_media">8dp</dimen>
+     <dimen name="nav_content_padding">0dp</dimen>
+diff --git a/packages/SystemUI/src/com/android/systemui/navigationbar/views/NavigationBar.java b/packages/SystemUI/src/com/android/systemui/navigationbar/views/NavigationBar.java
+index 417a1d606..902932383 100644
+--- a/packages/SystemUI/src/com/android/systemui/navigationbar/views/NavigationBar.java
++++ b/packages/SystemUI/src/com/android/systemui/navigationbar/views/NavigationBar.java
+@@ -36,6 +36,7 @@ import static android.view.WindowManagerPolicyConstants.NAV_BAR_MODE_GESTURAL;
+ 
+ import static com.android.internal.config.sysui.SystemUiDeviceConfigFlags.HOME_BUTTON_LONG_PRESS_DURATION_MS;
+ import static com.android.systemui.LauncherProxyService.LauncherProxyListener;
++import static com.android.systemui.doze.util.BurnInHelperKt.getBurnInOffset;
+ import static com.android.systemui.navigationbar.NavBarHelper.transitionMode;
+ import static com.android.systemui.shared.recents.utilities.Utilities.isLargeScreen;
+ import static com.android.systemui.shared.rotation.RotationButtonController.DEBUG_ROTATION;
+@@ -263,6 +264,14 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+     private boolean mTransientShown;
+     private boolean mTransientShownFromGestureOnSystemBar;
+     private int mNavBarMode = NAV_BAR_MODE_3BUTTON;
++    private boolean mIsScreenOn = true;
++    private boolean mNavigationTouchActive;
++    private boolean mNavHandleScreenOnBurnInProtectionEnabled;
++    private int mNavHandleScreenOnBurnInOffsetX;
++    private int mNavHandleScreenOnBurnInOffsetY;
++    private int mScreenOnBurnInProtectionStartDelayMillis;
++    private int mScreenOnBurnInProtectionUpdateIntervalMillis;
++    private long mLastNavigationInteractionTimeMillis;
+     private LightBarController mLightBarController;
+     private final LightBarControllerStore mLightBarControllerStore;
+     private AutoHideController mAutoHideController;
+@@ -515,8 +524,11 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+     private final WakefulnessLifecycle.Observer mWakefulnessObserver =
+             new WakefulnessLifecycle.Observer() {
+                 private void notifyScreenStateChanged(boolean isScreenOn) {
++                    mIsScreenOn = isScreenOn;
++                    mLastNavigationInteractionTimeMillis = System.currentTimeMillis();
+                     notifyNavigationBarScreenOn();
+                     mView.onScreenStateChanged(isScreenOn);
++                    updateNavigationHandleBurnInProtection();
+                 }
+ 
+                 @Override
+@@ -691,6 +703,17 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+         mView.setEdgeBackGestureHandler(mEdgeBackGestureHandler);
+         mView.setDisplayTracker(mDisplayTracker);
+         mView.setRotationPolicyWrapper(rotationPolicyWrapper);
++        mNavHandleScreenOnBurnInProtectionEnabled = mContext.getResources().getBoolean(
++                R.bool.config_enableNavHandleScreenOnBurnInProtection);
++        mNavHandleScreenOnBurnInOffsetX = mContext.getResources().getDimensionPixelSize(
++                R.dimen.navigation_handle_screen_on_burn_in_offset_x);
++        mNavHandleScreenOnBurnInOffsetY = mContext.getResources().getDimensionPixelSize(
++                R.dimen.navigation_handle_screen_on_burn_in_offset_y);
++        mScreenOnBurnInProtectionStartDelayMillis = mContext.getResources().getInteger(
++                R.integer.config_screenOnBurnInProtectionStartDelayMillis);
++        mScreenOnBurnInProtectionUpdateIntervalMillis = mContext.getResources().getInteger(
++                R.integer.config_screenOnBurnInProtectionUpdateIntervalMillis);
++        mLastNavigationInteractionTimeMillis = System.currentTimeMillis();
+         mNavBarMode = mNavigationModeController.addListener(mModeChangedListener);
+     }
+ 
+@@ -834,6 +857,7 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+         mUserTracker.addCallback(mUserChangedCallback, mContext.getMainExecutor());
+         mWakefulnessLifecycle.addObserver(mWakefulnessObserver);
+         notifyNavigationBarScreenOn();
++        updateNavigationHandleBurnInProtection();
+ 
+         mLauncherProxyService.addCallback(mLauncherProxyListener);
+         updateSystemUiStateFlags();
+@@ -895,6 +919,7 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+         mHandler.removeCallbacks(mAutoDim);
+         mHandler.removeCallbacks(mOnVariableDurationHomeLongClick);
+         mHandler.removeCallbacks(mEnableLayoutTransitions);
++        cancelNavigationHandleBurnInProtection();
+         mNavBarHelper.removeNavTaskStateUpdater(mNavbarTaskbarStateUpdater);
+         mPipOptional.ifPresent(mView::removePipExclusionBoundsChangeListener);
+         mFrame = null;
+@@ -1477,6 +1502,20 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+     }
+ 
+     private boolean onNavigationTouch(View v, MotionEvent event) {
++        switch (event.getActionMasked()) {
++            case MotionEvent.ACTION_DOWN:
++                mNavigationTouchActive = true;
++                applyNavigationHandleBurnInOffsets(0, 0);
++                break;
++            case MotionEvent.ACTION_UP:
++            case MotionEvent.ACTION_CANCEL:
++                mNavigationTouchActive = false;
++                mLastNavigationInteractionTimeMillis = System.currentTimeMillis();
++                break;
++            default:
++                break;
++        }
++        updateNavigationHandleBurnInProtection();
+         if (mAutoHideController != null) {
+             mAutoHideController.checkUserAutoHide(event);
+         }
+@@ -2076,9 +2115,80 @@ public class NavigationBar extends ViewController<NavigationBarView> implements
+                 resetSecondaryHandle();
+             }
+             mView.setShouldShowSwipeUpUi(mLauncherProxyService.shouldShowSwipeUpUI());
++            mLastNavigationInteractionTimeMillis = System.currentTimeMillis();
++            updateNavigationHandleBurnInProtection();
+         }
+     };
+ 
++    private final Runnable mUpdateNavigationHandleBurnInProtection = new Runnable() {
++        @Override
++        public void run() {
++            updateNavigationHandleBurnInProtection();
++        }
++    };
++
++    private void scheduleNavigationHandleBurnInProtection(long delayMillis) {
++        if (!mNavHandleScreenOnBurnInProtectionEnabled) {
++            return;
++        }
++        mHandler.removeCallbacks(mUpdateNavigationHandleBurnInProtection);
++        mHandler.postDelayed(mUpdateNavigationHandleBurnInProtection, delayMillis);
++    }
++
++    private void cancelNavigationHandleBurnInProtection() {
++        mHandler.removeCallbacks(mUpdateNavigationHandleBurnInProtection);
++        applyNavigationHandleBurnInOffsets(0, 0);
++    }
++
++    private void updateNavigationHandleBurnInProtection() {
++        if (!mNavHandleScreenOnBurnInProtectionEnabled || mView == null) {
++            return;
++        }
++
++        if (!shouldApplyNavigationHandleBurnInProtection()) {
++            applyNavigationHandleBurnInOffsets(0, 0);
++            scheduleNavigationHandleBurnInProtection(mScreenOnBurnInProtectionStartDelayMillis);
++            return;
++        }
++
++        final long idleDuration = System.currentTimeMillis() - mLastNavigationInteractionTimeMillis;
++        if (idleDuration < mScreenOnBurnInProtectionStartDelayMillis) {
++            applyNavigationHandleBurnInOffsets(0, 0);
++            scheduleNavigationHandleBurnInProtection(
++                    mScreenOnBurnInProtectionStartDelayMillis - idleDuration);
++            return;
++        }
++
++        applyNavigationHandleBurnInOffsets(
++                getCurrentBurnInOffset(mNavHandleScreenOnBurnInOffsetX, true),
++                getCurrentBurnInOffset(mNavHandleScreenOnBurnInOffsetY, false));
++        scheduleNavigationHandleBurnInProtection(mScreenOnBurnInProtectionUpdateIntervalMillis);
++    }
++
++    private boolean shouldApplyNavigationHandleBurnInProtection() {
++        return mView.isAttachedToWindow()
++                && mIsScreenOn
++                && mNavigationBarWindowState == WINDOW_STATE_SHOWING
++                && isGesturalMode(mNavBarMode)
++                && !mNavigationTouchActive
++                && !mImeVisible
++                && mView.getVisibility() == View.VISIBLE;
++    }
++
++    private int getCurrentBurnInOffset(int amplitude, boolean xAxis) {
++        if (amplitude <= 0) {
++            return 0;
++        }
++        return getBurnInOffset(amplitude, xAxis) - (amplitude / 2);
++    }
++
++    private void applyNavigationHandleBurnInOffsets(int offsetX, int offsetY) {
++        if (mView == null) {
++            return;
++        }
++        mView.getHomeHandle().setTranslation(offsetX, offsetY, 0);
++    }
++
+     private final Gefingerpoken mTouchHandler = new Gefingerpoken() {
+         private boolean mDeadZoneConsuming;
+ 
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
+index 8649c8e81..46f9f809a 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/fragment/CollapsedStatusBarFragment.java
+@@ -15,6 +15,7 @@
+ package com.android.systemui.statusbar.phone.fragment;
+ 
+ import static com.android.systemui.statusbar.phone.fragment.StatusBarVisibilityModel.createHiddenModel;
++import static com.android.systemui.doze.util.BurnInHelperKt.getBurnInOffset;
+ 
+ import android.annotation.Nullable;
+ import android.annotation.SuppressLint;
+@@ -248,6 +249,18 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+     private DisposableHandle mNicBindingDisposable;
+ 
+     private boolean mAnimationsEnabled = true;
++    private boolean mStatusBarScreenOnBurnInProtectionEnabled;
++    private int mStatusBarScreenOnBurnInOffsetX;
++    private int mStatusBarScreenOnBurnInOffsetY;
++    private int mScreenOnBurnInProtectionStartDelayMillis;
++    private int mScreenOnBurnInProtectionUpdateIntervalMillis;
++    private float mSystemEventTranslationX;
++    private final Runnable mUpdateStatusBarBurnInProtection = new Runnable() {
++        @Override
++        public void run() {
++            updateStatusBarBurnInOffsets();
++        }
++    };
+ 
+     @Inject
+     public CollapsedStatusBarFragment(
+@@ -398,9 +411,20 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+             showEndSideContent(false);
+             showClock(false);
+         }
++        mStatusBarScreenOnBurnInProtectionEnabled = getResources().getBoolean(
++                R.bool.config_enableStatusBarScreenOnBurnInProtection);
++        mStatusBarScreenOnBurnInOffsetX = getResources().getDimensionPixelSize(
++                R.dimen.status_bar_screen_on_burn_in_offset_x);
++        mStatusBarScreenOnBurnInOffsetY = getResources().getDimensionPixelSize(
++                R.dimen.status_bar_screen_on_burn_in_offset_y);
++        mScreenOnBurnInProtectionStartDelayMillis = getResources().getInteger(
++                R.integer.config_screenOnBurnInProtectionStartDelayMillis);
++        mScreenOnBurnInProtectionUpdateIntervalMillis = getResources().getInteger(
++                R.integer.config_screenOnBurnInProtectionUpdateIntervalMillis);
+         initOperatorName();
+         initNotificationIconArea();
+         mSystemEventAnimator = getSystemEventAnimator();
++        applyStatusBarBurnInOffsets(0, 0);
+         mCarrierConfigTracker.addCallback(mCarrierConfigCallback);
+         mCarrierConfigTracker.addDefaultDataSubscriptionChangedListener(mDefaultDataListener);
+ 
+@@ -489,6 +513,7 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+         mStatusBarStateController.addCallback(this);
+         initOngoingCallChip();
+         mAnimationScheduler.addCallback(this);
++        scheduleStatusBarBurnInProtection(mScreenOnBurnInProtectionStartDelayMillis);
+ 
+         mSecureSettings.registerContentObserverForUserSync(
+                 Settings.Secure.STATUS_BAR_SHOW_VIBRATE_ICON,
+@@ -509,6 +534,7 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+             mOngoingCallController.removeCallback(mOngoingCallListener);
+         }
+         mAnimationScheduler.removeCallback(this);
++        cancelStatusBarBurnInProtection();
+         mSecureSettings.unregisterContentObserverSync(mVolumeSettingObserver);
+     }
+ 
+@@ -532,6 +558,7 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+             mNicBindingDisposable.dispose();
+             mNicBindingDisposable = null;
+         }
++        cancelStatusBarBurnInProtection();
+     }
+ 
+     /** Initializes views related to the notification icon area. */
+@@ -997,7 +1024,9 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+     }
+ 
+     @Override
+-    public void onStateChanged(int newState) { }
++    public void onStateChanged(int newState) {
++        updateStatusBarBurnInOffsets();
++    }
+ 
+     @Override
+     public void onDozingChanged(boolean isDozing) {
+@@ -1005,6 +1034,7 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+             return;
+         }
+         updateStatusBarVisibilities(/* animate= */ false);
++        updateStatusBarBurnInOffsets();
+     }
+ 
+     @Nullable
+@@ -1024,11 +1054,83 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
+             mEndSideAlphaController.setAlpha(alpha, SOURCE_SYSTEM_EVENT_ANIMATOR);
+             return Unit.INSTANCE;
+         }, (translationX) -> {
+-            mEndSideContent.setTranslationX(translationX);
++            mSystemEventTranslationX = translationX;
++            applyStatusBarBurnInOffsets(getCurrentStatusBarBurnInOffset(
++                    mStatusBarScreenOnBurnInOffsetX, true), getCurrentStatusBarBurnInOffset(
++                    mStatusBarScreenOnBurnInOffsetY, false));
+             return Unit.INSTANCE;
+         }, /*isAnimationRunning*/ false);
+     }
+ 
++    private void scheduleStatusBarBurnInProtection(long delayMillis) {
++        if (!mStatusBarScreenOnBurnInProtectionEnabled || mStatusBar == null) {
++            return;
++        }
++        mStatusBar.removeCallbacks(mUpdateStatusBarBurnInProtection);
++        mStatusBar.postDelayed(mUpdateStatusBarBurnInProtection, delayMillis);
++    }
++
++    private void cancelStatusBarBurnInProtection() {
++        if (mStatusBar == null) {
++            return;
++        }
++        mStatusBar.removeCallbacks(mUpdateStatusBarBurnInProtection);
++        applyStatusBarBurnInOffsets(0, 0);
++    }
++
++    private void updateStatusBarBurnInOffsets() {
++        if (!mStatusBarScreenOnBurnInProtectionEnabled || mStatusBar == null) {
++            return;
++        }
++        if (!shouldApplyStatusBarBurnInProtection()) {
++            applyStatusBarBurnInOffsets(0, 0);
++            scheduleStatusBarBurnInProtection(mScreenOnBurnInProtectionStartDelayMillis);
++            return;
++        }
++
++        applyStatusBarBurnInOffsets(
++                getCurrentStatusBarBurnInOffset(mStatusBarScreenOnBurnInOffsetX, true),
++                getCurrentStatusBarBurnInOffset(mStatusBarScreenOnBurnInOffsetY, false));
++        scheduleStatusBarBurnInProtection(mScreenOnBurnInProtectionUpdateIntervalMillis);
++    }
++
++    private boolean shouldApplyStatusBarBurnInProtection() {
++        return isResumed()
++                && mStatusBar.isAttachedToWindow()
++                && mStatusBar.getDisplay() != null
++                && mStatusBar.getDisplay().getState() == Display.STATE_ON
++                && !mKeyguardStateController.isShowing()
++                && !mStatusBarStateController.isDozing()
++                && mShadeExpansionStateManager.isClosed();
++    }
++
++    private int getCurrentBurnInOffset(int amplitude, boolean xAxis) {
++        if (amplitude <= 0) {
++            return 0;
++        }
++        return getBurnInOffset(amplitude, xAxis) - (amplitude / 2);
++    }
++
++    private int getCurrentStatusBarBurnInOffset(int amplitude, boolean xAxis) {
++        return mStatusBarScreenOnBurnInProtectionEnabled && shouldApplyStatusBarBurnInProtection()
++                ? getCurrentBurnInOffset(amplitude, xAxis) : 0;
++    }
++
++    private void applyStatusBarBurnInOffsets(int offsetX, int offsetY) {
++        if (mClockView != null) {
++            mClockView.setTranslationX(offsetX);
++            mClockView.setTranslationY(offsetY);
++        }
++        if (mNotificationIconAreaInner != null) {
++            mNotificationIconAreaInner.setTranslationX(offsetX);
++            mNotificationIconAreaInner.setTranslationY(offsetY);
++        }
++        if (mEndSideContent != null) {
++            mEndSideContent.setTranslationX(mSystemEventTranslationX + offsetX);
++            mEndSideContent.setTranslationY(offsetY);
++        }
++    }
++
+     private final ContentObserver mVolumeSettingObserver = new ContentObserver(null) {
+         @Override
+         public void onChange(boolean selfChange) {
+-- 
+2.43.0
+

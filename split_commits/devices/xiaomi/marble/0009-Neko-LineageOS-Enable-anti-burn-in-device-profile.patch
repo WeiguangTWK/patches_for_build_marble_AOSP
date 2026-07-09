@@ -1,0 +1,31 @@
+From 1b2adc713cfbf96732008ef2c15aec986950651c Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 14:13:44 +0800
+Subject: [PATCH] Neko LineageOS: Enable anti-burn in device profile
+
+This commit only enable the feature, should use togehter with framework/base patch
+
+Change-Id: Ib8081dc83499398c11da6948254c91821ece9332
+---
+ overlay/SystemUI/res/values/config.xml | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+ create mode 100644 overlay/SystemUI/res/values/config.xml
+
+diff --git a/overlay/SystemUI/res/values/config.xml b/overlay/SystemUI/res/values/config.xml
+new file mode 100644
+index 0000000..a831fbb
+--- /dev/null
++++ b/overlay/SystemUI/res/values/config.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     Copyright (C) 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <bool name="config_enableStatusBarScreenOnBurnInProtection">true</bool>
++    <bool name="config_enableNavHandleScreenOnBurnInProtection">true</bool>
++</resources>
+-- 
+2.43.0
+

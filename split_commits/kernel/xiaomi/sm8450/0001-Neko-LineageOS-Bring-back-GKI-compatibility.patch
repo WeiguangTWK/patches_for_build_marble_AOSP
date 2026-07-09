@@ -1,0 +1,70 @@
+From c37ffd62a5924a8875ca8fc978ca10bafb01f99e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 14:50:23 +0800
+Subject: [PATCH] Neko LineageOS: Bring back GKI compatibility
+
+[Reference](https://t.me/pzqqt_c/6283)
+
+Change-Id: Ia960d6a990c63e0939e5a79cb852e71f6e7f2d97
+---
+ arch/arm64/configs/vendor/debugfs.config    | 8 ++++----
+ arch/arm64/configs/vendor/xiaomi_GKI.config | 4 ----
+ modules.list.msm.waipio                     | 3 +++
+ 3 files changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm64/configs/vendor/debugfs.config b/arch/arm64/configs/vendor/debugfs.config
+index d13694029..ebeaf37f9 100644
+--- a/arch/arm64/configs/vendor/debugfs.config
++++ b/arch/arm64/configs/vendor/debugfs.config
+@@ -1,4 +1,4 @@
+-CONFIG_CMA_DEBUGFS=n
+-CONFIG_PAGE_OWNER=n
+-CONFIG_PAGE_PINNER=n
+-CONFIG_DEBUG_FS=n
++CONFIG_CMA_DEBUGFS=y
++CONFIG_PAGE_OWNER=y
++CONFIG_PAGE_PINNER=y
++CONFIG_DEBUG_FS=y
+diff --git a/arch/arm64/configs/vendor/xiaomi_GKI.config b/arch/arm64/configs/vendor/xiaomi_GKI.config
+index 08f9ecde7..6169dae5d 100644
+--- a/arch/arm64/configs/vendor/xiaomi_GKI.config
++++ b/arch/arm64/configs/vendor/xiaomi_GKI.config
+@@ -58,7 +58,3 @@ CONFIG_TOUCHSCREEN_SYNAPTICS_TCM_SPI=m
+ CONFIG_TOUCHSCREEN_SYNAPTICS_TCM_CORE=m
+ CONFIG_TOUCHSCREEN_SYNAPTICS_TCM_REFLASH=m
+ CONFIG_TOUCHSCREEN_XIAOMI_TOUCHFEATURE=m
+-
+-# USB
+-CONFIG_USB_NET_AX88179_178A=m
+-CONFIG_USB_NET_AX8817X=m
+diff --git a/modules.list.msm.waipio b/modules.list.msm.waipio
+index d4c5b8f2e..c58e430c0 100644
+--- a/modules.list.msm.waipio
++++ b/modules.list.msm.waipio
+@@ -5,6 +5,7 @@ clk-rpmh.ko
+ gcc-waipio.ko
+ icc-rpmh.ko
+ qcom_ipcc.ko
++qcom_ipc_logging.ko
+ qcom-pdc.ko
+ qcom_tsens.ko
+ rpmh-regulator.ko
+@@ -21,6 +22,7 @@ cqhci.ko
+ crypto-qti-common.ko
+ crypto-qti-hwkm.ko
+ dcvs_fp.ko
++debug-regulator.ko
+ dispcc-diwali.ko
+ dispcc-waipio.ko
+ gcc-diwali.ko
+@@ -78,6 +80,7 @@ qcom_wdt_core.ko
+ qnoc-diwali.ko
+ qnoc-qos.ko
+ qrtr.ko
++qti-regmap-debugfs.ko
+ regmap-spmi.ko
+ rtc-pm8xxx.ko
+ secure_buffer.ko
+-- 
+2.43.0
+

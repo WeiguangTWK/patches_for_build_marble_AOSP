@@ -1,0 +1,179 @@
+From d3bd4bf7ae1895a10b5475529882bb69b42f75ec Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 09:30:22 +0800
+Subject: [PATCH] Neko LineageOS: [Misc] Multiple fix for Desktop mode
+
+- Allow desktop mode to work regardless to supportsMultiWindow/forceResizable
+- Make some of TaskView resizable
+
+Change-Id: Ie0b6377eaced8a50d9d6905db2f12eaa95444b81
+---
+ .../server/wm/ActivityTaskManagerService.java |  4 +-
+ .../com/android/server/wm/DisplayContent.java | 78 +++++++++++++++++++
+ 2 files changed, 80 insertions(+), 2 deletions(-)
+
+diff --git a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
+index 867d1a4f0..6a763403d 100644
+--- a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
++++ b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
+@@ -971,7 +971,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+                 mGrammaticalManagerInternal.mergedFinalSystemGrammaticalGender());
+ 
+         synchronized (mGlobalLock) {
+-            mForceResizableActivities = forceResizable;
++            mForceResizableActivities = true;
+             mDevEnableNonResizableMultiWindow = devEnableNonResizableMultiWindow;
+             mSupportsNonResizableMultiWindow = supportsNonResizableMultiWindow;
+             mRespectsActivityMinWidthHeightMultiWindow = respectsActivityMinWidthHeightMultiWindow;
+@@ -981,7 +981,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+                     || supportsSplitScreenMultiWindow
+                     || supportsPictureInPicture
+                     || supportsMultiDisplay;
+-            if ((supportsMultiWindow || forceResizable) && multiWindowFormEnabled) {
++            if (multiWindowFormEnabled) {
+                 mSupportsMultiWindow = true;
+                 mSupportsFreeformWindowManagement = freeformWindowManagement;
+                 mSupportsSplitScreenMultiWindow = supportsSplitScreenMultiWindow;
+diff --git a/services/core/java/com/android/server/wm/DisplayContent.java b/services/core/java/com/android/server/wm/DisplayContent.java
+index dad3f089d..d4fc89f73 100644
+--- a/services/core/java/com/android/server/wm/DisplayContent.java
++++ b/services/core/java/com/android/server/wm/DisplayContent.java
+@@ -152,8 +152,10 @@ import static com.android.server.wm.WindowManagerService.H.WINDOW_HIDE_TIMEOUT;
+ import static com.android.server.wm.WindowManagerService.UPDATE_FOCUS_PLACING_SURFACES;
+ import static com.android.server.wm.WindowManagerService.UPDATE_FOCUS_WILL_ASSIGN_LAYERS;
+ import static com.android.server.wm.WindowManagerService.UPDATE_FOCUS_WILL_PLACE_SURFACES;
++import static com.android.server.wm.WindowManagerService.dipToPixel;
+ import static com.android.server.wm.WindowState.EXCLUSION_LEFT;
+ import static com.android.server.wm.WindowState.EXCLUSION_RIGHT;
++import static com.android.server.wm.WindowState.RESIZE_HANDLE_WIDTH_IN_DP;
+ import static com.android.server.wm.WindowStateAnimator.READY_TO_SHOW;
+ import static com.android.server.wm.utils.DisplayInfoOverrides.WM_OVERRIDE_FIELDS;
+ import static com.android.server.wm.utils.DisplayInfoOverrides.copyDisplayInfoFields;
+@@ -237,6 +239,7 @@ import android.view.Surface;
+ import android.view.Surface.Rotation;
+ import android.view.SurfaceControl;
+ import android.view.SurfaceControl.Transaction;
++import android.view.SurfaceSession;
+ import android.view.WindowInsets;
+ import android.view.WindowInsets.Type.InsetsType;
+ import android.view.WindowManager;
+@@ -276,6 +279,7 @@ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.LinkedList;
++import java.util.List;
+ import java.util.Objects;
+ import java.util.Set;
+ import java.util.function.Consumer;
+@@ -577,6 +581,8 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+ 
+     private final LinkedList<ActivityRecord> mTmpUpdateAllDrawn = new LinkedList();
+ 
++    private final TaskForResizePointSearchResult mTmpTaskForResizePointSearchResult =
++            new TaskForResizePointSearchResult();
+     private final ApplySurfaceChangesTransactionState mTmpApplySurfaceChangesTransactionState =
+             new ApplySurfaceChangesTransactionState();
+ 
+@@ -811,6 +817,8 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+ 
+     private final DisplayRotationReversionController mRotationReversionController;
+ 
++    private final SurfaceSession mSession = new SurfaceSession();
++
+     private final Consumer<WindowState> mUpdateWindowsForAnimator = w -> {
+         WindowStateAnimator winAnimator = w.mWinAnimator;
+         final ActivityRecord activity = w.mActivityRecord;
+@@ -3463,6 +3471,17 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+         });
+     }
+ 
++    /**
++     * Find the task whose outside touch area (for resizing) (x, y) falls within.
++     * Returns null if the touch doesn't fall into a resizing area.
++     */
++    @Nullable
++    Task findTaskForResizePoint(int x, int y) {
++        final int delta = dipToPixel(RESIZE_HANDLE_WIDTH_IN_DP, mDisplayMetrics);
++        return getItemFromTaskDisplayAreas(taskDisplayArea ->
++                mTmpTaskForResizePointSearchResult.process(taskDisplayArea, x, y, delta));
++    }
++
+     @Override
+     void switchUser(int userId) {
+         super.switchUser(userId);
+@@ -5365,6 +5384,61 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+                 && (ignoreFrozen || mDisplayPolicy.isScreenOnFully());
+     }
+ 
++    static final class TaskForResizePointSearchResult implements Predicate<Task> {
++        private Task taskForResize;
++        private int x;
++        private int y;
++        private int delta;
++        private Rect mTmpRect = new Rect();
++
++        Task process(WindowContainer root, int x, int y, int delta) {
++            taskForResize = null;
++            this.x = x;
++            this.y = y;
++            this.delta = delta;
++            mTmpRect.setEmpty();
++            root.forAllTasks(this);
++
++            return taskForResize;
++        }
++
++        @Override
++        public boolean test(Task task) {
++            if (!task.getRootTask().getWindowConfiguration().canResizeTask()) {
++                return true;
++            }
++
++            if (task.getWindowingMode() == WINDOWING_MODE_FULLSCREEN) {
++                return true;
++            }
++
++            if (task.isOrganized()) {
++                return true;
++            }
++
++            // We need to use the task's dim bounds (which is derived from the visible bounds of
++            // its apps windows) for any touch-related tests. Can't use the task's original
++            // bounds because it might be adjusted to fit the content frame. One example is when
++            // the task is put to top-left quadrant, the actual visible area would not start at
++            // (0,0) after it's adjusted for the status bar.
++            task.getDimBounds(mTmpRect);
++            mTmpRect.inset(-delta, -delta);
++            if (mTmpRect.contains(x, y)) {
++                mTmpRect.inset(delta, delta);
++
++                if (!mTmpRect.contains(x, y)) {
++                    taskForResize = task;
++                    return true;
++                }
++                // User touched inside the task. No need to look further,
++                // focus transfer will be handled in ACTION_UP.
++                return true;
++            }
++
++            return false;
++        }
++    }
++
+     private static final class ApplySurfaceChangesTransactionState {
+         public boolean displayHasContent;
+         public boolean obscured;
+@@ -5496,6 +5570,10 @@ class DisplayContent extends RootDisplayArea implements WindowManagerPolicy.Disp
+         }
+     }
+ 
++    SurfaceSession getSession() {
++        return mSession;
++    }
++
+     @Override
+     SurfaceControl.Builder makeChildSurface(WindowContainer child) {
+         final SurfaceControl.Builder b = mWmService.makeSurfaceBuilder().setContainerLayer();
+-- 
+2.43.0
+

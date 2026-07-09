@@ -1,0 +1,53 @@
+From d141c7322d26f7736a9b47032b619041d2160735 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 10:11:42 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Hide lineage services by
+ renaming them
+
+Change-Id: If1b9a2b80ddcf88dfbf4c4fc94477fe5831acf6c
+---
+ common/dynamic/service_contexts |  6 +++---
+ common/private/service_contexts | 10 +++++-----
+ 2 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/common/dynamic/service_contexts b/common/dynamic/service_contexts
+index bdc2533..8e4ee9b 100644
+--- a/common/dynamic/service_contexts
++++ b/common/dynamic/service_contexts
+@@ -1,5 +1,5 @@
+-vendor.lineage.health.IChargingControl/default                 u:object_r:hal_lineage_health_service:s0
+-vendor.lineage.health.IFastCharge/default                      u:object_r:hal_lineage_health_service:s0
++vendor.system.health.IChargingControl/default                  u:object_r:hal_lineage_health_service:s0
++vendor.system.health.IFastCharge/default                       u:object_r:hal_lineage_health_service:s0
+ vendor.lineage.livedisplay.IAdaptiveBacklight/default          u:object_r:hal_lineage_livedisplay_service:s0
+ vendor.lineage.livedisplay.IAntiFlicker/default                u:object_r:hal_lineage_livedisplay_service:s0
+ vendor.lineage.livedisplay.IAutoContrast/default               u:object_r:hal_lineage_livedisplay_service:s0
+@@ -12,7 +12,7 @@ vendor.lineage.livedisplay.IReadingEnhancement/default         u:object_r:hal_li
+ vendor.lineage.livedisplay.ISunlightEnhancement/default        u:object_r:hal_lineage_livedisplay_service:s0
+ vendor.lineage.powershare.IPowerShare/default                  u:object_r:hal_lineage_powershare_service:s0
+ vendor.lineage.touch.IGloveMode/default                        u:object_r:hal_lineage_touch_service:s0
+-vendor.lineage.touch.IHighTouchPollingRate/default             u:object_r:hal_lineage_touch_service:s0
++vendor.system.touch.IHighTouchPollingRate/default              u:object_r:hal_lineage_touch_service:s0
+ vendor.lineage.touch.IKeyDisabler/default                      u:object_r:hal_lineage_touch_service:s0
+ vendor.lineage.touch.IKeySwapper/default                       u:object_r:hal_lineage_touch_service:s0
+ vendor.lineage.touch.IStylusMode/default                       u:object_r:hal_lineage_touch_service:s0
+diff --git a/common/private/service_contexts b/common/private/service_contexts
+index 22d6ec1..6426d26 100644
+--- a/common/private/service_contexts
++++ b/common/private/service_contexts
+@@ -1,7 +1,7 @@
+-lineageglobalactions                      u:object_r:lineage_globalactions_service:s0
+-lineagehardware                           u:object_r:lineage_hardware_service:s0
+-lineagehealth                             u:object_r:lineage_health_interface_service:s0
+-lineagelivedisplay                        u:object_r:lineage_livedisplay_service:s0
+-lineagetrust                              u:object_r:lineage_trust_service:s0
++globalactions                             u:object_r:lineage_globalactions_service:s0
++hardwareservice                           u:object_r:lineage_hardware_service:s0
++healthinterface                           u:object_r:lineage_health_interface_service:s0
++displayservice                            u:object_r:lineage_livedisplay_service:s0
++trustinterface                            u:object_r:lineage_trust_service:s0
+ profile                                   u:object_r:lineage_profile_service:s0
+ pushbroker                                u:object_r:lineage_pushbroker_service:s0
+-- 
+2.43.0
+
