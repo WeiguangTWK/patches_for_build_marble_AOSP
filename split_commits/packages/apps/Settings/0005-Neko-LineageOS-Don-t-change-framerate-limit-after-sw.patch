@@ -1,0 +1,39 @@
+From 80d3cb4db3765cd53b67a223f876b12bd6dacf1a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 16:19:35 +0800
+Subject: [PATCH] Neko LineageOS: Don't change framerate limit after switch
+ DeveloperOptionsSwitch
+
+Change-Id: If95935eb53124077d28d39c6751e41b466551807
+---
+ .../GameDefaultFrameRatePreferenceController.java  | 14 +++-----------
+ 1 file changed, 3 insertions(+), 11 deletions(-)
+
+diff --git a/src/com/android/settings/development/GameDefaultFrameRatePreferenceController.java b/src/com/android/settings/development/GameDefaultFrameRatePreferenceController.java
+index 00001fb..3d54a08 100644
+--- a/src/com/android/settings/development/GameDefaultFrameRatePreferenceController.java
++++ b/src/com/android/settings/development/GameDefaultFrameRatePreferenceController.java
+@@ -130,17 +130,9 @@ public class GameDefaultFrameRatePreferenceController extends DeveloperOptionsPr
+     @Override
+     protected void onDeveloperOptionsSwitchDisabled() {
+         super.onDeveloperOptionsSwitchDisabled();
+-        final TwoStatePreference preference = (TwoStatePreference) mPreference;
+-        if (preference.isChecked()) {
+-            // When the developer option is disabled, we should set everything
+-            // to off, that is, enabling game default frame rate.
+-            try {
+-                mGameManagerService.toggleGameDefaultFrameRate(true);
+-            } catch (RemoteException e) {
+-                // intentional no-op
+-            }
+-        }
+-        preference.setChecked(false);
++        // Keep current runtime property state instead of forcing a reset when
++        // Developer Options main switch is turned off.
++        updateGameDefaultPreferenceSetting();
+     }
+ 
+ }
+-- 
+2.43.0
+

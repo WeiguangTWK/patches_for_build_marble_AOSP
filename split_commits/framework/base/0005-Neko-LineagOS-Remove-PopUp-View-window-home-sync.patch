@@ -1,12 +1,18 @@
 From dd1e374557621cde721038e5529c120a53af925d Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Sat, 4 Jul 2026 12:32:53 +0800
-Subject: [PATCH] Neko LineagOS: Fix BLASTSyncEngine error log flooding
+Subject: [PATCH] Neko LineageOS: Remove PopUp View/mini-window home sync skip hack in BLASTSyncEngine
 
-When collecting logs I noticed a lot of errors thrown from BLASTSyncEngine, as I check the source code I found that
-this part BLASTSyncEngine is not intended for 5.10- Kernel, so I removed them
+The current mini-window special handling in BLASTSyncEngine force-finishes
+a sync group when a mini window exists but is not part of the transition.
 
-This fix is highly optional, you cak skip it since this issue doesn't actually affect anything
+In practice this can cause home-related syncs to complete too early and
+produce repeated BLASTSyncEngine error logs during transitions.
+
+Remove this special-case path and let the normal sync completion logic
+handle these transitions.
+
+It removes an out-of-tree mini-window optimization that causes unstable sync behavior.
 
 Change-Id: I17141b602cf83cbfbecafb4bce6747e3d10e3cbe
 ---

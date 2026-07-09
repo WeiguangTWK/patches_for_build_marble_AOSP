@@ -1,0 +1,73 @@
+From 90a4653ad0704baa7aa5c1de93395c9d66ddc8f7 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 16:15:56 +0800
+Subject: [PATCH] Neko LineageOS: Fall back to epoll_pwait for BLASTBufferQueue
+ on older kernels
+
+BLASTBufferQueue currently uses epoll_pwait2() for buffer release waits.
+
+Older kernels such as 5.10 may not support epoll_pwait2(), causing the
+wait path to fail with ENOSYS or EINVAL.
+
+Add a runtime fallback to epoll_pwait() so BLASTBufferQueue continues to
+work correctly on older kernels.
+
+Change-Id: I2cbdd4e2be7a12f5d024a070ca17727e2c7ca9eb
+---
+ libs/gui/BLASTBufferQueue.cpp | 39 ++++++++++++++++++++++++++++++-----
+ 1 file changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/libs/gui/BLASTBufferQueue.cpp b/libs/gui/BLASTBufferQueue.cpp
+index 05fbc14..980249b 100644
+--- a/libs/gui/BLASTBufferQueue.cpp
++++ b/libs/gui/BLASTBufferQueue.cpp
+@@ -1464,12 +1464,41 @@ status_t BufferReleaseReader::readBlocking(ReleaseCallbackId& outId, sp<Fence>&
+         timespec = timespecFromNanos(timeout);
+     }
+ 
++    // epoll_pwait2() may be unavailable on older kernels (for example 5.10),
++    // so transparently fall back to epoll_pwait() in that case.
++    static std::atomic<bool> useEpollPwait2 = true;
++    const auto timeoutToMs = [](nsecs_t timeoutNs) -> int {
++        if (timeoutNs < 0) return -1;
++        constexpr nsecs_t kNsecsPerMs = 1'000'000;
++        constexpr nsecs_t kMaxTimeoutNs =
++                static_cast<nsecs_t>(std::numeric_limits<int>::max()) * kNsecsPerMs;
++        if (timeoutNs >= kMaxTimeoutNs) return std::numeric_limits<int>::max();
++        return static_cast<int>(timeoutNs / kNsecsPerMs);
++    };
++
+     epoll_event event{};
+-    int eventCount;
+-    do {
+-        eventCount = epoll_pwait2(mEpollFd.get(), &event, 1 /*maxevents*/,
+-                                  timespec ? &(*timespec) : nullptr, nullptr /*sigmask*/);
+-    } while (eventCount == -1 && errno == EINTR);
++    int eventCount = -1;
++    while (true) {
++        if (useEpollPwait2.load(std::memory_order_relaxed)) {
++            eventCount = epoll_pwait2(mEpollFd.get(), &event, 1 /*maxevents*/,
++                                      timespec ? &(*timespec) : nullptr, nullptr /*sigmask*/);
++            if (eventCount == -1 && (errno == ENOSYS || errno == EINVAL)) {
++                if (useEpollPwait2.exchange(false, std::memory_order_relaxed)) {
++                    ALOGW("epoll_pwait2 unavailable (errno=%d). Falling back to epoll_pwait.",
++                          errno);
++                }
++                continue;
++            }
++        } else {
++            eventCount = epoll_pwait(mEpollFd.get(), &event, 1 /*maxevents*/,
++                                     timeoutToMs(timeout), nullptr /*sigmask*/);
++        }
++
++        if (eventCount == -1 && errno == EINTR) {
++            continue;
++        }
++        break;
++    }
+ 
+     if (eventCount == -1) {
+         ALOGE("epoll_wait error while waiting for buffer release. errno=%d message='%s'", errno,
+-- 
+2.43.0
+

@@ -1,0 +1,302 @@
+From 5907e71d33866c4d9b736fdda065ca5ebdb6c00f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 9 Jul 2026 16:32:19 +0800
+Subject: [PATCH] Neko LineageOS: Add Boot_completed broadcast receiver control
+
+We can prevent a app from starting on boot by disabling its broadcast receiver, but for some apps (e.g. Alipay)
+will automatically re-enable it after users launch it
+
+TODO: A more forced way is needed
+Change-Id: Ie67fb8bf18f04b355111be88eb6107c6778018eb
+---
+ AndroidManifest.xml                           |   1 +
+ res/values-zh-rCN/strings.xml                 |   2 +
+ res/values/strings.xml                        |   4 +
+ res/xml/power_usage_detail.xml                |   6 +
+ .../fuelgauge/AdvancedPowerUsageDetail.java   |   3 +
+ ...dcastAllowabilityPreferenceController.java | 201 ++++++++++++++++++
+ 6 files changed, 217 insertions(+)
+ create mode 100644 src/com/android/settings/fuelgauge/BootBroadcastAllowabilityPreferenceController.java
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index ca730e3..3474646 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -113,6 +113,7 @@
+     <uses-permission android:name="android.permission.USE_BIOMETRIC_INTERNAL" />
+     <uses-permission android:name="android.permission.USER_ACTIVITY" />
+     <uses-permission android:name="android.permission.CHANGE_APP_IDLE_STATE" />
++    <uses-permission android:name="android.permission.CHANGE_COMPONENT_ENABLED_STATE" />
+     <uses-permission android:name="android.permission.PEERS_MAC_ADDRESS"/>
+     <uses-permission android:name="android.permission.MANAGE_NOTIFICATIONS"/>
+     <uses-permission android:name="android.permission.DELETE_PACKAGES"/>
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index 0550840..a0a7c3b 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -2902,6 +2902,8 @@
+     <string name="manager_battery_usage_allow_background_usage_settings_title" msgid="8150026934645052635">"允许后台使用"</string>
+     <string name="manager_battery_usage_allow_background_usage_title" msgid="6294649996820358852">"允许后台使用"</string>
+     <string name="manager_battery_usage_allow_background_usage_summary" msgid="8021153755201340819">"启用可接收实时更新，停用可节省电池电量"</string>
++    <string name="manager_battery_usage_allow_boot_broadcast_title">"允许开机自启"</string>
++    <string name="manager_battery_usage_allow_boot_broadcast_summary">"控制能否接收系统启动完毕广播"</string>
+     <string name="manager_battery_usage_unrestricted_title" msgid="2426486290463258032">"无限制"</string>
+     <string name="manager_battery_usage_optimized_title" msgid="8080765739761921817">"优化"</string>
+     <string name="manager_battery_usage_restricted_title" msgid="7702863764130323118">"受限"</string>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 6195d42..f8f6fd9 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -6748,6 +6748,10 @@
+     <string name="manager_battery_usage_allow_background_usage_title">Allow background usage</string>
+     <!-- Summary for allow background usage [CHAR LIMIT=NONE] -->
+     <string name="manager_battery_usage_allow_background_usage_summary">Enable for real-time updates, disable to save battery</string>
++    <!-- Title for the allow boot broadcast toggle [CHAR LIMIT=NONE] -->
++    <string name="manager_battery_usage_allow_boot_broadcast_title">Allow auto-start on boot</string>
++    <!-- Summary for allow boot broadcast [CHAR LIMIT=NONE] -->
++    <string name="manager_battery_usage_allow_boot_broadcast_summary">Controls whether the app can receive the system boot completed broadcast.</string>
+     <!-- Title for the battery unrestricted settings [CHAR_LIMIT=40] -->
+     <string name="manager_battery_usage_unrestricted_title">Unrestricted</string>
+     <!-- Title for the battery optimized settings [CHAR_LIMIT=40] -->
+diff --git a/res/xml/power_usage_detail.xml b/res/xml/power_usage_detail.xml
+index c2b1c5e..c486ea3 100644
+--- a/res/xml/power_usage_detail.xml
++++ b/res/xml/power_usage_detail.xml
+@@ -54,6 +54,12 @@
+             android:key="background_usage_allowability_switch"
+             android:title="@string/manager_battery_usage_allow_background_usage_title"/>
+ 
++        <com.android.settingslib.PrimarySwitchPreference
++            android:key="boot_broadcast_allowability_switch"
++            android:title="@string/manager_battery_usage_allow_boot_broadcast_title"
++            android:summary="@string/manager_battery_usage_allow_boot_broadcast_summary"
++            settings:controller="com.android.settings.fuelgauge.BootBroadcastAllowabilityPreferenceController"/>
++
+     </PreferenceCategory>
+ 
+ </PreferenceScreen>
+\ No newline at end of file
+diff --git a/src/com/android/settings/fuelgauge/AdvancedPowerUsageDetail.java b/src/com/android/settings/fuelgauge/AdvancedPowerUsageDetail.java
+index 288ec20..a6bdbd7 100644
+--- a/src/com/android/settings/fuelgauge/AdvancedPowerUsageDetail.java
++++ b/src/com/android/settings/fuelgauge/AdvancedPowerUsageDetail.java
+@@ -360,6 +360,9 @@ public class AdvancedPowerUsageDetail extends DashboardFragment
+                         /* dashboardFragment= */ this,
+                         KEY_BACKGROUND_USAGE_ALLOWABILITY_CATEGORY,
+                         mBatteryOptimizeUtils));
++        controllers.add(
++                new BootBroadcastAllowabilityPreferenceController(
++                        context, mAppEntry, packageName, bundle.getInt(EXTRA_UID, 0)));
+ 
+         return controllers;
+     }
+diff --git a/src/com/android/settings/fuelgauge/BootBroadcastAllowabilityPreferenceController.java b/src/com/android/settings/fuelgauge/BootBroadcastAllowabilityPreferenceController.java
+new file mode 100644
+index 0000000..d4059e3
+--- /dev/null
++++ b/src/com/android/settings/fuelgauge/BootBroadcastAllowabilityPreferenceController.java
+@@ -0,0 +1,201 @@
++/*
++ * Copyright (C) 2026 Neko LineageOS
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.fuelgauge;
++
++import android.app.AppGlobals;
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.Intent;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.IPackageManager;
++import android.content.pm.PackageManager;
++import android.content.pm.ResolveInfo;
++import android.os.RemoteException;
++import android.os.UserHandle;
++import android.util.ArraySet;
++import android.util.Log;
++
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
++import androidx.preference.Preference;
++import androidx.preference.PreferenceScreen;
++
++import com.android.settings.core.BasePreferenceController;
++import com.android.settings.core.PreferenceControllerMixin;
++import com.android.settingslib.PrimarySwitchPreference;
++import com.android.settingslib.applications.ApplicationsState;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/** Controls whether a third-party app can receive boot completion broadcasts. */
++public class BootBroadcastAllowabilityPreferenceController extends BasePreferenceController
++        implements PreferenceControllerMixin {
++
++    private static final String TAG = "BootBroadcastCtrl";
++    private static final String KEY_BOOT_BROADCAST_ALLOWABILITY_SWITCH =
++            "boot_broadcast_allowability_switch";
++    private static final int QUERY_FLAGS =
++            PackageManager.MATCH_DISABLED_COMPONENTS
++                    | PackageManager.MATCH_DIRECT_BOOT_AWARE
++                    | PackageManager.MATCH_DIRECT_BOOT_UNAWARE;
++
++    private final String mPackageName;
++    private final int mUserId;
++    @Nullable private final ApplicationInfo mApplicationInfo;
++    private final IPackageManager mIPackageManager;
++
++    @Nullable private PrimarySwitchPreference mPreference;
++    @Nullable private List<ResolveInfo> mBootReceivers;
++
++    public BootBroadcastAllowabilityPreferenceController(
++            @NonNull Context context,
++            @Nullable ApplicationsState.AppEntry appEntry,
++            @Nullable String packageName,
++            int uid) {
++        super(context, KEY_BOOT_BROADCAST_ALLOWABILITY_SWITCH);
++        mPackageName = packageName;
++        mUserId = UserHandle.getUserId(uid);
++        mApplicationInfo = appEntry == null ? null : appEntry.info;
++        mIPackageManager = AppGlobals.getPackageManager();
++    }
++
++    @Override
++    public int getAvailabilityStatus() {
++        if (!isThirdPartyApp()) {
++            return CONDITIONALLY_UNAVAILABLE;
++        }
++        return getBootReceivers().isEmpty() ? CONDITIONALLY_UNAVAILABLE : AVAILABLE;
++    }
++
++    @Override
++    public void displayPreference(@NonNull PreferenceScreen screen) {
++        super.displayPreference(screen);
++        mPreference = screen.findPreference(KEY_BOOT_BROADCAST_ALLOWABILITY_SWITCH);
++        updatePreference();
++    }
++
++    @Override
++    public void updateState(@NonNull Preference preference) {
++        updatePreference();
++    }
++
++    private void updatePreference() {
++        if (mPreference == null) {
++            return;
++        }
++        mPreference.setChecked(isChecked());
++        mPreference.setSwitchEnabled(true);
++        mPreference.setOnPreferenceChangeListener(
++                (preference, newValue) -> setBootBroadcastAllowed((boolean) newValue));
++    }
++
++    private boolean setBootBroadcastAllowed(boolean allowed) {
++        boolean success = true;
++        for (ResolveInfo receiver : getBootReceivers()) {
++            final ComponentName componentName = receiver.getComponentInfo().getComponentName();
++            final int newState = allowed
++                    ? PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
++                    : PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
++            try {
++                mIPackageManager.setComponentEnabledSetting(
++                        componentName,
++                        newState,
++                        PackageManager.DONT_KILL_APP,
++                        mUserId,
++                        mContext.getOpPackageName());
++            } catch (RemoteException e) {
++                Log.e(TAG, "Failed updating boot receiver state for "
++                        + componentName.flattenToShortString(), e);
++                success = false;
++            }
++        }
++        if (success && mPreference != null) {
++            mPreference.setChecked(allowed);
++        }
++        return success;
++    }
++
++    private boolean isChecked() {
++        for (ResolveInfo receiver : getBootReceivers()) {
++            if (isReceiverEnabled(receiver)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    private boolean isReceiverEnabled(@NonNull ResolveInfo receiver) {
++        final ComponentName componentName = receiver.getComponentInfo().getComponentName();
++        try {
++            final int state = mIPackageManager.getComponentEnabledSetting(componentName, mUserId);
++            switch (state) {
++                case PackageManager.COMPONENT_ENABLED_STATE_DISABLED:
++                case PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER:
++                case PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED:
++                    return false;
++                case PackageManager.COMPONENT_ENABLED_STATE_ENABLED:
++                    return true;
++                case PackageManager.COMPONENT_ENABLED_STATE_DEFAULT:
++                default:
++                    return receiver.getComponentInfo().isEnabled();
++            }
++        } catch (RemoteException e) {
++            Log.e(TAG, "Failed reading boot receiver state for "
++                    + componentName.flattenToShortString(), e);
++            return receiver.getComponentInfo().isEnabled();
++        }
++    }
++
++    private boolean isThirdPartyApp() {
++        if (mApplicationInfo == null || mPackageName == null) {
++            return false;
++        }
++        return !mApplicationInfo.isSystemApp() && !mApplicationInfo.isUpdatedSystemApp();
++    }
++
++    @NonNull
++    private List<ResolveInfo> getBootReceivers() {
++        if (mBootReceivers != null) {
++            return mBootReceivers;
++        }
++        mBootReceivers = new ArrayList<>();
++        if (mPackageName == null) {
++            return mBootReceivers;
++        }
++
++        final ArraySet<ComponentName> seen = new ArraySet<>();
++        collectReceivers(Intent.ACTION_BOOT_COMPLETED, seen, mBootReceivers);
++        collectReceivers(Intent.ACTION_LOCKED_BOOT_COMPLETED, seen, mBootReceivers);
++        return mBootReceivers;
++    }
++
++    private void collectReceivers(
++            @NonNull String action,
++            @NonNull ArraySet<ComponentName> seen,
++            @NonNull List<ResolveInfo> outReceivers) {
++        final Intent intent = new Intent(action).setPackage(mPackageName);
++        final List<ResolveInfo> receivers = mContext.getPackageManager()
++                .queryBroadcastReceiversAsUser(intent, QUERY_FLAGS, mUserId);
++        for (ResolveInfo receiver : receivers) {
++            final ComponentName componentName = receiver.getComponentInfo().getComponentName();
++            if (seen.add(componentName)) {
++                outReceivers.add(receiver);
++            }
++        }
++    }
++}
+-- 
+2.43.0
+

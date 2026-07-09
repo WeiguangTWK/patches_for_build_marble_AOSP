@@ -2,13 +2,15 @@ From cae878b5105f5b822e52baf4b98e570b76adf39b Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Sat, 4 Jul 2026 16:58:02 +0800
 Subject: [PATCH] Neko LineageOS: [Anti Detection] Add service to filter app
- list & Sproof install source
+ list & Spoof install source & Allow MicroG Signature Spoof in user build
 
 Nowadays even Google [discourages aggressive applist reading](https://developer.android.com/training/package-visibility)
 many apps still let their risk control works based on applist reading, this feature allows user to block Lineage App visibility
 
 Also some apps refuse to work when installed from non-Play-store source (e.g. Aurora), makeing it very unfriendly for
 Aurora store and MicroG users
+
+Also for some reason LineageOS official make MicroG Signature Spoof not working in user build work (maybe to not make Google angry)
 
 Change-Id: Ib299f5b767254009c05bfdc377a031c2d5b552ba
 ---
