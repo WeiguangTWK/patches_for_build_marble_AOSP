@@ -1,0 +1,29 @@
+From 65f7e2e4ab7583de30e02b557937173aaae9bc21 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 12:16:05 +0800
+Subject: [PATCH] Neko LineageOS: Fix Up! Telephony crash on SMS OTP receive
+
+Some apps will try to read and route OTP SMS back to itself (e.g. PhonePe), missing permission could crash the Telephony
+
+Change-Id: I9a4c4048b6339881a420b8f13b94fff5ec7c740d
+---
+ AndroidManifest.xml | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 65970ec..e3b3a01 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -189,6 +189,9 @@
+     <!-- Needed to query for current companion device associations, used when handling OTP SMS -->
+     <uses-permission android:name="android.permission.MANAGE_COMPANION_DEVICES"/>
+ 
++    <!-- Needed to enumerate packages granted READ_OTP_SMS app-op when routing OTP SMS. -->
++    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
++
+     <!-- Used by Satellite module to check if Google Messages is the default SMS app. -->
+     <uses-permission android:name="android.permission.MONITOR_DEFAULT_SMS_PACKAGE"/>
+ 
+-- 
+2.43.0
+

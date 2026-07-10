@@ -1,0 +1,36 @@
+From 687d32ddc1ef07f19bb36271cb0e9d72ac198691 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 09:01:29 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Rename Lineage Health
+ Interface
+
+Change-Id: I0ed30c2dd1278d4ca99815a789c044fc0a5eed5d
+---
+ res/xml/power_usage_summary.xml | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/res/xml/power_usage_summary.xml b/res/xml/power_usage_summary.xml
+index 950ca2d..e048872 100644
+--- a/res/xml/power_usage_summary.xml
++++ b/res/xml/power_usage_summary.xml
+@@ -79,7 +79,7 @@
+         <!-- Charging control -->
+         <lineageos.preference.LineagePartsPreference
+             android:key="charging_control"
+-            settings:requiresService="lineagehealth" />
++            settings:requiresService="healthinterface" />
+ 
+         <!-- Charging speed -->
+         <ListPreference
+@@ -89,7 +89,7 @@
+             android:summary="%s"
+             android:title="@*lineageos.platform:string/charging_speed"
+             settings:controller="com.android.settings.fuelgauge.ChargingSpeedPreferenceController"
+-            settings:requiresService="lineagehealth" />
++            settings:requiresService="healthinterface" />
+     </com.android.settingslib.widget.UntitledPreferenceCategory>
+ 
+     <com.android.settingslib.widget.UntitledPreferenceCategory
+-- 
+2.43.0
+

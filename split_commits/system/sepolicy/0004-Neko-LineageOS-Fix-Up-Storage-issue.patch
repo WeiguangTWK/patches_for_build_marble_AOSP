@@ -1,0 +1,29 @@
+From 416d21df9f0f99ebacfdabefd6538bd70a7ec71e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 12:52:36 +0800
+Subject: [PATCH] Neko LineageOS: Fix Up! Storage issue
+
+The storage issue has been confirmed to come from improper upstream SELinux handling, which causes prepareUserStorage
+to fail and leaves sys.user.0.ce_available unset. StorageManagerService explicitly checks this property, so when it
+is missing, any app attempting to write to its own data directory will inevitably fail.
+
+Change-Id: Ie1f0fdd1ae8142c094d427a07f68bbfb7841b5e6
+---
+ private/vold_prepare_subdirs.te | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/private/vold_prepare_subdirs.te b/private/vold_prepare_subdirs.te
+index 6a9c3b6..b6efc26 100644
+--- a/private/vold_prepare_subdirs.te
++++ b/private/vold_prepare_subdirs.te
+@@ -36,6 +36,7 @@ allow vold_prepare_subdirs {
+     system_data_file
+     vold_data_file
+ }:dir { create_dir_perms relabelto };
++allow vold_prepare_subdirs checkin_data_file:dir relabelfrom;
+ allow vold_prepare_subdirs {
+     apex_data_file_type
+     apex_art_staging_data_file
+-- 
+2.43.0
+

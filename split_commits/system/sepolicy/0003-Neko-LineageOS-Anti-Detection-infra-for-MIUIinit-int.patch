@@ -1,0 +1,78 @@
+From f7825b8268ae3dbffef7830154d8b47f34ce1163 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 12:48:38 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] infra for MIUIinit interface
+ & services
+
+Change-Id: I87547ddcaaf6b9dbaecc863e3b4de4741a79c170
+---
+ build/soong/service_fuzzer_bindings.go        | 1 +
+ prebuilts/api/202504/private/service.te       | 1 +
+ prebuilts/api/202504/private/service_contexts | 1 +
+ private/service.te                            | 1 +
+ private/service_contexts                      | 1 +
+ 5 files changed, 5 insertions(+)
+
+diff --git a/build/soong/service_fuzzer_bindings.go b/build/soong/service_fuzzer_bindings.go
+index b644aaa..da71147 100644
+--- a/build/soong/service_fuzzer_bindings.go
++++ b/build/soong/service_fuzzer_bindings.go
+@@ -378,6 +378,7 @@ var (
+ 		"meminfo":                                EXCEPTION_NO_FUZZER,
+ 		"memtrack.proxy":                         EXCEPTION_NO_FUZZER,
+ 		"midi":                                   EXCEPTION_NO_FUZZER,
++		"MiuiInit":                               EXCEPTION_NO_FUZZER,
+ 		"mmd":                                    EXCEPTION_NO_FUZZER,
+ 		"mount":                                  EXCEPTION_NO_FUZZER,
+ 		"music_recognition":                      EXCEPTION_NO_FUZZER,
+diff --git a/prebuilts/api/202504/private/service.te b/prebuilts/api/202504/private/service.te
+index 78b667b..c7e0647 100644
+--- a/prebuilts/api/202504/private/service.te
++++ b/prebuilts/api/202504/private/service.te
+@@ -18,6 +18,7 @@ type incidentcompanion_service,      app_api_service, system_api_service, system
+ type logcat_service,                 system_server_service, service_manager_type;
+ type logd_service,                   service_manager_type;
+ type mediatuner_service,             app_api_service, service_manager_type;
++type miui_init_service,              app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type mmd_service,                    service_manager_type;
+ type on_device_intelligence_service, app_api_service, system_server_service, service_manager_type, isolated_compute_allowed_service;
+ type profcollectd_service,           service_manager_type;
+diff --git a/prebuilts/api/202504/private/service_contexts b/prebuilts/api/202504/private/service_contexts
+index b32eab8..6f1da47 100644
+--- a/prebuilts/api/202504/private/service_contexts
++++ b/prebuilts/api/202504/private/service_contexts
+@@ -152,6 +152,7 @@ account                                   u:object_r:account_service:s0
+ activity                                  u:object_r:activity_service:s0
+ activity_task                             u:object_r:activity_task_service:s0
+ adbroot_service                           u:object_r:adbroot_service:s0
++MiuiInit                                  u:object_r:miui_init_service:s0
+ adb                                       u:object_r:adb_service:s0
+ adservices_manager                        u:object_r:adservices_manager_service:s0
+ advanced_protection                       u:object_r:advanced_protection_service:s0
+diff --git a/private/service.te b/private/service.te
+index def58bf..62e2e70 100644
+--- a/private/service.te
++++ b/private/service.te
+@@ -16,6 +16,7 @@ type incidentcompanion_service,      app_api_service, system_api_service, system
+ type logcat_service,                 system_server_service, service_manager_type;
+ type logd_service,                   service_manager_type;
+ type mediatuner_service,             app_api_service, service_manager_type;
++type miui_init_service,              app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type mmd_service,                    service_manager_type;
+ type on_device_intelligence_service, app_api_service, system_server_service, service_manager_type, isolated_compute_allowed_service;
+ type omapi_service,                  service_manager_type;
+diff --git a/private/service_contexts b/private/service_contexts
+index ad7fa84..6e61a70 100644
+--- a/private/service_contexts
++++ b/private/service_contexts
+@@ -158,6 +158,7 @@ activity                                  u:object_r:activity_service:s0
+ activity_structured                       u:object_r:activity_structured_service:s0
+ activity_task                             u:object_r:activity_task_service:s0
+ adbroot_service                           u:object_r:adbroot_service:s0
++MiuiInit                                  u:object_r:miui_init_service:s0
+ adb                                       u:object_r:adb_service:s0
+ adservices_manager                        u:object_r:adservices_manager_service:s0
+ advanced_protection                       u:object_r:advanced_protection_service:s0
+-- 
+2.43.0
+

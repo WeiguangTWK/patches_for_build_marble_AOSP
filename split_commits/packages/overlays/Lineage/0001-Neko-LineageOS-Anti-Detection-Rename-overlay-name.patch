@@ -1,0 +1,28 @@
+From fd8c18fd9118f7678daf5b00c3b6c0158f00575a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 10:52:48 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Rename overlay name
+
+Change-Id: I229c9d88a5d82f44a55a886b1fcb463f8b1324bb
+---
+ customizations/BlackTheme/Android.bp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/customizations/BlackTheme/Android.bp b/customizations/BlackTheme/Android.bp
+index da320cd..473b19e 100644
+--- a/customizations/BlackTheme/Android.bp
++++ b/customizations/BlackTheme/Android.bp
+@@ -4,8 +4,8 @@
+ //
+ 
+ runtime_resource_overlay {
+-    name: "LineageBlackTheme",
++    name: "BlackThemeOverlay",
+ 
+-    theme: "LineageBlackTheme",
++    theme: "BlackTheme",
+     product_specific: true,
+ }
+-- 
+2.43.0
+

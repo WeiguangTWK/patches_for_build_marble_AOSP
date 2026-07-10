@@ -1,0 +1,32 @@
+From 29f281bf6ff27d703ff9a256e93dc64149434cc7 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 10:18:35 +0800
+Subject: [PATCH] Neko LineageOS: Init data folder for TEE Soft Emu
+
+TODO: Migrate it to other place like what AVIUM UI do
+Change-Id: I13c46b909bb769e0c63ad9d82c0561b2470f082e
+---
+ root/adb_root.rc | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/root/adb_root.rc b/root/adb_root.rc
+index ddd1c8b..3c07eb1 100644
+--- a/root/adb_root.rc
++++ b/root/adb_root.rc
+@@ -11,4 +11,12 @@ on property:ro.debuggable=1
+     start adb_root
+ 
+ on post-fs-data
+-    mkdir /data/adbroot 0700 root root
++    # Keep parent directory private from listing, but allow path traversal.
++    mkdir /data/adbroot 0711 root root
++    chown root root /data/adbroot
++    chmod 0711 /data/adbroot
++    # TEE soft debug runtime payloads are written by system_app (LineageParts),
++    # and read by keystore2.
++    mkdir /data/adbroot/tee_soft_debug 0755 system system
++    chown system system /data/adbroot/tee_soft_debug
++    chmod 0755 /data/adbroot/tee_soft_debug
+-- 
+2.43.0
+

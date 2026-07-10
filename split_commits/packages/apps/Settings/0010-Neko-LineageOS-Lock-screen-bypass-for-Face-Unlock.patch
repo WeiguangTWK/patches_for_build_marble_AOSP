@@ -1,0 +1,26 @@
+From 06bf6c8f945458a300645922e064627d0f5fce9a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 09:55:45 +0800
+Subject: [PATCH] Neko LineageOS: Lock screen bypass for Face Unlock
+
+Change-Id: Ib45dbc864641653ef30c88e509361872e88331b5
+---
+ res/xml/configure_notification_settings.xml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/res/xml/configure_notification_settings.xml b/res/xml/configure_notification_settings.xml
+index 23394cb..83a42fd 100644
+--- a/res/xml/configure_notification_settings.xml
++++ b/res/xml/configure_notification_settings.xml
+@@ -129,7 +129,7 @@
+             android:summary="@string/lock_screen_notifs_redact_work_summary"
+             settings:controller="com.android.settings.notification.RedactNotificationPreferenceController" />
+ 
+-        <SwitchPreferenceCompat
++        <com.android.settingslib.RestrictedSwitchPreference
+             android:key="notification_lockscreen_bypass"
+             android:order="17"
+             android:title="@string/lockscreen_bypass_title"
+-- 
+2.43.0
+
