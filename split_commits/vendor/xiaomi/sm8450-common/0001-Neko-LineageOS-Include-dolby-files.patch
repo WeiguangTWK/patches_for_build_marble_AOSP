@@ -1,0 +1,90 @@
+From fa5c9df2b288b5e0c2f87b2a8fe60c24c8f14042 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 13:41:04 +0800
+Subject: [PATCH] Neko LineageOS: Include dolby files
+
+Change-Id: If6327efd483cb0c22d1071738bca697afee4a502
+---
+ proprietary/vendor/etc/media_codecs_cape.xml      | 1 +
+ proprietary/vendor/etc/media_codecs_diwali_v0.xml | 1 +
+ proprietary/vendor/etc/media_codecs_diwali_v1.xml | 1 +
+ proprietary/vendor/etc/media_codecs_diwali_v2.xml | 1 +
+ proprietary/vendor/etc/media_codecs_taro.xml      | 1 +
+ proprietary/vendor/etc/media_codecs_ukee.xml      | 1 +
+ 6 files changed, 6 insertions(+)
+
+diff --git a/proprietary/vendor/etc/media_codecs_cape.xml b/proprietary/vendor/etc/media_codecs_cape.xml
+index 4532b4a..ded14e3 100644
+--- a/proprietary/vendor/etc/media_codecs_cape.xml
++++ b/proprietary/vendor/etc/media_codecs_cape.xml
+@@ -103,6 +103,7 @@
+ -->
+ 
+ <MediaCodecs>
++    <Include href="media_codecs_dolby_audio.xml" />
+     <Include href="media_codecs_c2_audio.xml" />
+     <Settings>
+         <Setting name="max-video-encoder-input-buffers" value="11" />
+diff --git a/proprietary/vendor/etc/media_codecs_diwali_v0.xml b/proprietary/vendor/etc/media_codecs_diwali_v0.xml
+index a887625..62d2d52 100644
+--- a/proprietary/vendor/etc/media_codecs_diwali_v0.xml
++++ b/proprietary/vendor/etc/media_codecs_diwali_v0.xml
+@@ -89,6 +89,7 @@
+ -->
+ 
+ <MediaCodecs>
++    <Include href="media_codecs_dolby_audio.xml" />
+     <Include href="media_codecs_c2_audio.xml" />
+     <Settings>
+         <Setting name="max-video-encoder-input-buffers" value="11" />
+diff --git a/proprietary/vendor/etc/media_codecs_diwali_v1.xml b/proprietary/vendor/etc/media_codecs_diwali_v1.xml
+index eaac42c..57ea93d 100644
+--- a/proprietary/vendor/etc/media_codecs_diwali_v1.xml
++++ b/proprietary/vendor/etc/media_codecs_diwali_v1.xml
+@@ -80,6 +80,7 @@
+ -->
+ 
+ <MediaCodecs>
++    <Include href="media_codecs_dolby_audio.xml" />
+     <Include href="media_codecs_c2_audio.xml" />
+     <Settings>
+         <Setting name="max-video-encoder-input-buffers" value="11" />
+diff --git a/proprietary/vendor/etc/media_codecs_diwali_v2.xml b/proprietary/vendor/etc/media_codecs_diwali_v2.xml
+index 1154419..4b0fd5e 100644
+--- a/proprietary/vendor/etc/media_codecs_diwali_v2.xml
++++ b/proprietary/vendor/etc/media_codecs_diwali_v2.xml
+@@ -83,6 +83,7 @@
+ -->
+ 
+ <MediaCodecs>
++    <Include href="media_codecs_dolby_audio.xml" />
+     <Include href="media_codecs_c2_audio.xml" />
+     <Settings>
+         <Setting name="max-video-encoder-input-buffers" value="11" />
+diff --git a/proprietary/vendor/etc/media_codecs_taro.xml b/proprietary/vendor/etc/media_codecs_taro.xml
+index 4532b4a..ded14e3 100644
+--- a/proprietary/vendor/etc/media_codecs_taro.xml
++++ b/proprietary/vendor/etc/media_codecs_taro.xml
+@@ -103,6 +103,7 @@
+ -->
+ 
+ <MediaCodecs>
++    <Include href="media_codecs_dolby_audio.xml" />
+     <Include href="media_codecs_c2_audio.xml" />
+     <Settings>
+         <Setting name="max-video-encoder-input-buffers" value="11" />
+diff --git a/proprietary/vendor/etc/media_codecs_ukee.xml b/proprietary/vendor/etc/media_codecs_ukee.xml
+index 1c9c545..0bd53a8 100644
+--- a/proprietary/vendor/etc/media_codecs_ukee.xml
++++ b/proprietary/vendor/etc/media_codecs_ukee.xml
+@@ -97,6 +97,7 @@
+ -->
+ 
+ <MediaCodecs>
++    <Include href="media_codecs_dolby_audio.xml" />
+     <Include href="media_codecs_c2_audio.xml" />
+     <Settings>
+         <Setting name="max-video-encoder-input-buffers" value="11" />
+-- 
+2.43.0
+

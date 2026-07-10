@@ -1,0 +1,54 @@
+From 25f1898f32e6a63042055cfaa32d38d6f5f9c029 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 13:29:21 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Rename lineage services and
+ files
+
+Change-Id: I5b643b659ba288b5a5e19aa0bc10f68009167d32
+---
+ config/common.mk             | 2 +-
+ config/common_mobile.mk      | 2 +-
+ config/lineage_sdk_common.mk | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/config/common.mk b/config/common.mk
+index dbb16f2..f6f4228 100644
+--- a/config/common.mk
++++ b/config/common.mk
+@@ -141,7 +141,7 @@ PRODUCT_PACKAGES += \
+ 
+ # Lineage interfaces
+ PRODUCT_PACKAGES += \
+-    framework_compatibility_matrix.lineage.xml
++    framework_compatibility_matrix.system.xml
+ 
+ # Lineage packages
+ ifeq ($(PRODUCT_IS_ATV),)
+diff --git a/config/common_mobile.mk b/config/common_mobile.mk
+index 38003df..251f4af 100644
+--- a/config/common_mobile.mk
++++ b/config/common_mobile.mk
+@@ -74,6 +74,6 @@ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+ 
+ # Themes
+ PRODUCT_PACKAGES += \
+-    LineageBlackTheme \
++    BlackThemeOverlay \
+     ThemePicker \
+     ThemesStub
+diff --git a/config/lineage_sdk_common.mk b/config/lineage_sdk_common.mk
+index 8fc26ec..7bb150e 100644
+--- a/config/lineage_sdk_common.mk
++++ b/config/lineage_sdk_common.mk
+@@ -11,7 +11,7 @@ PRODUCT_COPY_FILES += \
+ 
+ # Lineage Platform Library
+ PRODUCT_PACKAGES += \
+-    org.lineageos.platform-res \
++    org.system.platform-res \
+     org.lineageos.platform
+ 
+ # AOSP has no support of loading framework resources from /system_ext
+-- 
+2.43.0
+

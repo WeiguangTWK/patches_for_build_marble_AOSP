@@ -1,0 +1,30 @@
+From 26d11248bfe86bd55a0df667c71d1dd0099369cd Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 13:33:20 +0800
+Subject: [PATCH] Neko LineageOS: [FOR XIAOMI ONLY] Add fake MIUISecurityCenter
+
+For more details, check [repo](https://github.com/WeiguangTWK/android_platform_packages_apps_MiuiSecurityCenter)
+
+Change-Id: I87e84d90dd6b195796e83524a11d3033929a66a1
+---
+ config/common.mk | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/config/common.mk b/config/common.mk
+index 10bbdfa..e4e0f50 100644
+--- a/config/common.mk
++++ b/config/common.mk
+@@ -80,6 +80,10 @@ PRODUCT_COPY_FILES += \
+ PRODUCT_PACKAGES += \
+     lineage-component-overrides.xml
+ 
++# Xiaomi compatibility stubs
++PRODUCT_PACKAGES += \
++    MiuiSecurityCenter
++
+ # This is Lineage!
+ PRODUCT_COPY_FILES += \
+     vendor/lineage/config/permissions/org.lineageos.android.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.android.xml
+-- 
+2.43.0
+

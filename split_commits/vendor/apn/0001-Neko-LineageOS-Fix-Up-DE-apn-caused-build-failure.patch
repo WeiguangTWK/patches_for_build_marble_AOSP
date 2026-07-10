@@ -1,0 +1,26 @@
+From e51665b94abad7f49555259e7761dd8e3fdabeb4 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 13:19:26 +0800
+Subject: [PATCH] Neko LineageOS: Fix Up! DE apn caused build failure
+
+Change-Id: I2dc21b5fe49936586295dd64532cd3d3b1e6b4d6
+---
+ DE.xml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/DE.xml b/DE.xml
+index 7aa9001..c7cbb1d 100644
+--- a/DE.xml
++++ b/DE.xml
+@@ -368,7 +368,7 @@
+         carrier_id="2536"
+         mmsc="http://mms.1und1-mobilfunk.de/"
+         mmsport="80"
+-        mmsproxy="2a00:0fbc:2200:c999:0109:1f87:2:1"
++        mmsproxy="http://[2a00:0fbc:2200:c999:0109:1f87:2:1]"
+         protocol="IPV6"
+         roaming_protocol="IPV6"
+         type="mms"
+-- 
+2.43.0
+

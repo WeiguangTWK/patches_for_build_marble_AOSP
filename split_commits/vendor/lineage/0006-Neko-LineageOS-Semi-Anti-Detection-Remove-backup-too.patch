@@ -1,0 +1,50 @@
+From 552c13dc43fefcf3d4826a84171a65e727dc43c7 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 13:30:57 +0800
+Subject: [PATCH] Neko LineageOS: [Semi-Anti Detection] Remove backup tool
+
+In EROFS builds, addon.d under system/ is usually meaningless and causing detection
+
+Change-Id: Ib64767ffaadb694566cd929f789df78d4084c529
+---
+ config/common.mk | 22 ++--------------------
+ 1 file changed, 2 insertions(+), 20 deletions(-)
+
+diff --git a/config/common.mk b/config/common.mk
+index f6f4228..10bbdfa 100644
+--- a/config/common.mk
++++ b/config/common.mk
+@@ -46,28 +46,10 @@ endif
+ PRODUCT_PRODUCT_PROPERTIES += persist.sys.strictmode.disable=true
+ endif
+ 
+-# Backup Tool
+-PRODUCT_COPY_FILES += \
+-    vendor/lineage/prebuilt/common/bin/backuptool.sh:install/bin/backuptool.sh \
+-    vendor/lineage/prebuilt/common/bin/backuptool.functions:install/bin/backuptool.functions
+-
+-PRODUCT_PACKAGES += \
+-    50-lineage.sh
+-
+-PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+-    system/addon.d/50-lineage.sh
++# Backup Tool is intentionally disabled for this tree.
++# /system is EROFS and /system/addon.d is not needed.
+ 
+ ifneq ($(strip $(AB_OTA_PARTITIONS) $(AB_OTA_POSTINSTALL_CONFIG)),)
+-PRODUCT_COPY_FILES += \
+-    vendor/lineage/prebuilt/common/bin/backuptool_ab.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_ab.sh \
+-    vendor/lineage/prebuilt/common/bin/backuptool_ab.functions:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_ab.functions \
+-    vendor/lineage/prebuilt/common/bin/backuptool_postinstall.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/backuptool_postinstall.sh
+-
+-PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+-    system/bin/backuptool_ab.sh \
+-    system/bin/backuptool_ab.functions \
+-    system/bin/backuptool_postinstall.sh
+-
+ ifneq ($(TARGET_BUILD_VARIANT),user)
+ PRODUCT_PRODUCT_PROPERTIES += \
+     ro.ota.allow_downgrade=true
+-- 
+2.43.0
+
