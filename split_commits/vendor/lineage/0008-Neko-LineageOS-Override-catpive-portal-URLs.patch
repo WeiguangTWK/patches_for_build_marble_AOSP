@@ -1,0 +1,50 @@
+From df02a40056f5d635e004b2e38fa10e90ddab8ac6 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 18:26:42 +0800
+Subject: [PATCH] Neko LineageOS: Override catpive portal URLs
+
+Change-Id: I4e68c07098d90a5f2dd334892ae0ddf73902ce57
+---
+ .../res/values-mcc460/config.xml                    | 13 +++++++++++++
+ .../NetworkStackOverlay/res/values/config.xml       |  7 +++++++
+ 2 files changed, 20 insertions(+)
+ create mode 100644 overlay/rro_packages/NetworkStackOverlay/res/values-mcc460/config.xml
+
+diff --git a/overlay/rro_packages/NetworkStackOverlay/res/values-mcc460/config.xml b/overlay/rro_packages/NetworkStackOverlay/res/values-mcc460/config.xml
+new file mode 100644
+index 0000000..2877bc2
+--- /dev/null
++++ b/overlay/rro_packages/NetworkStackOverlay/res/values-mcc460/config.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     Copyright (C) 2026 Neko LineageOS
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <!-- Network validation probe URLs for MCC 460. -->
++    <string name="config_captive_portal_http_url" translatable="false">http://connect.rom.miui.com/generate_204</string>
++    <string name="config_captive_portal_https_url" translatable="false">https://connect.rom.miui.com/generate_204</string>
++    <string-array name="config_captive_portal_fallback_urls" translatable="false">
++        <item>http://connect.rom.miui.com/generate_204</item>
++    </string-array>
++</resources>
+diff --git a/overlay/rro_packages/NetworkStackOverlay/res/values/config.xml b/overlay/rro_packages/NetworkStackOverlay/res/values/config.xml
+index aef5c9c..ecc1408 100644
+--- a/overlay/rro_packages/NetworkStackOverlay/res/values/config.xml
++++ b/overlay/rro_packages/NetworkStackOverlay/res/values/config.xml
+@@ -19,4 +19,11 @@
+     <!-- Configuration for including DHCP client hostname option -->
+     <bool name="config_dhcp_client_hostname">true</bool>
+ 
++    <!-- Network validation probe URLs -->
++    <string name="config_captive_portal_http_url" translatable="false">http://connect.rom.miui.com/generate_204</string>
++    <string name="config_captive_portal_https_url" translatable="false">https://connect.rom.miui.com/generate_204</string>
++    <string-array name="config_captive_portal_fallback_urls" translatable="false">
++        <item>http://connect.rom.miui.com/generate_204</item>
++    </string-array>
++
+ </resources>
+-- 
+2.43.0
+

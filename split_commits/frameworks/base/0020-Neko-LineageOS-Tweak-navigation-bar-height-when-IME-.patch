@@ -1,0 +1,46 @@
+From 71241f125c19577e79d6549608eab8fe33a3d62c Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 10 Jul 2026 18:30:15 +0800
+Subject: [PATCH] Neko LineageOS: Tweak navigation bar height when IME is poped
+ up
+
+Change-Id: Id1664f17446bebe88ee81c8b3fb356949cb4df68
+---
+ .../res/values-sw600dp/dimens.xml                        | 9 +++++++++
+ .../res/values/dimens.xml                                | 4 +++-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+ create mode 100644 packages/overlays/NavigationBarModeGesturalOverlay/res/values-sw600dp/dimens.xml
+
+diff --git a/packages/overlays/NavigationBarModeGesturalOverlay/res/values-sw600dp/dimens.xml b/packages/overlays/NavigationBarModeGesturalOverlay/res/values-sw600dp/dimens.xml
+new file mode 100644
+index 000000000..7865c7d14
+--- /dev/null
++++ b/packages/overlays/NavigationBarModeGesturalOverlay/res/values-sw600dp/dimens.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     Copyright (C) 2026 Neko LineageOS
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <!-- Height of the IME-only bottom navigation area in gestural mode on sw600dp devices. -->
++    <dimen name="input_method_navigation_bar_height">40dp</dimen>
++</resources>
+diff --git a/packages/overlays/NavigationBarModeGesturalOverlay/res/values/dimens.xml b/packages/overlays/NavigationBarModeGesturalOverlay/res/values/dimens.xml
+index 674bc749b..e259f0b7b 100644
+--- a/packages/overlays/NavigationBarModeGesturalOverlay/res/values/dimens.xml
++++ b/packages/overlays/NavigationBarModeGesturalOverlay/res/values/dimens.xml
+@@ -25,6 +25,8 @@
+     <dimen name="navigation_bar_width">24dp</dimen>
+     <!-- Height of the bottom navigation / system bar. -->
+     <dimen name="navigation_bar_frame_height">48dp</dimen>
++    <!-- Height of the IME-only bottom navigation area in gestural mode. -->
++    <dimen name="input_method_navigation_bar_height">38dp</dimen>
+     <!-- The height of the bottom navigation gesture area. -->
+     <dimen name="navigation_bar_gesture_height">32dp</dimen>
+-</resources>
+\ No newline at end of file
++</resources>
+-- 
+2.43.0
+
