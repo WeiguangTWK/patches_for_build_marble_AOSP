@@ -1,0 +1,237 @@
+From 15abb472baee3140e88aef2382ad10f604b8592a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 11 Jul 2026 16:07:20 +0800
+Subject: [PATCH] Neko LineageOS: Handle schema update from nekolos v4 &
+ official v4 to nekolos v5
+
+This is a mostly fix up commit for schema inconsistency caused crash. We might need to handle that user
+dirty flash neko lineageos over official lineageos
+
+AndroidRuntime: FATAL EXCEPTION: main
+AndroidRuntime: Process: org.lineageos.updater, PID: 14602
+AndroidRuntime: android.database.sqlite.SQLiteException: duplicate column name: min_base_timestamp (code 1 SQLITE_ERROR): , while compiling: ALTER TABLE `updates` ADD COLUMN `min_base_timestamp` INTEGER NOT NULL DEFAULT 0
+AndroidRuntime: at android.database.sqlite.SQLiteConnection.nativePrepareStatement(Native Method)
+AndroidRuntime: at android.database.sqlite.SQLiteConnection.-$$Nest$smnativePrepareStatement(Unknown Source:0)
+AndroidRuntime: at android.database.sqlite.SQLiteConnection$PreparedStatementCache.createStatement(SQLiteConnection.java:1627)
+AndroidRuntime: at android.database.sqlite.SQLiteConnection.acquirePreparedStatementLI(SQLiteConnection.java:1117)
+AndroidRuntime: at android.database.sqlite.SQLiteConnection.acquirePreparedStatement(SQLiteConnection.java:1145)
+AndroidRuntime: at android.database.sqlite.SQLiteConnection.prepare(SQLiteConnection.java:708)
+AndroidRuntime: at android.database.sqlite.SQLiteSession.prepare(SQLiteSession.java:625)
+AndroidRuntime: at android.database.sqlite.SQLiteProgram.<init>(SQLiteProgram.java:62)
+AndroidRuntime: at android.database.sqlite.SQLiteStatement.<init>(SQLiteStatement.java:34)
+AndroidRuntime: at android.database.sqlite.SQLiteDatabase.executeSql(SQLiteDatabase.java:2232)
+AndroidRuntime: at android.database.sqlite.SQLiteDatabase.execSQL(SQLiteDatabase.java:2152)
+AndroidRuntime: at androidx.sqlite.db.framework.FrameworkSQLiteDatabase.execSQL(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:1)
+AndroidRuntime: at org.lineageos.updater.data.source.local.UpdatesDatabase$Companion$MIGRATION_1_2$1.migrate(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:11)
+AndroidRuntime: at androidx.room.migration.Migration.migrate(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:7)
+AndroidRuntime: at androidx.room.RoomConnectionManager$SupportOpenHelperCallback.onUpgrade(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:200)
+AndroidRuntime: at androidx.sqlite.db.framework.FrameworkSQLiteOpenHelper$OpenHelper.onUpgrade(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:15)
+AndroidRuntime: at android.database.sqlite.SQLiteOpenHelper.getDatabaseLocked(SQLiteOpenHelper.java:433)
+AndroidRuntime: at android.database.sqlite.SQLiteOpenHelper.getWritableDatabase(SQLiteOpenHelper.java:332)
+AndroidRuntime: at androidx.sqlite.db.framework.FrameworkSQLiteOpenHelper$OpenHelper.innerGetDatabase(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:76)
+AndroidRuntime: at androidx.sqlite.db.framework.FrameworkSQLiteOpenHelper$OpenHelper.getSupportDatabase(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:24)
+AndroidRuntime: at androidx.sqlite.db.framework.FrameworkSQLiteOpenHelper.getWritableDatabase(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:10)
+AndroidRuntime: at androidx.room.coroutines.PassthroughConnectionPool$$ExternalSyntheticLambda0.invoke(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:142)
+AndroidRuntime: at kotlin.SynchronizedLazyImpl.getValue(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:21)
+AndroidRuntime: at androidx.room.coroutines.PassthroughConnectionPool.useConnection(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:33)
+AndroidRuntime: at androidx.room.RoomDatabase.useConnection(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:7)
+AndroidRuntime: at androidx.room.TriggerBasedInvalidationTracker.syncTriggers$room_runtime(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:78)
+AndroidRuntime: at androidx.room.TriggerBasedInvalidationTracker$createFlow$1$1.invokeSuspend(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:29)
+AndroidRuntime: at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:8)
+AndroidRuntime: at kotlinx.coroutines.DispatchedTask.run(go/retraceme f3f42270819a4c843b948ece50dec9351a8d28e33f34e1e51bb03367165d2c7b:113)
+AndroidRuntime: at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1154)
+AndroidRuntime: at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:652)
+AndroidRuntime: at java.lang.Thread.run(Thread.java:1563)
+AndroidRuntime: Suppressed: kotlinx.coroutines.internal.DiagnosticCoroutineContextException: [StandaloneCoroutine{Cancelling}@8751f2e, Dispatchers.Main.immediate]
+Change-Id: I5d8bee78961f52bc5bac391ac69ae12ed7a39695
+---
+ .../data/source/local/UpdatesDatabase.kt      |  38 +++++-
+ .../5.json                                    | 122 ++++++++++++++++++
+ 2 files changed, 158 insertions(+), 2 deletions(-)
+ create mode 100644 schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/5.json
+
+diff --git a/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt b/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt
+index 8619e66..d8cb076 100644
+--- a/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt
++++ b/app/src/main/java/org/lineageos/updater/data/source/local/UpdatesDatabase.kt
+@@ -78,12 +78,46 @@ abstract class UpdatesDatabase : RoomDatabase() {
+ 
+         private val MIGRATION_4_5 = object : Migration(4, 5) {
+             override fun migrate(db: SupportSQLiteDatabase) {
+-                db.execSQL(
+-                    "ALTER TABLE `updates` ADD COLUMN `min_base_timestamp` INTEGER NOT NULL DEFAULT 0"
++                // Version 4 existed in two forms: upstream added payload metadata columns,
++                // while older Neko builds added min_base_timestamp. Converge both to v5.
++                addColumnIfMissing(db, "payload_metadata_offset", "INTEGER")
++                addColumnIfMissing(db, "payload_metadata_size", "INTEGER")
++                addColumnIfMissing(db, "payload_offset", "INTEGER")
++                addColumnIfMissing(db, "payload_size", "INTEGER")
++                addColumnIfMissing(db, "payload_properties_offset", "INTEGER")
++                addColumnIfMissing(db, "payload_properties_size", "INTEGER")
++                addColumnIfMissing(
++                    db,
++                    "min_base_timestamp",
++                    "INTEGER NOT NULL DEFAULT 0"
+                 )
+             }
+         }
+ 
++        private fun addColumnIfMissing(
++            db: SupportSQLiteDatabase,
++            column: String,
++            definition: String
++        ) {
++            if (!hasColumn(db, "updates", column)) {
++                db.execSQL("ALTER TABLE `updates` ADD COLUMN `$column` $definition")
++            }
++        }
++
++        private fun hasColumn(
++            db: SupportSQLiteDatabase,
++            table: String,
++            column: String
++        ): Boolean = db.query("PRAGMA table_info(`$table`)").use { cursor ->
++            val nameIndex = cursor.getColumnIndexOrThrow("name")
++            while (cursor.moveToNext()) {
++                if (cursor.getString(nameIndex) == column) {
++                    return@use true
++                }
++            }
++            false
++        }
++
+         @JvmStatic
+         fun getInstance(context: Context): UpdatesDatabase = instance ?: synchronized(this) {
+             instance ?: Room.databaseBuilder(
+diff --git a/schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/5.json b/schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/5.json
+new file mode 100644
+index 0000000..9203504
+--- /dev/null
++++ b/schemas/org.lineageos.updater.data.source.local.UpdatesDatabase/5.json
+@@ -0,0 +1,122 @@
++{
++  "formatVersion": 1,
++  "database": {
++    "version": 5,
++    "identityHash": "9f953380abef6eaa33ea87c2e8a28cc8",
++    "entities": [
++      {
++        "tableName": "updates",
++        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`download_id` TEXT NOT NULL, `status` INTEGER NOT NULL, `path` TEXT, `timestamp` INTEGER NOT NULL, `min_base_timestamp` INTEGER NOT NULL, `type` TEXT, `version` TEXT NOT NULL, `size` INTEGER NOT NULL, `name` TEXT NOT NULL, `os_patch_level` TEXT, `os_sdk_level` INTEGER, `payload_metadata_offset` INTEGER, `payload_metadata_size` INTEGER, `payload_offset` INTEGER, `payload_size` INTEGER, `payload_properties_offset` INTEGER, `payload_properties_size` INTEGER, `download_url` TEXT, PRIMARY KEY(`download_id`))",
++        "fields": [
++          {
++            "fieldPath": "downloadId",
++            "columnName": "download_id",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "status",
++            "columnName": "status",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "path",
++            "columnName": "path",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "timestamp",
++            "columnName": "timestamp",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "minBaseTimestamp",
++            "columnName": "min_base_timestamp",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "type",
++            "columnName": "type",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "version",
++            "columnName": "version",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "size",
++            "columnName": "size",
++            "affinity": "INTEGER",
++            "notNull": true
++          },
++          {
++            "fieldPath": "name",
++            "columnName": "name",
++            "affinity": "TEXT",
++            "notNull": true
++          },
++          {
++            "fieldPath": "osPatchLevel",
++            "columnName": "os_patch_level",
++            "affinity": "TEXT"
++          },
++          {
++            "fieldPath": "osSdkLevel",
++            "columnName": "os_sdk_level",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "payloadMetadataOffset",
++            "columnName": "payload_metadata_offset",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "payloadMetadataSize",
++            "columnName": "payload_metadata_size",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "payloadOffset",
++            "columnName": "payload_offset",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "payloadSize",
++            "columnName": "payload_size",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "payloadPropertiesOffset",
++            "columnName": "payload_properties_offset",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "payloadPropertiesSize",
++            "columnName": "payload_properties_size",
++            "affinity": "INTEGER"
++          },
++          {
++            "fieldPath": "downloadUrl",
++            "columnName": "download_url",
++            "affinity": "TEXT"
++          }
++        ],
++        "primaryKey": {
++          "autoGenerate": false,
++          "columnNames": [
++            "download_id"
++          ]
++        }
++      }
++    ],
++    "setupQueries": [
++      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
++      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '9f953380abef6eaa33ea87c2e8a28cc8')"
++    ]
++  }
++}
+\ No newline at end of file
+-- 
+2.43.0
+
