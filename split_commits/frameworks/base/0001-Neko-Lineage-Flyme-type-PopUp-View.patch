@@ -1,4 +1,4 @@
-From 8859a359bf404a77a8150aa67ec5f178fe253dc5 Mon Sep 17 00:00:00 2001
+From 622f1165c5a06e8268df0c0e4e2ac05c2f9caadd Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Tue, 30 Jun 2026 14:10:06 +0800
 Subject: [PATCH] Neko-Lineage: Flyme-type PopUp View
@@ -116,13 +116,13 @@ signed-off-by: WeiguangTWK <weiguangtwk@outlook.com>
  .../wm/WindowChangeAnimationSpecExt.java      |  374 ++++
  .../android/server/wm/WindowContainer.java    |   22 +-
  .../android/server/wm/WindowContainerExt.java |  379 ++++
- .../server/wm/WindowManagerService.java       |    4 +
+ .../server/wm/WindowManagerService.java       |    8 +
  .../server/wm/WindowManagerServiceExt.java    |   87 +
  .../server/wm/WindowResizingAlgorithm.java    |  196 ++
  .../com/android/server/wm/WindowState.java    |   14 +-
  .../server/wm/WindowSurfacePlacer.java        |    1 +
  .../com/android/server/wm/WindowToken.java    |    3 +
- 113 files changed, 9807 insertions(+), 69 deletions(-)
+ 113 files changed, 9811 insertions(+), 69 deletions(-)
  create mode 100644 core/java/android/app/ActivityOptionsExt.java
  create mode 100644 core/java/android/content/res/ConfigurationExt.java
  create mode 100644 core/java/android/view/MotionEventExt.java
@@ -11673,7 +11673,7 @@ index 000000000..7e624de3b
 +    }
 +}
 diff --git a/services/core/java/com/android/server/wm/WindowManagerService.java b/services/core/java/com/android/server/wm/WindowManagerService.java
-index c4fd7cad4..7be068fab 100644
+index c4fd7cad4..09748fff4 100644
 --- a/services/core/java/com/android/server/wm/WindowManagerService.java
 +++ b/services/core/java/com/android/server/wm/WindowManagerService.java
 @@ -161,6 +161,8 @@ import static com.android.window.flags.Flags.enableDeviceStateAutoRotateSettingR
@@ -11685,7 +11685,16 @@ index c4fd7cad4..7be068fab 100644
  import android.Manifest;
  import android.Manifest.permission;
  import android.animation.ValueAnimator;
-@@ -3507,9 +3509,11 @@ public class WindowManagerService extends IWindowManager.Stub
+@@ -1484,6 +1486,8 @@ public class WindowManagerService extends IWindowManager.Stub
+ 
+         mLatencyTracker = LatencyTracker.getInstance(context);
+ 
++        WindowManagerServiceExt.getInstance().init(this);
++
+         mSettingsObserver = new SettingsObserver();
+ 
+         mSurfaceAnimationRunner = new SurfaceAnimationRunner(mTransactionFactory,
+@@ -3507,9 +3511,11 @@ public class WindowManagerService extends IWindowManager.Stub
  
      @Override
      public void onUserSwitched() {
@@ -11696,6 +11705,15 @@ index c4fd7cad4..7be068fab 100644
 +            PopUpWindowController.getInstance().onUserSwitched();
          }
      }
+ 
+@@ -5960,6 +5966,8 @@ public class WindowManagerService extends IWindowManager.Stub
+                 // Ignore, we cannot do anything if we failed to register VR mode listener
+             }
+         }
++
++        WindowManagerServiceExt.getInstance().systemReady();
+     }
+ 
  
 diff --git a/services/core/java/com/android/server/wm/WindowManagerServiceExt.java b/services/core/java/com/android/server/wm/WindowManagerServiceExt.java
 new file mode 100644
