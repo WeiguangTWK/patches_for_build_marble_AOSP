@@ -1,0 +1,229 @@
+From 826e4a1030f0024c02281114828b4c4e929785d3 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 13 Jul 2026 17:24:47 +0800
+Subject: [PATCH] Neko LineageOS: Storage persistent HBM bright in lineage-sdk
+
+Change-Id: Iaa14106cb8fb98ed5e1a80cf62d9e5abfc9ed497
+---
+ lineage/res/res/values-zh-rCN/strings.xml     |  5 ++
+ lineage/res/res/values/config.xml             |  3 +
+ lineage/res/res/values/strings.xml            |  7 ++
+ lineage/res/res/values/symbols.xml            |  6 ++
+ ...eSystemSettingConfirmSwitchPreference.java | 80 +++++++++++++++++++
+ .../LineagePreferenceLib/res/values/attrs.xml |  6 ++
+ .../lineageos/providers/LineageSettings.java  | 16 ++++
+ 7 files changed, 123 insertions(+)
+ create mode 100644 packages/LineagePreferenceLib/java/lineageos/preference/LineageSystemSettingConfirmSwitchPreference.java
+
+diff --git a/lineage/res/res/values-zh-rCN/strings.xml b/lineage/res/res/values-zh-rCN/strings.xml
+index d8be106..af2cca5 100644
+--- a/lineage/res/res/values-zh-rCN/strings.xml
++++ b/lineage/res/res/values-zh-rCN/strings.xml
+@@ -5,6 +5,11 @@
+      SPDX-License-Identifier: Apache-2.0
+ -->
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
++    <string name="persistent_manual_hbm_title">允许将峰值亮度作为常驻亮度</string>
++    <string name="persistent_manual_hbm_summary">仅在关闭自适应亮度后生效。注意：长时间使用可能损坏屏幕或缩短其寿命</string>
++    <string name="persistent_manual_hbm_dialog_title">启用持续峰值亮度？</string>
++    <string name="persistent_manual_hbm_dialog_message">长时间使用会显著增加功耗和发热，并可能造成不可逆的屏幕损伤或缩短屏幕寿命。</string>
++    <string name="persistent_manual_hbm_dialog_enable">仍要启用</string>
+     <string name="lineageos_system_label">LineageOS 系统</string>
+     <string name="permlab_modifyProfiles">修改系统配置</string>
+     <string name="permdesc_modifyProfiles">允许应用修改系统配置文件。</string>
+diff --git a/lineage/res/res/values/config.xml b/lineage/res/res/values/config.xml
+index 354d020..504a4e5 100644
+--- a/lineage/res/res/values/config.xml
++++ b/lineage/res/res/values/config.xml
+@@ -37,6 +37,9 @@
+     <bool name="config_defaultCABC">true</bool>
+     <bool name="config_defaultAntiFlicker">false</bool>
+ 
++    <!-- Whether Settings should expose manual access to an unlimited HBM range. -->
++    <bool name="config_persistentManualHbmAvailable">false</bool>
++
+     <!-- Display mode remapping table.
+          If the mode names returned by the backend do not match
+          the predefined and translated strings in the Settings
+diff --git a/lineage/res/res/values/strings.xml b/lineage/res/res/values/strings.xml
+index 9c43171..f6cbd7d 100644
+--- a/lineage/res/res/values/strings.xml
++++ b/lineage/res/res/values/strings.xml
+@@ -63,6 +63,13 @@
+     <string name="live_display_outdoor_summary">Use outdoor settings only</string>
+     <string name="live_display_hint">LiveDisplay can help reduce eyestrain and help you sleep at night. Click here to try it out!</string>
+ 
++    <!-- Persistent manual high brightness mode -->
++    <string name="persistent_manual_hbm_title">Allow peak brightness as a persistent brightness level</string>
++    <string name="persistent_manual_hbm_summary">Only applies when adaptive brightness is off. Warning: prolonged use may damage the display or shorten its lifespan</string>
++    <string name="persistent_manual_hbm_dialog_title">Enable persistent peak brightness?</string>
++    <string name="persistent_manual_hbm_dialog_message">Prolonged use can significantly increase power consumption and heat, and may cause permanent display damage or shorten its lifespan.</string>
++    <string name="persistent_manual_hbm_dialog_enable">Enable anyway</string>
++
+     <string name="accessibility_quick_settings_live_display_off">LiveDisplay off.</string>
+     <string name="accessibility_quick_settings_live_display_auto">LiveDisplay: auto mode.</string>
+     <string name="accessibility_quick_settings_live_display_day">LiveDisplay: day mode.</string>
+diff --git a/lineage/res/res/values/symbols.xml b/lineage/res/res/values/symbols.xml
+index 289d9b6..c2d404f 100644
+--- a/lineage/res/res/values/symbols.xml
++++ b/lineage/res/res/values/symbols.xml
+@@ -33,6 +33,11 @@
+     <java-symbol type="bool" name="config_enableLiveDisplay" />
+     <java-symbol type="string" name="live_display_title" />
+     <java-symbol type="string" name="live_display_hint" />
++    <java-symbol type="string" name="persistent_manual_hbm_title" />
++    <java-symbol type="string" name="persistent_manual_hbm_summary" />
++    <java-symbol type="string" name="persistent_manual_hbm_dialog_title" />
++    <java-symbol type="string" name="persistent_manual_hbm_dialog_message" />
++    <java-symbol type="string" name="persistent_manual_hbm_dialog_enable" />
+     <java-symbol type="string" name="live_display_auto" />
+     <java-symbol type="string" name="live_display_auto_summary" />
+     <java-symbol type="string" name="live_display_day" />
+@@ -62,6 +67,7 @@
+     <java-symbol type="bool" name="config_defaultColorEnhancement" />
+     <java-symbol type="bool" name="config_defaultCABC" />
+     <java-symbol type="bool" name="config_defaultAntiFlicker" />
++    <java-symbol type="bool" name="config_persistentManualHbmAvailable" />
+ 
+     <java-symbol type="bool" name="config_filterDisplayModes" />
+     <java-symbol type="array" name="config_displayModeMappings" />
+diff --git a/packages/LineagePreferenceLib/java/lineageos/preference/LineageSystemSettingConfirmSwitchPreference.java b/packages/LineagePreferenceLib/java/lineageos/preference/LineageSystemSettingConfirmSwitchPreference.java
+new file mode 100644
+index 0000000..a750238
+--- /dev/null
++++ b/packages/LineagePreferenceLib/java/lineageos/preference/LineageSystemSettingConfirmSwitchPreference.java
+@@ -0,0 +1,80 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Neko LineageOS
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package lineageos.preference;
++
++import android.app.AlertDialog;
++import android.content.Context;
++import android.content.res.TypedArray;
++import android.util.AttributeSet;
++
++/** A Lineage system setting switch that requires confirmation before it is enabled. */
++public class LineageSystemSettingConfirmSwitchPreference
++        extends LineageSystemSettingSwitchPreference {
++
++    private final CharSequence mConfirmationDialogTitle;
++    private final CharSequence mConfirmationDialogMessage;
++    private final CharSequence mConfirmationPositiveButtonText;
++
++    private AlertDialog mConfirmationDialog;
++
++    public LineageSystemSettingConfirmSwitchPreference(Context context, AttributeSet attrs,
++            int defStyle) {
++        super(context, attrs, defStyle);
++        TypedArray a = context.obtainStyledAttributes(attrs,
++                R.styleable.lineage_ConfirmSwitchPreference, defStyle, 0);
++        mConfirmationDialogTitle = a.getText(
++                R.styleable.lineage_ConfirmSwitchPreference_confirmationDialogTitle);
++        mConfirmationDialogMessage = a.getText(
++                R.styleable.lineage_ConfirmSwitchPreference_confirmationDialogMessage);
++        mConfirmationPositiveButtonText = a.getText(
++                R.styleable.lineage_ConfirmSwitchPreference_confirmationPositiveButtonText);
++        a.recycle();
++    }
++
++    public LineageSystemSettingConfirmSwitchPreference(Context context, AttributeSet attrs) {
++        this(context, attrs, androidx.preference.R.attr.switchPreferenceCompatStyle);
++    }
++
++    public LineageSystemSettingConfirmSwitchPreference(Context context) {
++        this(context, null);
++    }
++
++    @Override
++    protected void onClick() {
++        if (isChecked()) {
++            super.onClick();
++            return;
++        }
++
++        if (mConfirmationDialog != null && mConfirmationDialog.isShowing()) {
++            return;
++        }
++
++        final CharSequence positiveButtonText = mConfirmationPositiveButtonText != null
++                ? mConfirmationPositiveButtonText : getContext().getText(android.R.string.ok);
++        mConfirmationDialog = new AlertDialog.Builder(getContext())
++                .setTitle(mConfirmationDialogTitle)
++                .setMessage(mConfirmationDialogMessage)
++                .setNegativeButton(android.R.string.cancel, null)
++                .setPositiveButton(positiveButtonText, (dialog, which) -> {
++                    if (callChangeListener(true)) {
++                        setChecked(true);
++                    }
++                })
++                .create();
++        mConfirmationDialog.setOnDismissListener(dialog -> mConfirmationDialog = null);
++        mConfirmationDialog.show();
++    }
++
++    @Override
++    public void onDetached() {
++        if (mConfirmationDialog != null) {
++            mConfirmationDialog.dismiss();
++            mConfirmationDialog = null;
++        }
++        super.onDetached();
++    }
++}
+diff --git a/packages/LineagePreferenceLib/res/values/attrs.xml b/packages/LineagePreferenceLib/res/values/attrs.xml
+index 6f548e2..333dd14 100644
+--- a/packages/LineagePreferenceLib/res/values/attrs.xml
++++ b/packages/LineagePreferenceLib/res/values/attrs.xml
+@@ -18,6 +18,12 @@
+         <attr name="minSummaryLines" format="integer" />
+     </declare-styleable>
+ 
++    <declare-styleable name="lineage_ConfirmSwitchPreference">
++        <attr name="confirmationDialogTitle" format="reference|string" />
++        <attr name="confirmationDialogMessage" format="reference|string" />
++        <attr name="confirmationPositiveButtonText" format="reference|string" />
++    </declare-styleable>
++
+     <!--Settings search providers-->
+     <declare-styleable name="lineage_Searchable">
+         <attr name="xmlRes" format="reference" />
+diff --git a/sdk/src/java/lineageos/providers/LineageSettings.java b/sdk/src/java/lineageos/providers/LineageSettings.java
+index 3e4fea1..2fc2552 100644
+--- a/sdk/src/java/lineageos/providers/LineageSettings.java
++++ b/sdk/src/java/lineageos/providers/LineageSettings.java
+@@ -1583,6 +1583,20 @@ public final class LineageSettings {
+         public static final Validator DISPLAY_COLOR_ENHANCE_VALIDATOR =
+                 sBooleanValidator;
+ 
++        /**
++         * Whether the high brightness mode range is available while brightness is controlled
++         * manually. This is only honored on displays without an HBM time limit.
++         * 0 = off, 1 = on
++         *
++         * @hide
++         */
++        public static final String PERSISTENT_MANUAL_HBM_ENABLED =
++                "persistent_manual_hbm_enabled";
++
++        /** @hide */
++        public static final Validator PERSISTENT_MANUAL_HBM_ENABLED_VALIDATOR =
++                sBooleanValidator;
++
+         /**
+          * Use auto contrast optimization feature of display
+          * 0 = 0ff, 1 = on
+@@ -2249,6 +2263,8 @@ public final class LineageSettings {
+             VALIDATORS.put(DISPLAY_READING_MODE, DISPLAY_READING_MODE_VALIDATOR);
+             VALIDATORS.put(DISPLAY_CABC, DISPLAY_CABC_VALIDATOR);
+             VALIDATORS.put(DISPLAY_COLOR_ENHANCE, DISPLAY_COLOR_ENHANCE_VALIDATOR);
++            VALIDATORS.put(PERSISTENT_MANUAL_HBM_ENABLED,
++                    PERSISTENT_MANUAL_HBM_ENABLED_VALIDATOR);
+             VALIDATORS.put(DISPLAY_COLOR_ADJUSTMENT, DISPLAY_COLOR_ADJUSTMENT_VALIDATOR);
+             VALIDATORS.put(LIVE_DISPLAY_HINTED, LIVE_DISPLAY_HINTED_VALIDATOR);
+             VALIDATORS.put(TRUST_INTERFACE_HINTED, TRUST_INTERFACE_HINTED_VALIDATOR);
+-- 
+2.43.0
+

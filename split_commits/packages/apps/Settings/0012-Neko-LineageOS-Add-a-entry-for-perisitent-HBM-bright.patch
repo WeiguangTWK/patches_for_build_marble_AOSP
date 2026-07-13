@@ -1,0 +1,34 @@
+From 600934b668a8b0cff847eb01c3b62214710d3f7a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 13 Jul 2026 17:26:51 +0800
+Subject: [PATCH] Neko LineageOS: Add a entry for perisitent HBM brightness
+
+Change-Id: Ib5142638ae3e7584528f493070ee5e4b2a971045
+---
+ res/xml/display_settings.xml | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/res/xml/display_settings.xml b/res/xml/display_settings.xml
+index 05e7c2a..daf8d21 100644
+--- a/res/xml/display_settings.xml
++++ b/res/xml/display_settings.xml
+@@ -42,6 +42,16 @@
+             settings:userRestriction="no_config_brightness"
+             settings:controller="com.android.settings.display.AutoBrightnessPreferenceController" />
+ 
++        <lineageos.preference.LineageSystemSettingConfirmSwitchPreference
++            android:key="persistent_manual_hbm_enabled"
++            android:title="@*lineageos.platform:string/persistent_manual_hbm_title"
++            android:summary="@*lineageos.platform:string/persistent_manual_hbm_summary"
++            android:defaultValue="false"
++            settings:confirmationDialogTitle="@*lineageos.platform:string/persistent_manual_hbm_dialog_title"
++            settings:confirmationDialogMessage="@*lineageos.platform:string/persistent_manual_hbm_dialog_message"
++            settings:confirmationPositiveButtonText="@*lineageos.platform:string/persistent_manual_hbm_dialog_enable"
++            settings:requiresConfig="@*lineageos.platform:bool/config_persistentManualHbmAvailable" />
++
+         <com.android.settingslib.PrimarySwitchPreference
+             android:fragment="com.android.settings.display.HdrBrightnessSettings"
+             android:key="hdr_preference"
+-- 
+2.43.0
+

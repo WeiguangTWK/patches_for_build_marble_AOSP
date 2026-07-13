@@ -1,0 +1,62 @@
+From b0db796d320d3d475ba6280f0903c25c1667bab4 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 13 Jul 2026 17:15:18 +0800
+Subject: [PATCH] Neko LineageOS: Add INFRA for Lineage SDK res
+
+Some feature in the lineage-sdk will also be a part of device-profile-dependent feature
+
+Change-Id: I75acf3dceee91b2d75e9d5006916d6bbcb639b25
+---
+ device.mk                           |  1 +
+ overlay/Lineage/Android.bp          |  9 +++++++++
+ overlay/Lineage/AndroidManifest.xml | 10 ++++++++++
+ 3 files changed, 20 insertions(+)
+ create mode 100644 overlay/Lineage/Android.bp
+ create mode 100644 overlay/Lineage/AndroidManifest.xml
+
+diff --git a/device.mk b/device.mk
+index efd687c..fb7aed7 100644
+--- a/device.mk
++++ b/device.mk
+@@ -39,6 +39,7 @@ $(call soong_config_set,xiaomi_sm8450_sensor_notifier,extension_lib,//device/xia
+ PRODUCT_PACKAGES += \
+     ApertureResMarble \
+     FrameworksResMarble \
++    LineageResMarble \
+     NfcResMarble \
+     SettingsProviderResMarble \
+     SettingsProviderResMarbleCN \
+diff --git a/overlay/Lineage/Android.bp b/overlay/Lineage/Android.bp
+new file mode 100644
+index 0000000..e262a4b
+--- /dev/null
++++ b/overlay/Lineage/Android.bp
+@@ -0,0 +1,9 @@
++//
++// SPDX-FileCopyrightText: 2026 The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++//
++
++runtime_resource_overlay {
++    name: "LineageResMarble",
++    device_specific: true,
++}
+diff --git a/overlay/Lineage/AndroidManifest.xml b/overlay/Lineage/AndroidManifest.xml
+new file mode 100644
+index 0000000..52cedb8
+--- /dev/null
++++ b/overlay/Lineage/AndroidManifest.xml
+@@ -0,0 +1,10 @@
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    package="lineageos.platform.overlay.marble">
++    <overlay android:targetPackage="lineageos.platform"
++             android:isStatic="true"
++             android:priority="700" />
++</manifest>
+-- 
+2.43.0
+

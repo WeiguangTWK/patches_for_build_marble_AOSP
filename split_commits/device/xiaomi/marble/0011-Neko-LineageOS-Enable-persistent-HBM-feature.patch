@@ -1,0 +1,30 @@
+From 38c9b60c97d8d36bf4bc98450e1dcd4f551e22c3 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 13 Jul 2026 17:18:14 +0800
+Subject: [PATCH] Neko LineageOS: Enable persistent HBM feature
+
+In the display profile of Marble it claim to have 1000nit of brightness in HBM
+
+Change-Id: If73765d5d3dd06ee3ffaf5461eb64c00838620fd
+---
+ overlay/Lineage/res/values/config.xml | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+ create mode 100644 overlay/Lineage/res/values/config.xml
+
+diff --git a/overlay/Lineage/res/values/config.xml b/overlay/Lineage/res/values/config.xml
+new file mode 100644
+index 0000000..fe918d3
+--- /dev/null
++++ b/overlay/Lineage/res/values/config.xml
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <bool name="config_persistentManualHbmAvailable">true</bool>
++</resources>
+-- 
+2.43.0
+

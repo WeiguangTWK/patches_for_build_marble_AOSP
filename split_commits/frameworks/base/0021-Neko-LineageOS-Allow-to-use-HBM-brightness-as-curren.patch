@@ -1,0 +1,352 @@
+From 54eda248c2610ec34d1516d06e69a07a2ff76281 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 13 Jul 2026 17:21:26 +0800
+Subject: [PATCH] Neko LineageOS: Allow to use HBM brightness as current
+ brightness when enabled
+
+Co-Authored-by: adithya2306
+
+Change-Id: I87ce2e577a9fe326d3a097ff4c2d960aa032c23b
+---
+ .../display/BrightnessRangeController.java    |  4 +
+ .../display/DisplayPowerController.java       |  1 +
+ .../display/HighBrightnessModeController.java | 83 ++++++++++++++++---
+ .../HighBrightnessModeControllerTest.java     | 76 ++++++++++++++++-
+ 4 files changed, 152 insertions(+), 12 deletions(-)
+
+diff --git a/services/core/java/com/android/server/display/BrightnessRangeController.java b/services/core/java/com/android/server/display/BrightnessRangeController.java
+index 89bb6f74a..a0e073a5f 100644
+--- a/services/core/java/com/android/server/display/BrightnessRangeController.java
++++ b/services/core/java/com/android/server/display/BrightnessRangeController.java
+@@ -92,6 +92,10 @@ class BrightnessRangeController {
+         );
+     }
+ 
++    void onUserSwitch() {
++        mHbmController.onUserSwitch();
++    }
++
+     void onBrightnessChanged(float brightness, float unthrottledBrightness,
+             DisplayBrightnessState state) {
+         mHbmController.onHdrBoostApplied(
+diff --git a/services/core/java/com/android/server/display/DisplayPowerController.java b/services/core/java/com/android/server/display/DisplayPowerController.java
+index e1f13b9f7..dcca2e788 100644
+--- a/services/core/java/com/android/server/display/DisplayPowerController.java
++++ b/services/core/java/com/android/server/display/DisplayPowerController.java
+@@ -763,6 +763,7 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
+         }
+ 
+         handleBrightnessModeChange();
++        mBrightnessRangeController.onUserSwitch();
+         if (mBrightnessTracker != null) {
+             mBrightnessTracker.onSwitchUser(newUserId);
+         }
+diff --git a/services/core/java/com/android/server/display/HighBrightnessModeController.java b/services/core/java/com/android/server/display/HighBrightnessModeController.java
+index 21a303dc8..e2c4eb234 100644
+--- a/services/core/java/com/android/server/display/HighBrightnessModeController.java
++++ b/services/core/java/com/android/server/display/HighBrightnessModeController.java
+@@ -41,6 +41,8 @@ import com.android.server.display.config.HighBrightnessModeData;
+ import com.android.server.display.feature.DisplayManagerFlags;
+ import com.android.server.display.utils.DebugUtils;
+ 
++import lineageos.providers.LineageSettings;
++
+ import java.io.PrintWriter;
+ import java.util.ArrayDeque;
+ import java.util.Iterator;
+@@ -93,6 +95,7 @@ class HighBrightnessModeController {
+     private boolean mIsTimeAvailable = false;
+     private boolean mIsAutoBrightnessEnabled = false;
+     private boolean mIsAutoBrightnessOffByState = false;
++    private boolean mIsPersistentManualHbmEnabled = false;
+ 
+     // The following values are typically reported by DisplayPowerController.
+     // This value includes brightness throttling effects.
+@@ -241,7 +244,8 @@ class HighBrightnessModeController {
+         // session in mRunningStartTimeMillis, or the old one in mEvents.
+         final long runningStartTime = mHighBrightnessModeMetadata.getRunningStartTimeMillis();
+         final boolean wasHbmDrainingAvailableTime = runningStartTime != -1;
+-        final boolean shouldHbmDrainAvailableTime = mBrightness > mHbmData.transitionPoint
++        final boolean shouldHbmDrainAvailableTime = hasHbmTimeLimit()
++                && mBrightness > mHbmData.transitionPoint
+                 && !mIsHdrLayerPresent;
+         if (wasHbmDrainingAvailableTime != shouldHbmDrainAvailableTime) {
+             final long currentTime = mClock.uptimeMillis();
+@@ -283,6 +287,12 @@ class HighBrightnessModeController {
+         mHighBrightnessModeMetadata = hbmInfo;
+     }
+ 
++    void onUserSwitch() {
++        if (deviceSupportsHbm()) {
++            mSettingsObserver.updatePersistentManualHbm();
++        }
++    }
++
+     void resetHbmData(int width, int height, IBinder displayToken, String displayUniqueId,
+             HighBrightnessModeData hbmData, HdrBrightnessDeviceConfig hdrBrightnessCfg) {
+         mWidth = width;
+@@ -291,15 +301,17 @@ class HighBrightnessModeController {
+         mHdrBrightnessCfg = hdrBrightnessCfg;
+         mDisplayStatsId = displayUniqueId.hashCode();
+ 
++        mHandler.removeCallbacks(mRecalcRunnable);
+         unregisterHdrListener();
+         mSettingsObserver.stopObserving();
+         if (deviceSupportsHbm()) {
++            if (!hasHbmTimeLimit()) {
++                mHighBrightnessModeMetadata.setRunningStartTimeMillis(-1);
++                mHighBrightnessModeMetadata.getHbmEventQueue().clear();
++            }
++            mSettingsObserver.startObserving(!mHbmData.allowInLowPowerMode);
+             registerHdrListener(displayToken);
+             recalculateTimeAllowance();
+-            if (!mHbmData.allowInLowPowerMode) {
+-                mIsBlockedByLowPowerMode = false;
+-                mSettingsObserver.startObserving();
+-            }
+         }
+     }
+ 
+@@ -329,6 +341,7 @@ class HighBrightnessModeController {
+         pw.println("  mIsInAllowedAmbientRange=" + mIsInAllowedAmbientRange);
+         pw.println("  mIsAutoBrightnessEnabled=" + mIsAutoBrightnessEnabled);
+         pw.println("  mIsAutoBrightnessOffByState=" + mIsAutoBrightnessOffByState);
++        pw.println("  mIsPersistentManualHbmEnabled=" + mIsPersistentManualHbmEnabled);
+         pw.println("  mIsHdrLayerPresent=" + mIsHdrLayerPresent);
+         pw.println("  mBrightnessMin=" + mBrightnessMin);
+         pw.println("  mBrightnessMax=" + mBrightnessMax);
+@@ -379,14 +392,20 @@ class HighBrightnessModeController {
+         // brightness maximum; so we implement HDR-HBM in a way that doesn't adjust the max.
+         // See {@link #getHdrBrightnessValue}.
+         return !mIsHdrLayerPresent
+-                && (mIsAutoBrightnessEnabled && mIsTimeAvailable && mIsInAllowedAmbientRange
+-                && !mIsBlockedByLowPowerMode);
++                && ((mIsAutoBrightnessEnabled && mIsTimeAvailable && mIsInAllowedAmbientRange)
++                        || (!mIsAutoBrightnessEnabled && mIsPersistentManualHbmEnabled
++                                && !hasHbmTimeLimit()))
++                && !mIsBlockedByLowPowerMode;
+     }
+ 
+     boolean deviceSupportsHbm() {
+         return mHbmData != null && mHighBrightnessModeMetadata != null;
+     }
+ 
++    private boolean hasHbmTimeLimit() {
++        return mHbmData.timeWindowMillis != 0;
++    }
++
+     void disableHdrBoost() {
+         mHdrBoostDisabled = true;
+         unregisterHdrListener();
+@@ -456,6 +475,17 @@ class HighBrightnessModeController {
+      * Recalculates the allowable HBM time.
+      */
+     private void recalculateTimeAllowance() {
++        if (!deviceSupportsHbm()) {
++            return;
++        }
++
++        if (!hasHbmTimeLimit()) {
++            mHandler.removeCallbacks(mRecalcRunnable);
++            mIsTimeAvailable = true;
++            updateHbmMode();
++            return;
++        }
++
+         final long currentTime = mClock.uptimeMillis();
+         final long remainingTime = calculateRemainingTime(currentTime);
+ 
+@@ -674,7 +704,10 @@ class HighBrightnessModeController {
+     private final class SettingsObserver extends ContentObserver {
+         private final Uri mLowPowerModeSetting = Settings.Global.getUriFor(
+                 Settings.Global.LOW_POWER_MODE);
++        private final Uri mPersistentManualHbmSetting = LineageSettings.System.getUriFor(
++                LineageSettings.System.PERSISTENT_MANUAL_HBM_ENABLED);
+         private boolean mStarted;
++        private boolean mObserveLowPowerMode;
+ 
+         SettingsObserver(Handler handler) {
+             super(handler);
+@@ -682,26 +715,48 @@ class HighBrightnessModeController {
+ 
+         @Override
+         public void onChange(boolean selfChange, Uri uri) {
+-            updateLowPower();
++            if (mPersistentManualHbmSetting.equals(uri)) {
++                updatePersistentManualHbm();
++            } else if (mObserveLowPowerMode && mLowPowerModeSetting.equals(uri)) {
++                updateLowPower();
++            }
+         }
+ 
+-        void startObserving() {
++        void startObserving(boolean observeLowPowerMode) {
+             if (!mStarted) {
+-                mContext.getContentResolver().registerContentObserver(mLowPowerModeSetting,
++                mContext.getContentResolver().registerContentObserver(mPersistentManualHbmSetting,
+                         false /*notifyForDescendants*/, this, UserHandle.USER_ALL);
++                if (observeLowPowerMode) {
++                    mContext.getContentResolver().registerContentObserver(mLowPowerModeSetting,
++                            false /*notifyForDescendants*/, this, UserHandle.USER_ALL);
++                }
+                 mStarted = true;
+-                updateLowPower();
++                mObserveLowPowerMode = observeLowPowerMode;
++                mIsPersistentManualHbmEnabled =
++                        mInjector.isPersistentManualHbmEnabled(mContext);
++                mIsBlockedByLowPowerMode = observeLowPowerMode && isLowPowerMode();
+             }
+         }
+ 
+         void stopObserving() {
+             mIsBlockedByLowPowerMode = false;
++            mIsPersistentManualHbmEnabled = false;
+             if (mStarted) {
+                 mContext.getContentResolver().unregisterContentObserver(this);
+                 mStarted = false;
++                mObserveLowPowerMode = false;
+             }
+         }
+ 
++        private void updatePersistentManualHbm() {
++            final boolean isEnabled = mInjector.isPersistentManualHbmEnabled(mContext);
++            if (isEnabled == mIsPersistentManualHbmEnabled) {
++                return;
++            }
++            mIsPersistentManualHbmEnabled = isEnabled;
++            updateHbmMode();
++        }
++
+         private void updateLowPower() {
+             final boolean isLowPowerMode = isLowPowerMode();
+             if (isLowPowerMode == mIsBlockedByLowPowerMode) {
+@@ -730,5 +785,11 @@ class HighBrightnessModeController {
+             FrameworkStatsLog.write(
+                     FrameworkStatsLog.DISPLAY_HBM_STATE_CHANGED, display, state, reason);
+         }
++
++        public boolean isPersistentManualHbmEnabled(Context context) {
++            return LineageSettings.System.getIntForUser(context.getContentResolver(),
++                    LineageSettings.System.PERSISTENT_MANUAL_HBM_ENABLED, 0,
++                    UserHandle.USER_CURRENT) != 0;
++        }
+     }
+ }
+diff --git a/services/tests/displayservicetests/src/com/android/server/display/HighBrightnessModeControllerTest.java b/services/tests/displayservicetests/src/com/android/server/display/HighBrightnessModeControllerTest.java
+index ed606e1d3..4c98e74bf 100644
+--- a/services/tests/displayservicetests/src/com/android/server/display/HighBrightnessModeControllerTest.java
++++ b/services/tests/displayservicetests/src/com/android/server/display/HighBrightnessModeControllerTest.java
+@@ -106,6 +106,10 @@ public class HighBrightnessModeControllerTest {
+                     TIME_ALLOWED_IN_WINDOW_MILLIS, TIME_MINIMUM_AVAILABLE_TO_ENABLE_MILLIS,
+                     ALLOW_IN_LOW_POWER_MODE, HDR_PERCENT_OF_SCREEN_REQUIRED_DEFAULT,
+                     null, null, true);
++    private static final HighBrightnessModeData UNLIMITED_HBM_DATA =
++            new HighBrightnessModeData(MINIMUM_LUX, TRANSITION_POINT, 0, 0, 0,
++                    ALLOW_IN_LOW_POWER_MODE, HDR_PERCENT_OF_SCREEN_REQUIRED_DEFAULT,
++                    null, null, true);
+ 
+     @Before
+     public void setUp() {
+@@ -739,6 +743,70 @@ public class HighBrightnessModeControllerTest {
+         assertTrue(hbmc.mIsHdrLayerPresent);
+     }
+ 
++    @Test
++    public void testUnlimitedHbm_manualBrightness_settingDisabled() {
++        final HighBrightnessModeController hbmc =
++                new TestHbmBuilder().setHbmData(UNLIMITED_HBM_DATA).build();
++
++        assertState(hbmc, DEFAULT_MIN, TRANSITION_POINT, HIGH_BRIGHTNESS_MODE_OFF);
++    }
++
++    @Test
++    public void testUnlimitedHbm_manualBrightness_settingEnabled() {
++        when(mInjectorMock.isPersistentManualHbmEnabled(mContextSpy)).thenReturn(true);
++        final HighBrightnessModeController hbmc =
++                new TestHbmBuilder().setHbmData(UNLIMITED_HBM_DATA).build();
++
++        assertState(hbmc, DEFAULT_MIN, DEFAULT_MAX, HIGH_BRIGHTNESS_MODE_SUNLIGHT);
++    }
++
++    @Test
++    public void testTimedHbm_manualBrightness_settingEnabledDoesNotAllowHbm() {
++        when(mInjectorMock.isPersistentManualHbmEnabled(mContextSpy)).thenReturn(true);
++        final HighBrightnessModeController hbmc = createDefaultHbm();
++
++        assertState(hbmc, DEFAULT_MIN, TRANSITION_POINT, HIGH_BRIGHTNESS_MODE_OFF);
++    }
++
++    @Test
++    public void testUnlimitedHbm_autoBrightnessStillRequiresHighLux() {
++        when(mInjectorMock.isPersistentManualHbmEnabled(mContextSpy)).thenReturn(true);
++        final HighBrightnessModeController hbmc =
++                new TestHbmBuilder().setHbmData(UNLIMITED_HBM_DATA).build();
++
++        hbmc.setAutoBrightnessEnabled(AUTO_BRIGHTNESS_ENABLED);
++        hbmc.onAmbientLuxChange(MINIMUM_LUX - 1);
++        assertState(hbmc, DEFAULT_MIN, TRANSITION_POINT, HIGH_BRIGHTNESS_MODE_OFF);
++
++        hbmc.onAmbientLuxChange(MINIMUM_LUX + 1);
++        assertState(hbmc, DEFAULT_MIN, DEFAULT_MAX, HIGH_BRIGHTNESS_MODE_SUNLIGHT);
++    }
++
++    @Test
++    public void testUnlimitedHbm_doesNotScheduleTimeRecalculation() {
++        when(mInjectorMock.isPersistentManualHbmEnabled(mContextSpy)).thenReturn(true);
++        final HighBrightnessModeController hbmc =
++                new TestHbmBuilder().setHbmData(UNLIMITED_HBM_DATA).build();
++
++        hbmcOnBrightnessChanged(hbmc, TRANSITION_POINT + 0.01f);
++        mClock.fastForward(1000);
++
++        assertEquals(0, mTestLooper.dispatchAll());
++    }
++
++    @Test
++    public void testUnlimitedHbm_userSwitchReloadsManualHbmSetting() {
++        when(mInjectorMock.isPersistentManualHbmEnabled(mContextSpy)).thenReturn(false);
++        final HighBrightnessModeController hbmc =
++                new TestHbmBuilder().setHbmData(UNLIMITED_HBM_DATA).build();
++        assertState(hbmc, DEFAULT_MIN, TRANSITION_POINT, HIGH_BRIGHTNESS_MODE_OFF);
++
++        when(mInjectorMock.isPersistentManualHbmEnabled(mContextSpy)).thenReturn(true);
++        hbmc.onUserSwitch();
++
++        assertState(hbmc, DEFAULT_MIN, DEFAULT_MAX, HIGH_BRIGHTNESS_MODE_SUNLIGHT);
++    }
++
+     private void assertState(HighBrightnessModeController hbmc,
+             float brightnessMin, float brightnessMax, int hbmMode) {
+         assertEquals(brightnessMin, hbmc.getCurrentBrightnessMin(), EPSILON);
+@@ -749,6 +817,7 @@ public class HighBrightnessModeControllerTest {
+     private class TestHbmBuilder {
+         OffsettableClock mClock;
+         HighBrightnessModeController.HdrBrightnessDeviceConfig mHdrBrightnessCfg;
++        HighBrightnessModeData mHbmData = DEFAULT_HBM_DATA;
+         Runnable mHdrChangedCallback = () -> {};
+ 
+         TestHbmBuilder setClock(OffsettableClock clock) {
+@@ -768,6 +837,11 @@ public class HighBrightnessModeControllerTest {
+             return this;
+         }
+ 
++        TestHbmBuilder setHbmData(HighBrightnessModeData hbmData) {
++            mHbmData = hbmData;
++            return this;
++        }
++
+         HighBrightnessModeController build() {
+             initHandler(mClock);
+             if (mHighBrightnessModeMetadata == null) {
+@@ -775,7 +849,7 @@ public class HighBrightnessModeControllerTest {
+             }
+             return new HighBrightnessModeController(mInjectorMock, mHandler, DISPLAY_WIDTH,
+                     DISPLAY_HEIGHT, mDisplayToken, mDisplayUniqueId, DEFAULT_MIN, DEFAULT_MAX,
+-                    DEFAULT_HBM_DATA, mHdrBrightnessCfg, mHdrChangedCallback,
++                    mHbmData, mHdrBrightnessCfg, mHdrChangedCallback,
+                     mHighBrightnessModeMetadata, mContextSpy);
+         }
+ 
+-- 
+2.43.0
+
