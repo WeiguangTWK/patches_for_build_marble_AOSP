@@ -1,8 +1,8 @@
-From fc81259d4422511a6d2b7f4f6a3012b2e667b2dd Mon Sep 17 00:00:00 2001
+From 9d1127c315fc683814eff1fcd73264b462db50b9 Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Sat, 4 Jul 2026 09:48:15 +0800
-Subject: [PATCH] Neko LineageOS: Allow Updater app to recognize Full update
- and incremental update
+Subject: [PATCH 1/2] Neko LineageOS: Allow Updater app to recognize Full
+ update and incremental update
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
@@ -32,7 +32,7 @@ Change-Id: I85a82020de72971ec6e2875c9dd9b19cdc3bd97e
  11 files changed, 58 insertions(+), 7 deletions(-)
 
 diff --git a/app/src/main/java/org/lineageos/updater/data/Update.kt b/app/src/main/java/org/lineageos/updater/data/Update.kt
-index a43e3e9..b3906c1 100644
+index 194dc02..3422e5f 100644
 --- a/app/src/main/java/org/lineageos/updater/data/Update.kt
 +++ b/app/src/main/java/org/lineageos/updater/data/Update.kt
 @@ -29,6 +29,7 @@ data class Update(
@@ -87,10 +87,10 @@ index a43e3e9..b3906c1 100644
      }
  
 diff --git a/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt b/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt
-index 3d5ca71..11ac4df 100644
+index 40aa2d1..16a277a 100644
 --- a/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt
 +++ b/app/src/main/java/org/lineageos/updater/data/UpdatesRepository.kt
-@@ -106,6 +106,17 @@ class UpdatesRepository(
+@@ -100,6 +100,17 @@ class UpdatesRepository(
              Log.d(TAG, "${update.name} has type ${update.type}")
              return false
          }
@@ -109,7 +109,7 @@ index 3d5ca71..11ac4df 100644
      }
  }
 diff --git a/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt b/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt
-index c1e4bf8..3c65157 100644
+index 357694f..681a127 100644
 --- a/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt
 +++ b/app/src/main/java/org/lineageos/updater/data/source/local/UpdateEntity.kt
 @@ -33,6 +33,9 @@ data class UpdateEntity(
@@ -176,7 +176,7 @@ index 87333b3..8619e66 100644
                  .also { instance = it }
          }
 diff --git a/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt b/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt
-index a672e99..a7c235e 100644
+index 8e2ff5b..eaf0298 100644
 --- a/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt
 +++ b/app/src/main/java/org/lineageos/updater/data/source/network/NetworkUpdate.kt
 @@ -24,6 +24,10 @@ data class NetworkUpdate(
@@ -200,14 +200,14 @@ index a672e99..a7c235e 100644
          downloadUrl = file.url,
          version = version,
 -        osPatchLevel = file.osPatchLevel,
--        osSdkLevel = file.osSdkLevel,
+-        osSdkLevel = file.osSdkLevel ?: 0,
 +        osPatchLevel = osPatchLevel ?: file.osPatchLevel,
-+        osSdkLevel = osSdkLevel ?: file.osSdkLevel,
++        osSdkLevel = osSdkLevel ?: file.osSdkLevel ?: 0,
          payloadMetadataOffset = payloadMetadataRange?.offset,
          payloadMetadataSize = payloadMetadataRange?.size,
          payloadOffset = payloadRange?.offset,
 diff --git a/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt b/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt
-index a2dbda3..8ae9acd 100644
+index f9c3fed..65eb2f4 100644
 --- a/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt
 +++ b/app/src/main/java/org/lineageos/updater/updates/UpdateItem.kt
 @@ -148,6 +148,7 @@ fun UpdateItem(
@@ -218,7 +218,7 @@ index a2dbda3..8ae9acd 100644
                                  Text(text = stringResource(R.string.list_update_size, state.fileSize))
                                  if (state.androidUpdateInfo.isNotEmpty()) {
                                      Text(text = state.androidUpdateInfo)
-@@ -251,6 +252,7 @@ private fun UpdateItemIdleCollapsedPreview() {
+@@ -258,6 +259,7 @@ private fun UpdateItemIdleCollapsedPreview() {
                  buildVersion = "LineageOS 23.2",
                  status = "",
                  isLocal = false,
@@ -226,7 +226,7 @@ index a2dbda3..8ae9acd 100644
                  fileSize = "1.1 GB",
                  androidUpdateInfo = "Android 16",
                  securityUpdate = "Jan 2026",
-@@ -284,6 +286,7 @@ private fun UpdateItemIdleExpandedPreview() {
+@@ -292,6 +294,7 @@ private fun UpdateItemIdleExpandedPreview() {
                  buildVersion = "LineageOS 23.2",
                  status = "",
                  isLocal = false,
@@ -234,7 +234,7 @@ index a2dbda3..8ae9acd 100644
                  fileSize = "1.1 GB",
                  androidUpdateInfo = "Major Android upgrade",
                  securityUpdate = "Jan 2026",
-@@ -317,6 +320,7 @@ private fun UpdateItemDownloadingPreview() {
+@@ -321,6 +324,7 @@ private fun UpdateItemDownloadingPreview() {
                  buildVersion = "LineageOS 23.2",
                  status = "Downloading",
                  isLocal = false,
@@ -243,10 +243,10 @@ index a2dbda3..8ae9acd 100644
                  androidUpdateInfo = "Android 16",
                  securityUpdate = "Jan 2026",
 diff --git a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt
-index 2a2bd7e..b5342d2 100644
+index 5a95c6a..1c477dc 100644
 --- a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt
 +++ b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemState.kt
-@@ -15,6 +15,7 @@ data class UpdateItemState(
+@@ -16,6 +16,7 @@ data class UpdateItemState(
      val buildVersion: String,
      val status: String,
  
@@ -255,10 +255,10 @@ index 2a2bd7e..b5342d2 100644
      val androidUpdateInfo: String,
      val securityUpdate: String,
 diff --git a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt
-index fcfae14..c3f6890 100644
+index 1b97368..1a07bb9 100644
 --- a/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt
 +++ b/app/src/main/java/org/lineageos/updater/updates/state/UpdateItemStateMapper.kt
-@@ -165,6 +165,13 @@ class UpdateItemStateMapper(
+@@ -174,6 +174,13 @@ class UpdateItemStateMapper(
                  update.version,
              ),
              status = state.titleRes?.let { context.getString(it) } ?: "",
@@ -271,12 +271,12 @@ index fcfae14..c3f6890 100644
 +            ),
              fileSize = Formatter.formatShortFileSize(context, update.fileSize),
              androidUpdateInfo = when {
-                 update.osSdkLevel == null -> ""
+                 update.osSdkLevel > DeviceInfoUtils.sdkLevel ->
 diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
-index 490f2c6..5308eef 100644
+index 435c066..0555b36 100644
 --- a/app/src/main/res/values-zh-rCN/strings.xml
 +++ b/app/src/main/res/values-zh-rCN/strings.xml
-@@ -91,6 +91,8 @@
+@@ -93,6 +93,8 @@
      <string name="list_verifying_update">正在验证更新</string>
      <string name="see_more">查看更多 %1$d</string>
      <string name="see_less">查看更少</string>
@@ -286,10 +286,10 @@ index 490f2c6..5308eef 100644
      <string name="action_pause">暂停</string>
      <string name="action_resume">继续</string>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index 0725930..cfeeb4f 100644
+index df56e15..35f6d9d 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
-@@ -137,6 +137,8 @@
+@@ -139,6 +139,8 @@
      <string name="list_verifying_update">Verifying update</string>
      <string name="see_more">See %1$d more</string>
      <string name="see_less">See less</string>

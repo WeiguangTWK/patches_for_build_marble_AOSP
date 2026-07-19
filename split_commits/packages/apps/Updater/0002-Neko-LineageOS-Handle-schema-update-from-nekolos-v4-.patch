@@ -1,7 +1,7 @@
-From 15abb472baee3140e88aef2382ad10f604b8592a Mon Sep 17 00:00:00 2001
+From 376fdd52ca466efaa1c8f528ebdd6c25e6ff9886 Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Sat, 11 Jul 2026 16:07:20 +0800
-Subject: [PATCH] Neko LineageOS: Handle schema update from nekolos v4 &
+Subject: [PATCH 2/2] Neko LineageOS: Handle schema update from nekolos v4 &
  official v4 to nekolos v5
 
 This is a mostly fix up commit for schema inconsistency caused crash. We might need to handle that user

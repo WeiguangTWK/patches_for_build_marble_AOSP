@@ -1,15 +1,18 @@
-From a4ebf0f70e176875644d2e917fc61ffed9a9f38e Mon Sep 17 00:00:00 2001
+From c3306cab53a675befec0e1b5e7beb9c30019ac30 Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Thu, 9 Jul 2026 10:58:05 +0800
-Subject: [PATCH] Neko LineageOS: Fix PAL config error flooding and routing
+Subject: [PATCH] Neko LineageOS: Fix PAL config error flooding and defensive
+ validation
+
+Once it handles routing but upstream fixed it
 
 Change-Id: Ie11e6b6bdda8e07cf523a09617448425e6c137e1
 ---
- resource_manager/src/ResourceManager.cpp | 59 +++++++++++++++++++-----
- 1 file changed, 48 insertions(+), 11 deletions(-)
+ resource_manager/src/ResourceManager.cpp | 55 +++++++++++++++++++-----
+ 1 file changed, 44 insertions(+), 11 deletions(-)
 
 diff --git a/resource_manager/src/ResourceManager.cpp b/resource_manager/src/ResourceManager.cpp
-index 3e055c7..a338e36 100644
+index 57f1939..adb61c3 100644
 --- a/resource_manager/src/ResourceManager.cpp
 +++ b/resource_manager/src/ResourceManager.cpp
 @@ -5863,8 +5863,9 @@ int ResourceManager::checkAndUpdateGroupDevConfig(struct pal_device *deviceattr,
@@ -62,7 +65,7 @@ index 3e055c7..a338e36 100644
              }
          }
      }
-@@ -6693,8 +6701,27 @@ bool ResourceManager::compareSharedBEStreamDevAttr(std::vector <std::tuple<Strea
+@@ -6694,8 +6702,27 @@ bool ResourceManager::compareSharedBEStreamDevAttr(std::vector <std::tuple<Strea
      uint32_t curDevPrio, newDevPrio;
      bool switchStreams = false;
  
@@ -90,18 +93,7 @@ index 3e055c7..a338e36 100644
      curDev = Device::getInstance(&curDevAttr, rm);
      if (!curDev) {
          PAL_ERR(LOG_TAG, "Getting Device instance failed");
-@@ -6726,6 +6753,10 @@ bool ResourceManager::compareSharedBEStreamDevAttr(std::vector <std::tuple<Strea
-                                     newDevAttr->id, newDevPrio, curDevAttr.id, curDevPrio);
-                 switchStreams = true;
-             } else {
-+                if (curDevAttr.id <= PAL_DEVICE_OUT_MIN || curDevAttr.id >= PAL_DEVICE_IN_MAX) {
-+                    PAL_ERR(LOG_TAG, "invalid current device id %d from top priority attr", curDevAttr.id);
-+                    return switchStreams;
-+                }
-                 PAL_DBG(LOG_TAG, "incoming dev: %d priority: 0x%x has lower priority than cur dev:%d priority: 0x%x,"
-                                 " switching incoming stream to cur dev",
-                                     newDevAttr->id, newDevPrio, curDevAttr.id, curDevPrio);
-@@ -7334,7 +7365,7 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
+@@ -7380,7 +7407,7 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
      struct pal_device_info inDeviceInfo;
      std::vector <Stream *> streamsToSwitch;
      std::vector <Stream*>::iterator sIter;
@@ -110,7 +102,7 @@ index 3e055c7..a338e36 100644
      struct pal_device spkr_devAttr;
      struct pal_device *temp_devAttr = nullptr;
      int stream_idx = 0;
-@@ -7348,6 +7379,12 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
+@@ -7394,6 +7421,12 @@ bool ResourceManager::updateDeviceConfig(std::shared_ptr<Device> *inDev,
          goto error;
      }
  

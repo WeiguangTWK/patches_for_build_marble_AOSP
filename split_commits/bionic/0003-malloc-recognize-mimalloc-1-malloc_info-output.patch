@@ -1,0 +1,113 @@
+From 03a890ff93cf46f9ab179ad1e26772e4dd0510dc Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sun, 19 Jul 2026 13:42:30 +0800
+Subject: [PATCH] malloc: recognize mimalloc-1 malloc_info output
+
+Document the allocator-specific nature of malloc_info XML and describe
+the mimalloc-1 summary fields.
+
+Extend the malloc_info tests to validate the mimalloc-1 schema and
+verify that its allocated value is consistent with process-wide
+mallinfo snapshots.
+
+The existing Scudo, jemalloc, and debug malloc handling is unchanged.
+
+Test: m bionic-unit-tests
+Test: /data/nativetest64/bionic-unit-tests \
+      --gtest_filter='malloc.malloc_info:malloc.malloc_info_matches_mallinfo'
+Change-Id: I2d2a33d428bc6c9b0174748b028b783bc8b379cc
+---
+ libc/include/malloc.h | 11 ++++++++++-
+ tests/malloc_test.cpp | 33 +++++++++++++++++++++++++++++++++
+ 2 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/libc/include/malloc.h b/libc/include/malloc.h
+index 6fb12a2..6ac5b0c 100644
+--- a/libc/include/malloc.h
++++ b/libc/include/malloc.h
+@@ -185,7 +185,7 @@ struct mallinfo2 mallinfo2(void) __RENAME(mallinfo);
+  * [malloc_info(3)](https://man7.org/linux/man-pages/man3/malloc_info.3.html)
+  * writes information about the current state of the heap to the given stream.
+  *
+- * The XML structure for malloc_info() is as follows:
++ * The XML structure for malloc_info() is allocator-specific. Jemalloc uses:
+  * ```
+  * <malloc version="jemalloc-1">
+  *   <heap nr="INT">
+@@ -204,6 +204,15 @@ struct mallinfo2 mallinfo2(void) __RENAME(mallinfo);
+  * </malloc>
+  * ```
+  *
++ * Mimalloc uses:
++ * ```
++ * <malloc version="mimalloc-1">
++ *   <summary allocated="INT" reusable="INT" capacity="INT"/>
++ * </malloc>
++ * ```
++ * `allocated` is the usable size of live allocations, `reusable` is the
++ * immediately reusable capacity in active pages, and `capacity` is their sum.
++ *
+  * Available since API level 23.
+  */
+ #if __BIONIC_AVAILABILITY_GUARD(23)
+diff --git a/tests/malloc_test.cpp b/tests/malloc_test.cpp
+index f6249e0..77a43ee 100644
+--- a/tests/malloc_test.cpp
++++ b/tests/malloc_test.cpp
+@@ -180,6 +180,32 @@ TEST(malloc, valloc_overflow) {
+ #endif
+ }
+ 
++static void VerifyMimallocInfo(tinyxml2::XMLElement* root, uint64_t* allocated_out = nullptr) {
++  if (allocated_out != nullptr) {
++    *allocated_out = 0;
++  }
++  auto summary = root->FirstChildElement();
++  ASSERT_NE(nullptr, summary);
++  ASSERT_STREQ("summary", summary->Name());
++  ASSERT_EQ(nullptr, summary->NextSiblingElement());
++
++  uint64_t allocated;
++  uint64_t reusable;
++  uint64_t capacity;
++  ASSERT_EQ(tinyxml2::XML_SUCCESS,
++            summary->QueryUnsigned64Attribute("allocated", &allocated));
++  ASSERT_EQ(tinyxml2::XML_SUCCESS,
++            summary->QueryUnsigned64Attribute("reusable", &reusable));
++  ASSERT_EQ(tinyxml2::XML_SUCCESS,
++            summary->QueryUnsigned64Attribute("capacity", &capacity));
++  ASSERT_LE(allocated, UINT64_MAX - reusable);
++  EXPECT_EQ(allocated + reusable, capacity);
++  EXPECT_NE(0ULL, allocated);
++  if (allocated_out != nullptr) {
++    *allocated_out = allocated;
++  }
++}
++
+ TEST(malloc, malloc_info) {
+ #ifdef __BIONIC__
+   SKIP_WITH_HWASAN; // hwasan does not implement malloc_info
+@@ -240,6 +266,8 @@ TEST(malloc, malloc_info) {
+       ASSERT_EQ(tinyxml2::XML_SUCCESS, element->QueryIntAttribute("size", &val));
+       ASSERT_EQ(tinyxml2::XML_SUCCESS, element->QueryIntAttribute("count", &val));
+     }
++  } else if (version == "mimalloc-1") {
++    VerifyMimallocInfo(root);
+   } else {
+     // Do not verify output for debug malloc.
+     ASSERT_TRUE(version == "debug-malloc-1") << "Unknown version: " << version;
+@@ -309,6 +337,11 @@ TEST(malloc, malloc_info_matches_mallinfo) {
+     // Scudo only gives the information on the primary, so simply make
+     // sure that the value is non-zero.
+     EXPECT_NE(0U, total_allocated_bytes);
++  } else if (version == "mimalloc-1") {
++    uint64_t allocated;
++    VerifyMimallocInfo(root, &allocated);
++    EXPECT_LE(mallinfo_before_allocated_bytes, allocated);
++    EXPECT_GE(mallinfo_after_allocated_bytes, allocated);
+   } else {
+     // Do not verify output for debug malloc.
+     ASSERT_TRUE(version == "debug-malloc-1") << "Unknown version: " << version;
+-- 
+2.43.0
+
