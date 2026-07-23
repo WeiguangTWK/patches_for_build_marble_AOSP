@@ -1,0 +1,1147 @@
+From 61a8bc5946a6ae4c35ad8549d19f546ea1e5a464 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Tue, 21 Jul 2026 16:04:04 +0800
+Subject: [PATCH] Neko LineageOS: Route RSA-OAEP MGF1 to software keymint
+
+Some detectors (e.g. Duck Detector) will treat alogrithm that is not accepted by device's QTI Keymint as a sign of TEE
+spoof
+
+So we route it to SOFTWARE Keymint to bypass such detection
+
+Change-Id: I359d105a75a808833b892d125c687b724df55692
+---
+ keystore2/src/security_level.rs | 513 ++++++++++++++++++--------------
+ keystore2/src/tee_soft_debug.rs | 304 ++++++++++++++-----
+ 2 files changed, 512 insertions(+), 305 deletions(-)
+
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index 9bfaf60..499d69e 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -32,11 +32,11 @@ use crate::metrics_store::log_key_creation_event_stats;
+ use crate::remote_provisioning::RemProvState;
+ use crate::super_key::{KeyBlob, SuperKeyManager};
+ use crate::tee_soft_debug::{
++    generation_policy_for_uid, mark_auto_security_level_unavailable,
+     mark_generated_attest_key_for_uid, maybe_override_certificate_chain_for_uid,
+-    maybe_sync_patchlevel_authorizations_for_uid,
+-    should_treat_external_attest_key_as_softdebug_for_uid,
+-    should_force_software_generation_for_uid, should_prefer_local_attest_key_flow_for_uid,
+-    uses_tracked_attest_key_for_uid,
++    maybe_sync_patchlevel_authorizations_for_uid, should_prefer_local_attest_key_flow_for_uid,
++    should_treat_external_attest_key_as_softdebug_for_uid, uses_tracked_attest_key_for_uid,
++    TeeSoftDebugGenerationContext, TeeSoftDebugGenerationPolicy,
+ };
+ use crate::utils::{
+     check_device_attestation_permissions, check_key_permission,
+@@ -117,6 +117,23 @@ fn derive_ec_key_size_from_curve(params: &[KeyParameter]) -> Option<i32> {
+     }
+ }
+ 
++fn auto_software_fallback_error(error: &anyhow::Error) -> Option<ErrorCode> {
++    // Only errors which identify an unavailable attestation implementation are sticky. Request
++    // validation and transient operation errors must continue to use the hardware path.
++    error.chain().find_map(|cause| {
++        let Error::Km(code) = cause.downcast_ref::<Error>()? else {
++            return None;
++        };
++        matches!(
++            *code,
++            ErrorCode::HARDWARE_TYPE_UNAVAILABLE
++                | ErrorCode::KEYMINT_NOT_CONFIGURED
++                | ErrorCode::ATTESTATION_KEYS_NOT_PROVISIONED
++        )
++        .then_some(*code)
++    })
++}
++
+ struct KeymintUpgradeCtx<'a> {
+     dev: &'a dyn IKeyMintDevice,
+     version: i32,
+@@ -294,74 +311,74 @@ impl KeystoreSecurityLevel {
+         // Otherwise, we would have to clone the blob from the key descriptor.
+         let scoping_blob: Vec<u8>;
+         let (km_blob, key_properties, key_id_guard, loaded_descriptor, blob_metadata) = match key.domain {
+-            Domain::BLOB => {
+-                check_key_permission(KeyPerm::Use, key, &None)
+-                    .context(ks_err!("checking use permission for Domain::BLOB."))?;
+-                if forced {
+-                    check_key_permission(KeyPerm::ReqForcedOp, key, &None)
+-                        .context(ks_err!("checking forced permission for Domain::BLOB."))?;
+-                }
+-                (
+-                    match &key.blob {
+-                        Some(blob) => blob,
+-                        None => {
+-                            return Err(Error::sys()).context(ks_err!(
+-                                "Key blob must be specified when \
++                Domain::BLOB => {
++                    check_key_permission(KeyPerm::Use, key, &None)
++                        .context(ks_err!("checking use permission for Domain::BLOB."))?;
++                    if forced {
++                        check_key_permission(KeyPerm::ReqForcedOp, key, &None)
++                            .context(ks_err!("checking forced permission for Domain::BLOB."))?;
++                    }
++                    (
++                        match &key.blob {
++                            Some(blob) => blob,
++                            None => {
++                                return Err(Error::sys()).context(ks_err!(
++                                    "Key blob must be specified when \
+                                 using Domain::BLOB."
+-                            ));
+-                        }
+-                    },
+-                    None,
+-                    None,
+-                    None,
+-                    BlobMetaData::new(),
+-                )
+-            }
+-            _ => {
+-                let super_key = SUPER_KEY
+-                    .read()
+-                    .unwrap()
+-                    .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
+-                let (key_id_guard, mut key_entry) = DB
+-                    .with::<_, Result<(KeyIdGuard, KeyEntry)>>(|db| {
+-                        LEGACY_IMPORTER.with_try_import(key, caller_uid, super_key, || {
+-                            db.borrow_mut().load_key_entry(
+-                                key,
+-                                KeyType::Client,
+-                                KeyEntryLoadBits::KM,
+-                                caller_uid,
+-                                |k, av| {
+-                                    check_key_permission(KeyPerm::Use, k, &av)?;
+-                                    if forced {
+-                                        check_key_permission(KeyPerm::ReqForcedOp, k, &av)?;
+-                                    }
+-                                    Ok(())
+-                                },
+-                            )
++                                ));
++                            }
++                        },
++                        None,
++                        None,
++                        None,
++                        BlobMetaData::new(),
++                    )
++                }
++                _ => {
++                    let super_key = SUPER_KEY
++                        .read()
++                        .unwrap()
++                        .get_credential_encrypted_key_by_user_id(caller_uid.owning_user());
++                    let (key_id_guard, mut key_entry) = DB
++                        .with::<_, Result<(KeyIdGuard, KeyEntry)>>(|db| {
++                            LEGACY_IMPORTER.with_try_import(key, caller_uid, super_key, || {
++                                db.borrow_mut().load_key_entry(
++                                    key,
++                                    KeyType::Client,
++                                    KeyEntryLoadBits::KM,
++                                    caller_uid,
++                                    |k, av| {
++                                        check_key_permission(KeyPerm::Use, k, &av)?;
++                                        if forced {
++                                            check_key_permission(KeyPerm::ReqForcedOp, k, &av)?;
++                                        }
++                                        Ok(())
++                                    },
++                                )
++                            })
+                         })
+-                    })
+-                    .context(ks_err!("Failed to load key blob."))?;
++                        .context(ks_err!("Failed to load key blob."))?;
+ 
+                 let loaded_descriptor =
+                     DB.with(|db| db.borrow_mut().load_key_descriptor(key_id_guard.id()))
+                         .context(ks_err!("Failed to resolve key descriptor for debug routing."))?;
+ 
+-                let (blob, blob_metadata) =
+-                    key_entry.take_key_blob_info().ok_or_else(Error::sys).context(ks_err!(
+-                        "Successfully loaded key entry, \
++                    let (blob, blob_metadata) =
++                        key_entry.take_key_blob_info().ok_or_else(Error::sys).context(ks_err!(
++                            "Successfully loaded key entry, \
+                         but KM blob was missing."
+-                    ))?;
+-                scoping_blob = blob;
+-
+-                (
+-                    &scoping_blob,
+-                    Some((key_id_guard.id(), key_entry.into_key_parameters())),
+-                    Some(key_id_guard),
+-                    loaded_descriptor,
+-                    blob_metadata,
+-                )
+-            }
+-        };
++                        ))?;
++                    scoping_blob = blob;
++
++                    (
++                        &scoping_blob,
++                        Some((key_id_guard.id(), key_entry.into_key_parameters())),
++                        Some(key_id_guard),
++                        loaded_descriptor,
++                        blob_metadata,
++                    )
++                }
++            };
+ 
+         let purpose = operation_parameters.iter().find(|p| p.tag == Tag::PURPOSE).map_or(
+             Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
+@@ -681,15 +698,17 @@ impl KeystoreSecurityLevel {
+         // Must return on error for security reasons.
+         check_key_permission(KeyPerm::Rebind, &key, &None).context(ks_err!())?;
+ 
+-        let prefer_local_attest_key_flow = should_prefer_local_attest_key_flow_for_uid(
+-            caller_uid,
+-            params,
+-            attest_key_descriptor.is_some(),
+-        );
++        let generation_policy = generation_policy_for_uid(caller_uid, params, self.security_level);
++        let prefer_local_attest_key_flow = generation_policy.auto_requests_software()
++            || should_prefer_local_attest_key_flow_for_uid(
++                caller_uid,
++                params,
++                attest_key_descriptor.is_some(),
++            );
+         let attestation_key_info = if prefer_local_attest_key_flow {
+             info!(
+-                "tee soft debug: ATTEST_KEY request prefers local flow; skip attestation-key lookup for uid={:?}",
+-                caller_uid
++                "tee soft debug: local generation flow selected; skip attestation-key lookup for uid={:?}, policy={:?}",
++                caller_uid, generation_policy
+             );
+             None
+         } else {
+@@ -714,56 +733,38 @@ impl KeystoreSecurityLevel {
+             .context(ks_err!("Trying to get aaid."))?;
+ 
+         let has_external_attestation_key = attestation_key_info.is_some();
+-        let uses_tracked_attest_key = uses_tracked_attest_key_for_uid(caller_uid, attest_key_descriptor)
+-            || should_treat_external_attest_key_as_softdebug_for_uid(
+-                caller_uid,
+-                &params,
+-                attest_key_descriptor,
+-            );
+-        let requested_software_generation = should_force_software_generation_for_uid(
+-            caller_uid,
+-            &params,
+-            has_external_attestation_key,
+-            uses_tracked_attest_key,
+-        );
++        let has_rkpd_attestation_key =
++            matches!(&attestation_key_info, Some(AttestationKeyInfo::RkpdProvisioned { .. }));
++        let uses_tracked_attest_key =
++            uses_tracked_attest_key_for_uid(caller_uid, attest_key_descriptor)
++                || should_treat_external_attest_key_as_softdebug_for_uid(
++                    caller_uid,
++                    &params,
++                    attest_key_descriptor,
++                );
++        let requested_software_generation = generation_policy.requests_software();
++        let use_software_generation = generation_policy.auto_requests_software()
++            || (generation_policy == TeeSoftDebugGenerationPolicy::Generate
++                && !has_external_attestation_key);
+         if requested_software_generation {
+             info!(
+-                "tee soft debug: software-generation requested for uid={:?}, has_external_attestation_key={}, uses_tracked_attest_key={}, alias={:?}",
++                "tee soft debug: software-generation requested for uid={:?}, policy={:?}, has_external_attestation_key={}, uses_tracked_attest_key={}, alias={:?}",
+                 caller_uid,
++                generation_policy,
+                 has_external_attestation_key,
+                 uses_tracked_attest_key,
+                 key.alias
+             );
+         }
+-        let force_software_generation = if requested_software_generation
+-            && !has_external_attestation_key
+-        {
+-            info!(
+-                "tee soft debug: enabling SOFTWARE KeyMint generation path for uid={:?}, alias={:?}",
+-                caller_uid,
+-                key.alias
+-            );
+-            true
+-        } else if requested_software_generation {
+-            info!(
+-                "tee soft debug: software-generation requested but deferred to original path because an external attestation key is involved, uid={:?}, alias={:?}",
+-                caller_uid,
+-                key.alias
+-            );
+-            false
+-        } else {
+-            false
+-        };
+         let mut used_software_generation = false;
+         let mut effective_generation_security_level = self.security_level;
+         let mut effective_generation_km_uuid = self.km_uuid;
+-        let software_attempt = if force_software_generation {
+-            match get_keymint_device(&SecurityLevel::SOFTWARE) {
+-                Ok((soft_km_dev, soft_hw_info, soft_km_uuid)) => {
+-                    used_software_generation = true;
+-                    effective_generation_security_level = soft_hw_info.securityLevel;
+-                    effective_generation_km_uuid = soft_km_uuid;
+-                    info!(
++
++        let generate_with_software =
++            || -> Result<(KeyCreationResult, KeyMintHardwareInfo, Uuid)> {
++                match get_keymint_device(&SecurityLevel::SOFTWARE) {
++                    Ok((soft_km_dev, soft_hw_info, soft_km_uuid)) => {
++                        info!(
+                         "tee soft debug: invoking SOFTWARE IKeyMintDevice::generateKey for uid={:?}, alias={:?}, km_uuid={:?}, reported_sec_level={:?}, version={}",
+                         caller_uid,
+                         key.alias,
+@@ -771,8 +772,7 @@ impl KeystoreSecurityLevel {
+                         soft_hw_info.securityLevel,
+                         soft_hw_info.versionNumber
+                     );
+-                    Some(
+-                        map_km_error({
++                        let result = map_km_error({
+                             let _wp = self.watch_millis(
+                                 concat!(
+                                     "KeystoreSecurityLevel::generate_key (TeeSoftDebug Software): ",
+@@ -785,33 +785,55 @@ impl KeystoreSecurityLevel {
+                         .context(ks_err!(
+                             "While generating with SOFTWARE KeyMint for tee soft debug, params: {:?}.",
+                             log_security_safe_params(&params)
+-                        )),
+-                    )
++                        ))?;
++                        Ok((result, soft_hw_info, soft_km_uuid))
++                    }
++                    Err(e) => Err(e).context(ks_err!(
++                        "SOFTWARE KeyMint unavailable for tee soft debug, uid={:?}",
++                        caller_uid
++                    )),
+                 }
+-                Err(e) => {
++            };
++
++        let software_attempt = if use_software_generation {
++            match generate_with_software() {
++                Ok((result, hw_info, km_uuid)) => {
++                    used_software_generation = true;
++                    effective_generation_security_level = hw_info.securityLevel;
++                    effective_generation_km_uuid = km_uuid;
++                    Some(Ok(result))
++                }
++                Err(e) if generation_policy == TeeSoftDebugGenerationPolicy::Generate => {
+                     warn!(
+-                        "tee soft debug: SOFTWARE KeyMint unavailable, fallback to original generation path for uid={:?}: {:?}",
++                        "tee soft debug: SOFTWARE KeyMint unavailable in Generate mode; preserving legacy hardware fallback for uid={:?}: {:?}",
+                         caller_uid, e
+                     );
+-                    used_software_generation = false;
+                     None
+                 }
++                Err(e) => Some(Err(e)),
+             }
+         } else {
++            if requested_software_generation {
++                info!(
++                    "tee soft debug: Generate mode deferred to the original path because an external attestation key is involved, uid={:?}, alias={:?}",
++                    caller_uid, key.alias
++                );
++            }
+             None
+         };
+ 
+-        let mut creation_result = match software_attempt {
++        let mut creation_attempt = match software_attempt {
+             Some(result) => result,
+             None => match attestation_key_info {
+-            Some(AttestationKeyInfo::UserGenerated {
+-                key_id_guard,
+-                blob,
+-                blob_metadata,
+-                issuer_subject,
+-            }) => {
+-                let (attest_km_dev, attest_km_version) =
+-                    if let Some(km_uuid) = blob_metadata.km_uuid().copied() {
++                Some(AttestationKeyInfo::UserGenerated {
++                    key_id_guard,
++                    blob,
++                    blob_metadata,
++                    issuer_subject,
++                }) => {
++                    let (attest_km_dev, attest_km_version) = if let Some(km_uuid) =
++                        blob_metadata.km_uuid().copied()
++                    {
+                         match get_keymint_dev_by_uuid(&km_uuid) {
+                             Ok((dev, hw_info)) => {
+                                 effective_generation_security_level = hw_info.securityLevel;
+@@ -840,123 +862,168 @@ impl KeystoreSecurityLevel {
+                         (self.keymint.clone(), self.hw_info.versionNumber)
+                     };
+ 
+-                self.upgrade_keyblob_if_required_with_dev(
+-                    KeymintUpgradeCtx { dev: &*attest_km_dev, version: attest_km_version },
+-                    Some(key_id_guard),
+-                    &KeyBlob::Ref(&blob),
+-                    blob_metadata.km_uuid().copied(),
+-                    &params,
+-                    |blob| {
+-                        let attest_key = Some(AttestationKey {
+-                            keyBlob: blob.to_vec(),
+-                            attestKeyParams: vec![],
+-                            issuerSubjectName: issuer_subject.clone(),
+-                        });
+-                        map_km_error({
++                    self.upgrade_keyblob_if_required_with_dev(
++                        KeymintUpgradeCtx { dev: &*attest_km_dev, version: attest_km_version },
++                        Some(key_id_guard),
++                        &KeyBlob::Ref(&blob),
++                        blob_metadata.km_uuid().copied(),
++                        &params,
++                        |blob| {
++                            let attest_key = Some(AttestationKey {
++                                keyBlob: blob.to_vec(),
++                                attestKeyParams: vec![],
++                                issuerSubjectName: issuer_subject.clone(),
++                            });
++                            map_km_error({
++                                let _wp = self.watch_millis(
++                                    concat!(
++                                        "KeystoreSecurityLevel::generate_key (UserGenerated): ",
++                                        "calling IKeyMintDevice::generate_key"
++                                    ),
++                                    5000, // Generate can take a little longer.
++                                );
++                                attest_km_dev.generateKey(&params, attest_key.as_ref())
++                            })
++                        },
++                    )
++                    .context(ks_err!(
++                        "While generating with a user-generated \
++                      attestation key, params: {:?}.",
++                        log_security_safe_params(&params)
++                    ))
++                    .map(|(result, _)| result)
++                }
++                Some(AttestationKeyInfo::RkpdProvisioned {
++                    attestation_key,
++                    attestation_certs,
++                }) => {
++                    self.upgrade_rkpd_keyblob_if_required_with(
++                        &attestation_key.keyBlob,
++                        &[],
++                        |blob| {
++                            map_km_error({
++                                let _wp = self.watch_millis(
++                                    concat!(
++                                        "KeystoreSecurityLevel::generate_key (RkpdProvisioned): ",
++                                        "calling IKeyMintDevice::generate_key",
++                                    ),
++                                    5000, // Generate can take a little longer.
++                                );
++                                let dynamic_attest_key = Some(AttestationKey {
++                                    keyBlob: blob.to_vec(),
++                                    attestKeyParams: vec![],
++                                    issuerSubjectName: attestation_key.issuerSubjectName.clone(),
++                                });
++                                self.keymint.generateKey(&params, dynamic_attest_key.as_ref())
++                            })
++                        },
++                    )
++                    .context(ks_err!(
++                        "While generating Key {:?} with remote \
++                    provisioned attestation key and params: {:?}.",
++                        key.alias,
++                        log_security_safe_params(&params)
++                    ))
++                    .map(|(mut result, _)| {
++                        if read_bool("remote_provisioning.use_cert_processor", false)
++                            .unwrap_or(false)
++                        {
+                             let _wp = self.watch_millis(
+                                 concat!(
+-                                    "KeystoreSecurityLevel::generate_key (UserGenerated): ",
+-                                    "calling IKeyMintDevice::generate_key"
++                                    "KeystoreSecurityLevel::generate_key (RkpdProvisioned): ",
++                                    "calling KeystorePostProcessor::process_certificate_chain",
+                                 ),
+-                                5000, // Generate can take a little longer.
++                                1000, // Post processing may take a little while due to network call.
+                             );
+-                            attest_km_dev.generateKey(&params, attest_key.as_ref())
+-                        })
+-                    },
+-                )
+-                .context(ks_err!(
+-                    "While generating with a user-generated \
+-                      attestation key, params: {:?}.",
+-                    log_security_safe_params(&params)
+-                ))
+-                .map(|(result, _)| result)
+-            }
+-            Some(AttestationKeyInfo::RkpdProvisioned { attestation_key, attestation_certs }) => {
+-                self.upgrade_rkpd_keyblob_if_required_with(&attestation_key.keyBlob, &[], |blob| {
+-                    map_km_error({
+-                        let _wp = self.watch_millis(
+-                            concat!(
+-                                "KeystoreSecurityLevel::generate_key (RkpdProvisioned): ",
+-                                "calling IKeyMintDevice::generate_key",
+-                            ),
+-                            5000, // Generate can take a little longer.
+-                        );
+-                        let dynamic_attest_key = Some(AttestationKey {
+-                            keyBlob: blob.to_vec(),
+-                            attestKeyParams: vec![],
+-                            issuerSubjectName: attestation_key.issuerSubjectName.clone(),
+-                        });
+-                        self.keymint.generateKey(&params, dynamic_attest_key.as_ref())
++                            // process_certificate_chain would either replace the certificate chain if
++                            // post-processing is successful or it would fallback to the original chain
++                            // on failure. In either case, we should get back the certificate chain
++                            // that is fit for storing with the newly generated key.
++                            result.certificateChain = process_certificate_chain(
++                                result.certificateChain,
++                                attestation_certs,
++                            );
++                        } else {
++                            // The `certificateChain` in a `KeyCreationResult` should normally have one
++                            // `Certificate` for each certificate in the chain. To avoid having to
++                            // unnecessarily parse the RKP chain (which is concatenated DER-encoded
++                            // certs), stuff the whole concatenated chain into a single `Certificate`.
++                            // This is untangled by `store_new_key()`.
++                            result
++                                .certificateChain
++                                .push(Certificate { encodedCertificate: attestation_certs });
++                        }
++                        result
+                     })
++                }
++                None => map_km_error({
++                    let _wp = self.watch_millis(
++                        concat!(
++                            "KeystoreSecurityLevel::generate_key (No attestation key): ",
++                            "calling IKeyMintDevice::generate_key",
++                        ),
++                        5000, // Generate can take a little longer.
++                    );
++                    self.keymint.generateKey(&params, None)
+                 })
+                 .context(ks_err!(
+-                    "While generating Key {:?} with remote \
+-                    provisioned attestation key and params: {:?}.",
+-                    key.alias,
++                    "While generating without a provided \
++                 attestation key and params: {:?}.",
+                     log_security_safe_params(&params)
+-                ))
+-                .map(|(mut result, _)| {
+-                    if read_bool("remote_provisioning.use_cert_processor", false).unwrap_or(false) {
+-                        let _wp = self.watch_millis(
+-                            concat!(
+-                                "KeystoreSecurityLevel::generate_key (RkpdProvisioned): ",
+-                                "calling KeystorePostProcessor::process_certificate_chain",
+-                            ),
+-                            1000, // Post processing may take a little while due to network call.
+-                        );
+-                        // process_certificate_chain would either replace the certificate chain if
+-                        // post-processing is successful or it would fallback to the original chain
+-                        // on failure. In either case, we should get back the certificate chain
+-                        // that is fit for storing with the newly generated key.
+-                        result.certificateChain =
+-                            process_certificate_chain(result.certificateChain, attestation_certs);
+-                    } else {
+-                        // The `certificateChain` in a `KeyCreationResult` should normally have one
+-                        // `Certificate` for each certificate in the chain. To avoid having to
+-                        // unnecessarily parse the RKP chain (which is concatenated DER-encoded
+-                        // certs), stuff the whole concatenated chain into a single `Certificate`.
+-                        // This is untangled by `store_new_key()`.
+-                        result
+-                            .certificateChain
+-                            .push(Certificate { encodedCertificate: attestation_certs });
++                )),
++            },
++        };
++
++        if generation_policy == TeeSoftDebugGenerationPolicy::AutoHardware {
++            if let Some((fallback_code, hardware_error)) = creation_attempt
++                .as_ref()
++                .err()
++                .and_then(|e| auto_software_fallback_error(e).map(|code| (code, format!("{e:?}"))))
++            {
++                warn!(
++                    "tee soft debug: Auto hardware generation failed permanently; retrying with SOFTWARE, uid={:?}, alias={:?}, security_level={:?}, error={:?}, detail={}",
++                    caller_uid,
++                    key.alias,
++                    self.security_level,
++                    fallback_code,
++                    hardware_error
++                );
++                mark_auto_security_level_unavailable(self.security_level);
++                match generate_with_software() {
++                    Ok((result, hw_info, km_uuid)) => {
++                        used_software_generation = true;
++                        effective_generation_security_level = hw_info.securityLevel;
++                        effective_generation_km_uuid = km_uuid;
++                        creation_attempt = Ok(result);
+                     }
+-                    result
+-                })
++                    Err(software_error) => {
++                        return Err(software_error).context(ks_err!(
++                            "Auto fallback to SOFTWARE failed after hardware error {:?}",
++                            fallback_code
++                        ));
++                    }
++                }
+             }
+-            None => map_km_error({
+-                let _wp = self.watch_millis(
+-                    concat!(
+-                        "KeystoreSecurityLevel::generate_key (No attestation key): ",
+-                        "calling IKeyMintDevice::generate_key",
+-                    ),
+-                    5000, // Generate can take a little longer.
+-                );
+-                self.keymint.generateKey(&params, None)
+-            })
+-            .context(ks_err!(
+-                "While generating without a provided \
+-                 attestation key and params: {:?}.",
+-                log_security_safe_params(&params)
+-            )),
+-        },
+         }
+-        .context(ks_err!())?;
++
++        let mut creation_result = creation_attempt.context(ks_err!())?;
+ 
+         if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
+             maybe_override_certificate_chain_for_uid(
+                 caller_uid,
+                 &params,
+-                has_external_attestation_key && !used_software_generation,
+-                uses_tracked_attest_key,
++                TeeSoftDebugGenerationContext {
++                    has_external_attestation_key: has_external_attestation_key
++                        && !has_rkpd_attestation_key
++                        && !used_software_generation,
++                    uses_tracked_attest_key,
++                    used_software_generation,
++                },
+                 key.alias.as_deref(),
+                 attest_key_descriptor,
+                 &mut creation_result,
+             );
+-            maybe_sync_patchlevel_authorizations_for_uid(
+-                caller_uid,
+-                &creation_result,
+-                &mut params,
+-            );
++            maybe_sync_patchlevel_authorizations_for_uid(caller_uid, &creation_result, &mut params);
+         }
+ 
+         mark_generated_attest_key_for_uid(caller_uid, &key, &params, used_software_generation);
+diff --git a/keystore2/src/tee_soft_debug.rs b/keystore2/src/tee_soft_debug.rs
+index 9376120..5de0cbb 100644
+--- a/keystore2/src/tee_soft_debug.rs
++++ b/keystore2/src/tee_soft_debug.rs
+@@ -14,8 +14,13 @@
+ 
+ use crate::utils::{AndroidUserId, AppUid};
+ use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+-    Certificate::Certificate, KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter,
+-    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, Tag::Tag,
++    Algorithm::Algorithm, Certificate::Certificate, Digest::Digest,
++    KeyCreationResult::KeyCreationResult, KeyParameter::KeyParameter,
++    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
++    SecurityLevel::SecurityLevel, Tag::Tag,
++};
++use android_system_keystore2::aidl::android::system::keystore2::{
++    Domain::Domain, KeyDescriptor::KeyDescriptor,
+ };
+ use anyhow::{Context, Result};
+ use base64::engine::general_purpose::STANDARD;
+@@ -23,8 +28,9 @@ use base64::Engine;
+ use binder::{self, Strong};
+ use keystore2_crypto::{
+     certificate_public_key_family, certificate_signature_key_family,
+-    certificate_tbs_signature_key_family, extract_attestation_patchlevels, parse_issuer_from_certificate,
+-    parse_subject_from_certificate, resign_leaf_certificate, verify_certificate_signed_by,
++    certificate_tbs_signature_key_family, extract_attestation_patchlevels,
++    parse_issuer_from_certificate, parse_subject_from_certificate, resign_leaf_certificate,
++    verify_certificate_signed_by,
+ };
+ use log::{info, warn};
+ use packagemanager_aidl::aidl::android::content::pm::IPackageManagerNative::IPackageManagerNative;
+@@ -32,9 +38,7 @@ use std::collections::{HashMap, HashSet};
+ use std::fs;
+ use std::path::Path;
+ use std::sync::{LazyLock, Mutex};
+-use android_system_keystore2::aidl::android::system::keystore2::{
+-    Domain::Domain, KeyDescriptor::KeyDescriptor,
+-};
++
+ const RUNTIME_CONFIG_PATH: &str = "/data/adbroot/tee_soft_debug/config.conf";
+ 
+ #[derive(Clone, Debug, Eq, PartialEq)]
+@@ -52,6 +56,10 @@ static TRACKED_ATTEST_KEY_MATERIAL: LazyLock<Mutex<HashMap<String, String>>> =
+     LazyLock::new(|| Mutex::new(HashMap::new()));
+ static TRACKED_ATTEST_SIGNERS: LazyLock<Mutex<HashMap<String, TrackedAttestSignerState>>> =
+     LazyLock::new(|| Mutex::new(HashMap::new()));
++// A permanent hardware-generation failure is cached only for the lifetime of keystore2.
++// Restarting the service or rebooting causes Auto to probe the hardware path again.
++static AUTO_UNAVAILABLE_SECURITY_LEVELS: LazyLock<Mutex<HashSet<i32>>> =
++    LazyLock::new(|| Mutex::new(HashSet::new()));
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ enum TeeSoftDebugMode {
+@@ -67,6 +75,33 @@ enum TeeSoftDebugAction {
+     GenerateSoftwareChain,
+ }
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum TeeSoftDebugGenerationPolicy {
++    Unmatched,
++    Patch,
++    Generate,
++    AutoHardware,
++    AutoSoftwareMgf1,
++    AutoSoftwareTeeUnavailable,
++}
++
++#[derive(Clone, Copy, Debug)]
++pub(crate) struct TeeSoftDebugGenerationContext {
++    pub(crate) has_external_attestation_key: bool,
++    pub(crate) uses_tracked_attest_key: bool,
++    pub(crate) used_software_generation: bool,
++}
++
++impl TeeSoftDebugGenerationPolicy {
++    pub(crate) fn requests_software(self) -> bool {
++        matches!(self, Self::Generate | Self::AutoSoftwareMgf1 | Self::AutoSoftwareTeeUnavailable)
++    }
++
++    pub(crate) fn auto_requests_software(self) -> bool {
++        matches!(self, Self::AutoSoftwareMgf1 | Self::AutoSoftwareTeeUnavailable)
++    }
++}
++
+ #[derive(Debug)]
+ struct TeeSoftDebugConfig {
+     enabled: bool,
+@@ -161,6 +196,7 @@ fn decide_action(
+     cfg: &TeeSoftDebugConfig,
+     _is_attest_key_request: bool,
+     has_original_chain: bool,
++    used_software_generation: bool,
+ ) -> TeeSoftDebugAction {
+     if !cfg.enabled || !has_original_chain {
+         return TeeSoftDebugAction::Skip;
+@@ -172,11 +208,10 @@ fn decide_action(
+         // still be patched safely when this request is not using an external attestation key.
+         TeeSoftDebugMode::Patch => TeeSoftDebugAction::PatchExistingChain,
+         TeeSoftDebugMode::Generate => TeeSoftDebugAction::GenerateSoftwareChain,
+-        TeeSoftDebugMode::Auto => {
+-            // Auto currently follows Patch behavior until software-generation path
+-            // is fully implemented in keystore2.
+-            TeeSoftDebugAction::PatchExistingChain
++        TeeSoftDebugMode::Auto if used_software_generation => {
++            TeeSoftDebugAction::GenerateSoftwareChain
+         }
++        TeeSoftDebugMode::Auto => TeeSoftDebugAction::PatchExistingChain,
+     }
+ }
+ 
+@@ -191,6 +226,51 @@ fn has_attestation_challenge(params: &[KeyParameter]) -> bool {
+     params.iter().any(|p| p.tag == Tag::ATTESTATION_CHALLENGE)
+ }
+ 
++fn is_rsa_oaep_non_default_mgf1_request(params: &[KeyParameter]) -> bool {
++    let is_rsa = params.iter().any(|p| {
++        p.tag == Tag::ALGORITHM && matches!(p.value, KeyParameterValue::Algorithm(Algorithm::RSA))
++    });
++    let uses_oaep = params.iter().any(|p| {
++        p.tag == Tag::PADDING
++            && matches!(p.value, KeyParameterValue::PaddingMode(PaddingMode::RSA_OAEP))
++    });
++    let mgf_digests: Vec<Digest> = params
++        .iter()
++        .filter_map(|p| {
++            if p.tag == Tag::RSA_OAEP_MGF_DIGEST {
++                if let KeyParameterValue::Digest(digest) = p.value {
++                    return Some(digest);
++                }
++            }
++            None
++        })
++        .collect();
++
++    // Android's ordinary OAEP setup includes SHA-1 in the authorized MGF digest set. An explicit
++    // non-default MGF1 probe omits SHA-1, which lets Auto avoid rerouting normal OAEP keys.
++    is_rsa && uses_oaep && !mgf_digests.is_empty() && !mgf_digests.contains(&Digest::SHA1)
++}
++
++fn is_security_level_auto_unavailable(security_level: SecurityLevel) -> bool {
++    AUTO_UNAVAILABLE_SECURITY_LEVELS
++        .lock()
++        .map(|levels| levels.contains(&security_level.0))
++        .unwrap_or(false)
++}
++
++pub(crate) fn mark_auto_security_level_unavailable(security_level: SecurityLevel) {
++    let Ok(mut levels) = AUTO_UNAVAILABLE_SECURITY_LEVELS.lock() else {
++        warn!("tee soft debug: failed to lock Auto TEE health state");
++        return;
++    };
++    if levels.insert(security_level.0) {
++        warn!(
++            "tee soft debug: Auto marked security level {:?} unavailable for this boot",
++            security_level
++        );
++    }
++}
++
+ fn normalize_alias(alias: Option<&str>) -> Option<String> {
+     let value = alias.unwrap_or_default().trim();
+     if value.is_empty() { None } else { Some(value.to_string()) }
+@@ -306,12 +386,11 @@ pub(crate) fn should_treat_external_attest_key_as_softdebug_for_uid(
+     uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg))
+ }
+ 
+-pub(crate) fn should_force_software_generation_for_uid(
++pub(crate) fn generation_policy_for_uid(
+     caller_uid: AppUid,
+     creation_params: &[KeyParameter],
+-    _has_external_attestation_key: bool,
+-    _uses_tracked_attest_key: bool,
+-) -> bool {
++    security_level: SecurityLevel,
++) -> TeeSoftDebugGenerationPolicy {
+     let cfg = match load_config_for_user(caller_uid.owning_user()) {
+         Ok(cfg) => cfg,
+         Err(e) => {
+@@ -319,12 +398,12 @@ pub(crate) fn should_force_software_generation_for_uid(
+                 "tee soft debug: failed to load config while deciding generation path for uid {:?}: {:?}",
+                 caller_uid, e
+             );
+-            return false;
++            return TeeSoftDebugGenerationPolicy::Unmatched;
+         }
+     };
+ 
+     if !cfg.enabled || cfg.target_packages.is_empty() {
+-        return false;
++        return TeeSoftDebugGenerationPolicy::Unmatched;
+     }
+ 
+     let uid_packages = match package_names_for_uid(caller_uid) {
+@@ -334,12 +413,12 @@ pub(crate) fn should_force_software_generation_for_uid(
+                 "tee soft debug: failed to query packages while deciding generation path for uid {:?}: {:?}",
+                 caller_uid, e
+             );
+-            return false;
++            return TeeSoftDebugGenerationPolicy::Unmatched;
+         }
+     };
+     let matched = uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg));
+     if !matched {
+-        return false;
++        return TeeSoftDebugGenerationPolicy::Unmatched;
+     }
+ 
+     let is_attest_key = is_attest_key_request(creation_params);
+@@ -362,9 +441,24 @@ pub(crate) fn should_force_software_generation_for_uid(
+                     caller_uid
+                 );
+             }
+-            true
++            TeeSoftDebugGenerationPolicy::Generate
++        }
++        TeeSoftDebugMode::Patch => TeeSoftDebugGenerationPolicy::Patch,
++        TeeSoftDebugMode::Auto if is_rsa_oaep_non_default_mgf1_request(creation_params) => {
++            info!(
++                "tee soft debug: Auto routing RSA-OAEP non-default MGF1 request to SOFTWARE, uid={:?}",
++                caller_uid
++            );
++            TeeSoftDebugGenerationPolicy::AutoSoftwareMgf1
++        }
++        TeeSoftDebugMode::Auto if is_security_level_auto_unavailable(security_level) => {
++            info!(
++                "tee soft debug: Auto routing request to SOFTWARE because security level {:?} is unavailable for this boot, uid={:?}",
++                security_level, caller_uid
++            );
++            TeeSoftDebugGenerationPolicy::AutoSoftwareTeeUnavailable
+         }
+-        TeeSoftDebugMode::Patch | TeeSoftDebugMode::Auto => false,
++        TeeSoftDebugMode::Auto => TeeSoftDebugGenerationPolicy::AutoHardware,
+     }
+ }
+ 
+@@ -1158,54 +1252,52 @@ fn select_best_chain(
+ 
+     let mut consider_candidate =
+         |chain: Vec<Vec<u8>>, algorithm: Option<String>, material_id: Option<String>| {
+-        let score = chain_transition_score(&chain);
+-        let algo_family = normalize_algorithm_family(algorithm.as_deref());
+-        let family_match = preferred_family.is_some() && preferred_family == algo_family;
+-        if family_match {
+-            let replace = match best_match_score {
+-                None => true,
+-                Some(current) => score < current,
+-            };
+-            if replace {
+-                best_match_score = Some(score);
+-                best_match_algorithm = algorithm;
+-                best_match_material_id = material_id;
+-                best_match_chain = Some(chain);
+-            }
+-        } else {
+-            let replace = match best_other_score {
+-                None => true,
+-                Some(current) => score < current,
+-            };
+-            if replace {
+-                best_other_score = Some(score);
+-                best_other_algorithm = algorithm;
+-                best_other_material_id = material_id;
+-                best_other_chain = Some(chain);
++            let score = chain_transition_score(&chain);
++            let algo_family = normalize_algorithm_family(algorithm.as_deref());
++            let family_match = preferred_family.is_some() && preferred_family == algo_family;
++            if family_match {
++                let replace = match best_match_score {
++                    None => true,
++                    Some(current) => score < current,
++                };
++                if replace {
++                    best_match_score = Some(score);
++                    best_match_algorithm = algorithm;
++                    best_match_material_id = material_id;
++                    best_match_chain = Some(chain);
++                }
++            } else {
++                let replace = match best_other_score {
++                    None => true,
++                    Some(current) => score < current,
++                };
++                if replace {
++                    best_other_score = Some(score);
++                    best_other_algorithm = algorithm;
++                    best_other_material_id = material_id;
++                    best_other_chain = Some(chain);
++                }
+             }
+-        }
+-    };
++        };
+ 
+     let mut visit_material = |material: &KeyboxMaterial| {
+         let mut accepted = false;
+         let mid = material_id(material);
+         if let Some(chain) = try_resign_with_material(original_leaf, material) {
+             match validate_chain_for_keyattestation(&chain) {
+-                Ok(()) => {
+-                    match validate_chain_in_keyattestation_view(&chain) {
+-                        Ok(()) => {
+-                            accepted = true;
+-                            consider_candidate(chain, material.algorithm.clone(), Some(mid.clone()))
+-                        }
+-                        Err(step) => {
+-                            warn!(
++                Ok(()) => match validate_chain_in_keyattestation_view(&chain) {
++                    Ok(()) => {
++                        accepted = true;
++                        consider_candidate(chain, material.algorithm.clone(), Some(mid.clone()))
++                    }
++                    Err(step) => {
++                        warn!(
+                                 "tee soft debug: re-sign candidate failed in keyattestation sort/view at step {}, key_algorithm={:?}",
+                                 step,
+                                 material.algorithm
+                             );
+-                        }
+                     }
+-                }
++                },
+                 Err(step) => {
+                     warn!(
+                         "tee soft debug: re-sign candidate chain validation failed at step {}, key_algorithm={:?}",
+@@ -1316,12 +1408,16 @@ fn load_keybox_material(path: &Path) -> Result<Vec<KeyboxMaterial>> {
+ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     caller_uid: AppUid,
+     creation_params: &[KeyParameter],
+-    has_external_attestation_key: bool,
+-    uses_tracked_attest_key: bool,
++    generation_context: TeeSoftDebugGenerationContext,
+     current_key_alias: Option<&str>,
+     attest_key_descriptor: Option<&KeyDescriptor>,
+     creation_result: &mut KeyCreationResult,
+ ) {
++    let TeeSoftDebugGenerationContext {
++        has_external_attestation_key,
++        uses_tracked_attest_key,
++        used_software_generation,
++    } = generation_context;
+     let user = caller_uid.owning_user();
+     let cfg = match load_config_for_user(user) {
+         Ok(cfg) => cfg,
+@@ -1376,8 +1472,11 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             return;
+         }
+         let original_leaf = creation_result.certificateChain[0].encodedCertificate.clone();
+-        let resigned_leaf = match resign_leaf_certificate(&original_leaf, &state.signer_cert, &state.signer_key)
+-        {
++        let resigned_leaf = match resign_leaf_certificate(
++            &original_leaf,
++            &state.signer_cert,
++            &state.signer_key,
++        ) {
+             Ok(v) => v,
+             Err(e) => {
+                 warn!(
+@@ -1405,7 +1504,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     let has_original_chain = !creation_result.certificateChain.is_empty();
+     let is_attest_key = is_attest_key_request(creation_params);
+ 
+-    let action = decide_action(&cfg, is_attest_key, has_original_chain);
++    let action = decide_action(&cfg, is_attest_key, has_original_chain, used_software_generation);
+     match action {
+         TeeSoftDebugAction::Skip => return,
+         TeeSoftDebugAction::GenerateSoftwareChain => {
+@@ -1429,11 +1528,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     let materials = match load_keybox_material(keybox_path) {
+         Ok(materials) => materials,
+         Err(e) => {
+-            warn!(
+-                "tee soft debug: failed to parse keybox {}: {:?}",
+-                keybox_path.display(),
+-                e
+-            );
++            warn!("tee soft debug: failed to parse keybox {}: {:?}", keybox_path.display(), e);
+             return;
+         }
+     };
+@@ -1449,13 +1544,11 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         .and_then(|alias| get_tracked_attest_key_material(caller_uid, &alias));
+     let mut selected = select_best_chain(&original_leaf, &materials, tracked_forced_family);
+     if let Some(forced_mid) = tracked_forced_material.as_deref() {
+-        let pinned_materials: Vec<KeyboxMaterial> = materials
+-            .iter()
+-            .filter(|m| material_id(m) == forced_mid)
+-            .cloned()
+-            .collect();
++        let pinned_materials: Vec<KeyboxMaterial> =
++            materials.iter().filter(|m| material_id(m) == forced_mid).cloned().collect();
+         if !pinned_materials.is_empty() {
+-            let pinned_selected = select_best_chain(&original_leaf, &pinned_materials, tracked_forced_family);
++            let pinned_selected =
++                select_best_chain(&original_leaf, &pinned_materials, tracked_forced_family);
+             if pinned_selected.is_some() {
+                 selected = pinned_selected;
+             }
+@@ -1464,7 +1557,9 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     if uses_tracked_attest_key {
+         if let Some((current_chain, _, _)) = selected.as_ref() {
+             if chain_transition_score(current_chain) > 0 {
+-                if let Some(rsa_selected) = select_best_chain(&original_leaf, &materials, Some("rsa")) {
++                if let Some(rsa_selected) =
++                    select_best_chain(&original_leaf, &materials, Some("rsa"))
++                {
+                     info!(
+                         "tee soft debug: tracked external attest-key path picked mixed-family chain; switching preference to rsa-family candidate for compatibility"
+                     );
+@@ -1476,7 +1571,9 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     if is_attest_key {
+         if let Some((current_chain, _, _)) = selected.as_ref() {
+             if chain_transition_score(current_chain) > 0 {
+-                if let Some(rsa_selected) = select_best_chain(&original_leaf, &materials, Some("rsa")) {
++                if let Some(rsa_selected) =
++                    select_best_chain(&original_leaf, &materials, Some("rsa"))
++                {
+                     info!(
+                         "tee soft debug: ATTEST_KEY path picked mixed-family chain; switching preference to rsa-family candidate for persistent-key compatibility"
+                     );
+@@ -1485,14 +1582,15 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             }
+         }
+     }
+-    let Some((mut output_chain, selected_algorithm, selected_material)) = selected
+-    else {
++    let Some((mut output_chain, selected_algorithm, selected_material)) = selected else {
+         warn!("tee soft debug: no usable keybox chain selected for {}", cfg.keybox_path);
+         return;
+     };
+ 
+     if is_attest_key {
+-        if let (Some(alias), Some(algo)) = (normalize_alias(current_key_alias), selected_algorithm.as_deref()) {
++        if let (Some(alias), Some(algo)) =
++            (normalize_alias(current_key_alias), selected_algorithm.as_deref())
++        {
+             track_attest_key_algorithm(caller_uid, &alias, algo);
+             if let Some(mid) = selected_material.as_deref() {
+                 track_attest_key_material(caller_uid, &alias, mid);
+@@ -1552,10 +1650,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         .map(|encoded| Certificate { encodedCertificate: encoded })
+         .collect();
+ 
+-    let algorithms: Vec<&str> = materials
+-        .iter()
+-        .filter_map(|m| m.algorithm.as_deref())
+-        .collect();
++    let algorithms: Vec<&str> = materials.iter().filter_map(|m| m.algorithm.as_deref()).collect();
+     info!(
+         "tee soft debug: replaced attestation chain for uid {:?}, packages {:?}, keybox_path {}, selected_algorithm {:?}, key_algorithms {:?}, chain_summary {:?}, chain_names {:?}, keyattestation_steps {:?}",
+         caller_uid,
+@@ -1568,3 +1663,48 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         keyattestation_steps
+     );
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn rsa_oaep_params(mgf_digests: &[Digest]) -> Vec<KeyParameter> {
++        let mut params = vec![
++            KeyParameter {
++                tag: Tag::ALGORITHM,
++                value: KeyParameterValue::Algorithm(Algorithm::RSA),
++            },
++            KeyParameter {
++                tag: Tag::PADDING,
++                value: KeyParameterValue::PaddingMode(PaddingMode::RSA_OAEP),
++            },
++        ];
++        params.extend(mgf_digests.iter().map(|digest| KeyParameter {
++            tag: Tag::RSA_OAEP_MGF_DIGEST,
++            value: KeyParameterValue::Digest(*digest),
++        }));
++        params
++    }
++
++    #[test]
++    fn auto_classifier_routes_non_default_mgf1_to_software() {
++        assert!(is_rsa_oaep_non_default_mgf1_request(&rsa_oaep_params(&[Digest::SHA_2_256])));
++    }
++
++    #[test]
++    fn auto_classifier_keeps_default_mgf1_on_hardware() {
++        assert!(!is_rsa_oaep_non_default_mgf1_request(&rsa_oaep_params(&[
++            Digest::SHA1,
++            Digest::SHA_2_256,
++        ])));
++    }
++
++    #[test]
++    fn auto_classifier_requires_rsa_oaep_and_an_mgf_digest() {
++        assert!(!is_rsa_oaep_non_default_mgf1_request(&[]));
++
++        let mut params = rsa_oaep_params(&[Digest::SHA_2_256]);
++        params.retain(|param| param.tag != Tag::PADDING);
++        assert!(!is_rsa_oaep_non_default_mgf1_request(&params));
++    }
++}
+-- 
+2.43.0
+

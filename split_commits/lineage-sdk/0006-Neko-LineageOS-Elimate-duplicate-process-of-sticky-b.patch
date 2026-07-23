@@ -1,0 +1,39 @@
+From 5920a89a39fac36f7dc90af6afb9cbfa9e76f143 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 20 Jul 2026 17:01:41 +0800
+Subject: [PATCH] Neko LineageOS: Elimate duplicate process of sticky broadcast
+ from fast charge
+
+Change-Id: I46502c87b70e2b1344ab84a7837022b549aca242
+---
+ .../platform/internal/health/FastChargeController.java     | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java
+index 548fd7a..3d3309c 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/FastChargeController.java
+@@ -124,7 +124,7 @@ public class FastChargeController extends LineageHealthFeature {
+         registerSettings(MODE_URI, SESSION_MODE_URI);
+         registerBatteryReceiver();
+ 
+-        handleSettingChange();
++        mHandler.post(this::handleSettingChange);
+     }
+ 
+     private void handleSettingChange() {
+@@ -153,10 +153,7 @@ public class FastChargeController extends LineageHealthFeature {
+         };
+ 
+         IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+-        Intent stickyIntent = mContext.registerReceiver(mBatteryReceiver, filter);
+-        if (stickyIntent != null) {
+-            handleBatteryStateChanged(stickyIntent);
+-        }
++        mContext.registerReceiver(mBatteryReceiver, filter, null, mHandler);
+     }
+ 
+     private void handleBatteryStateChanged(Intent intent) {
+-- 
+2.43.0
+

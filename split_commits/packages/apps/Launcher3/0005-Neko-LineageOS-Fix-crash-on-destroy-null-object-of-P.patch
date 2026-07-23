@@ -1,0 +1,231 @@
+From abb69630465d49736c5b64e7306a4e7706c6e0ca Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Tue, 21 Jul 2026 10:30:04 +0800
+Subject: [PATCH] Neko LineageOS: Fix crash on destroy null object of PopUp
+ View
+
+Change-Id: Ib0f4d963d6e49e30fcdcc1ee326e5141d904d9ed
+---
+ .../android/quickstep/AbsSwipeUpHandler.java  | 129 ++++++++++++------
+ 1 file changed, 87 insertions(+), 42 deletions(-)
+
+diff --git a/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java b/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java
+index 70da3f9..47f8c3e 100644
+--- a/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java
++++ b/quickstep/src/com/android/quickstep/AbsSwipeUpHandler.java
+@@ -80,24 +80,24 @@ import android.app.TaskInfo;
+ import android.app.WindowConfiguration;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.res.Resources;
+ import android.graphics.Bitmap;
+ import android.graphics.Color;
+-import android.content.res.Resources;
+ import android.graphics.Matrix;
+ import android.graphics.PointF;
+ import android.graphics.Rect;
+ import android.graphics.RectF;
+-import android.os.IBinder;
+ import android.os.Handler;
++import android.os.IBinder;
+ import android.os.Looper;
+ import android.os.RemoteException;
+ import android.os.SystemClock;
+ import android.provider.Settings;
++import android.text.TextUtils;
+ import android.util.Log;
+ import android.util.Pair;
+ import android.util.TimeUtils;
+ import android.util.TypedValue;
+-import android.text.TextUtils;
+ import android.view.Choreographer;
+ import android.view.Gravity;
+ import android.view.MotionEvent;
+@@ -184,11 +184,11 @@ import com.android.quickstep.views.TaskContainer;
+ import com.android.quickstep.views.TaskView;
+ import com.android.quickstep.views.TaskViewType;
+ import com.android.quickstep.window.RecentsWindowManager;
++import com.android.systemui.contextualeducation.GestureType;
++import com.android.systemui.shared.recents.model.ThumbnailData;
+ import com.android.systemui.shared.recents.view.AppTransitionAnimationSpecCompat;
+ import com.android.systemui.shared.recents.view.AppTransitionAnimationSpecsFuture;
+ import com.android.systemui.shared.recents.view.RecentsTransition;
+-import com.android.systemui.contextualeducation.GestureType;
+-import com.android.systemui.shared.recents.model.ThumbnailData;
+ import com.android.systemui.shared.system.ActivityManagerWrapper;
+ import com.android.systemui.shared.system.InputConsumerController;
+ import com.android.systemui.shared.system.InteractionJankMonitorWrapper;
+@@ -386,6 +386,9 @@ public abstract class AbsSwipeUpHandler<
+     private float mLastTouchX;
+     private float mLastTouchY;
+     @Nullable private MiniWindowDropTargetView mMiniWindowDropTargetView;
++    private boolean mMiniWindowDropTargetAddPosted;
++    private boolean mMiniWindowDropTargetRemovalPosted;
++    private final ArrayList<View> mMiniWindowDropTargetsPendingRemoval = new ArrayList<>();
+ 
+     private final long mTouchTimeMs;
+     private long mLauncherFrameDrawnTime;
+@@ -1287,7 +1290,7 @@ public abstract class AbsSwipeUpHandler<
+                 && Math.abs(endVelocityPxPerMs) > flingThreshold;
+         final boolean launchMiniWindow = shouldLaunchMiniWindowOnRelease();
+         mStateCallback.setStateOnUiThread(STATE_GESTURE_COMPLETED);
+-        removeMiniWindowDropTargetViewImmediately();
++        removeMiniWindowDropTargetView();
+         if (launchMiniWindow) {
+             launchTaskAsMiniWindow();
+             return;
+@@ -2735,22 +2738,51 @@ public abstract class AbsSwipeUpHandler<
+     }
+ 
+     private void ensureMiniWindowDropTarget() {
+-        if (!mMiniWindowEligible || mContainer == null || mMiniWindowDropTargetView != null) {
++        if (!mMiniWindowEligible
++                || mContainer == null
++                || mMiniWindowDropTargetView != null
++                || mMiniWindowDropTargetAddPosted) {
+             return;
+         }
+-        removeMiniWindowDropTargetsFromDragLayer(mContainer.getDragLayer());
+-        MiniWindowDropTargetView dropTargetView =
+-                new MiniWindowDropTargetView(mContainer.asContext());
+-        BaseDragLayer.LayoutParams lp = new BaseDragLayer.LayoutParams(
+-                pxFromDp(MINI_WINDOW_DROP_TARGET_SIZE_DP),
+-                pxFromDp(MINI_WINDOW_DROP_TARGET_SIZE_DP));
+-        lp.gravity = Gravity.TOP | Gravity.END;
+-        WindowInsets insets = mContainer.getDragLayer().getRootWindowInsets();
+-        int topInset = insets == null ? 0 : insets.getInsets(WindowInsets.Type.systemBars()).top;
+-        lp.topMargin = topInset + pxFromDp(MINI_WINDOW_DROP_TARGET_TOP_MARGIN_DP);
+-        lp.rightMargin = pxFromDp(MINI_WINDOW_DROP_TARGET_RIGHT_MARGIN_DP);
+-        mContainer.getDragLayer().addView(dropTargetView, lp);
+-        mMiniWindowDropTargetView = dropTargetView;
++        final ViewGroup dragLayer = mContainer.getDragLayer();
++        removeMiniWindowDropTargetsFromDragLayer(dragLayer);
++        mMiniWindowDropTargetAddPosted = true;
++        // Recents scroll listeners can reach this method from RecentsView.dispatchDraw(). Defer
++        // hierarchy changes until that draw traversal has returned.
++        MAIN_EXECUTOR
++                .getHandler()
++                .post(
++                        () -> {
++                            mMiniWindowDropTargetAddPosted = false;
++                            if (mContainer == null
++                                    || mContainer.getDragLayer() != dragLayer
++                                    || mMiniWindowDropTargetView != null) {
++                                return;
++                            }
++                            updateMiniWindowEligibility();
++                            if (!canEnterMiniWindowInteraction()) {
++                                return;
++                            }
++
++                            MiniWindowDropTargetView dropTargetView =
++                                    new MiniWindowDropTargetView(mContainer.asContext());
++                            BaseDragLayer.LayoutParams lp =
++                                    new BaseDragLayer.LayoutParams(
++                                            pxFromDp(MINI_WINDOW_DROP_TARGET_SIZE_DP),
++                                            pxFromDp(MINI_WINDOW_DROP_TARGET_SIZE_DP));
++                            lp.gravity = Gravity.TOP | Gravity.END;
++                            WindowInsets insets = dragLayer.getRootWindowInsets();
++                            int topInset =
++                                    insets == null
++                                            ? 0
++                                            : insets.getInsets(WindowInsets.Type.systemBars()).top;
++                            lp.topMargin =
++                                    topInset + pxFromDp(MINI_WINDOW_DROP_TARGET_TOP_MARGIN_DP);
++                            lp.rightMargin = pxFromDp(MINI_WINDOW_DROP_TARGET_RIGHT_MARGIN_DP);
++                            dragLayer.addView(dropTargetView, lp);
++                            mMiniWindowDropTargetView = dropTargetView;
++                            updateMiniWindowDropTargetState();
++                        });
+     }
+ 
+     private void updateMiniWindowDropTargetState() {
+@@ -2985,25 +3017,18 @@ public abstract class AbsSwipeUpHandler<
+     }
+ 
+     private void clearMiniWindowDropTargetState() {
+-        View dragLayer = mContainer == null ? null : mContainer.getDragLayer();
+         if (mMiniWindowDropTargetView != null) {
+             resetMiniWindowArmedState();
+         }
+         mHasTouchPosition = false;
+-        removeMiniWindowDropTargetViewImmediately();
+-        removeMiniWindowDropTargetsFromDragLayer(dragLayer);
++        removeMiniWindowDropTargetView();
+     }
+ 
+-    private void removeMiniWindowDropTargetViewImmediately() {
+-        View dragLayer = mContainer == null ? null : mContainer.getDragLayer();
++    private void removeMiniWindowDropTargetView() {
+         if (mMiniWindowDropTargetView != null) {
+-            ViewGroup parent = (ViewGroup) mMiniWindowDropTargetView.getParent();
+-            if (parent != null) {
+-                parent.removeView(mMiniWindowDropTargetView);
+-            }
++            scheduleMiniWindowDropTargetRemoval(mMiniWindowDropTargetView);
+             mMiniWindowDropTargetView = null;
+         }
+-        removeMiniWindowDropTargetsFromDragLayer(dragLayer);
+     }
+ 
+     private void removeMiniWindowDropTargetsFromDragLayer(@Nullable View dragLayer) {
+@@ -3013,24 +3038,44 @@ public abstract class AbsSwipeUpHandler<
+         for (int i = dragLayerGroup.getChildCount() - 1; i >= 0; i--) {
+             View child = dragLayerGroup.getChildAt(i);
+             if (child instanceof MiniWindowDropTargetView && child != mMiniWindowDropTargetView) {
+-                dragLayerGroup.removeViewAt(i);
++                scheduleMiniWindowDropTargetRemoval(child);
+             }
+         }
+-        if (mMiniWindowDropTargetView == null) {
+-            for (int i = dragLayerGroup.getChildCount() - 1; i >= 0; i--) {
+-                View child = dragLayerGroup.getChildAt(i);
+-                if (child instanceof MiniWindowDropTargetView) {
+-                    dragLayerGroup.removeViewAt(i);
+-                }
+-            }
++    }
++
++    private void scheduleMiniWindowDropTargetRemoval(View dropTargetView) {
++        // Hide immediately, but only remove the captured instance after the current traversal.
++        // Capturing instances also prevents an old gesture handler from removing a future target.
++        dropTargetView.setVisibility(View.INVISIBLE);
++        if (!mMiniWindowDropTargetsPendingRemoval.contains(dropTargetView)) {
++            mMiniWindowDropTargetsPendingRemoval.add(dropTargetView);
+         }
++        if (mMiniWindowDropTargetRemovalPosted) {
++            return;
++        }
++        mMiniWindowDropTargetRemovalPosted = true;
++        MAIN_EXECUTOR
++                .getHandler()
++                .post(
++                        () -> {
++                            mMiniWindowDropTargetRemovalPosted = false;
++                            ArrayList<View> pendingRemoval =
++                                    new ArrayList<>(mMiniWindowDropTargetsPendingRemoval);
++                            mMiniWindowDropTargetsPendingRemoval.clear();
++                            for (View view : pendingRemoval) {
++                                if (view.getParent() instanceof ViewGroup parent) {
++                                    parent.removeView(view);
++                                }
++                            }
++                        });
+     }
+ 
+     private int pxFromDp(int dp) {
+-        return Math.round(TypedValue.applyDimension(
+-                TypedValue.COMPLEX_UNIT_DIP,
+-                dp,
+-                mContext.getResources().getDisplayMetrics()));
++        return Math.round(
++                TypedValue.applyDimension(
++                        TypedValue.COMPLEX_UNIT_DIP,
++                        dp,
++                        mContext.getResources().getDisplayMetrics()));
+     }
+ 
+     protected void performHapticFeedback() {
+-- 
+2.43.0
+

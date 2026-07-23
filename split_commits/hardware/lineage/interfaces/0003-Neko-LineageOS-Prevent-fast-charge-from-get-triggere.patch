@@ -1,0 +1,163 @@
+From bcc478f2d451a9de4ccaa8274ef80880136824fa Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 20 Jul 2026 16:56:39 +0800
+Subject: [PATCH] Neko LineageOS: Prevent fast charge from get triggered too
+ often
+
+Change-Id: Ie77e87e0d9bfceb080102e0b52974290d3217249
+---
+ health/aidl/default/FastCharge.cpp | 69 ++++++++++++++++++++++++------
+ health/aidl/default/FastCharge.h   |  4 +-
+ 2 files changed, 60 insertions(+), 13 deletions(-)
+
+diff --git a/health/aidl/default/FastCharge.cpp b/health/aidl/default/FastCharge.cpp
+index 0fa44fc..8208a0e 100644
+--- a/health/aidl/default/FastCharge.cpp
++++ b/health/aidl/default/FastCharge.cpp
+@@ -245,9 +245,26 @@ std::optional<FastChargeMode> FastCharge::readAppliedMode() const {
+             }
+             return mode;
+         }
+-        case FastChargeBackend::MARBLE_THERMAL:
+-            return pathExists(kMarbleThermalNormalPath) ? FastChargeMode::FAST_CHARGE
+-                                                        : FastChargeMode::NONE;
++        case FastChargeBackend::MARBLE_THERMAL: {
++            size_t overrideCount = 0;
++            for (const auto& entry : kMarbleSceneOverrides) {
++                overrideCount += pathExists(entry.path) ? 1 : 0;
++            }
++
++            const bool hasLegacyOverrides =
++                    pathExists(kMarbleThermalMapPath) || pathExists(kMarbleThermalOdmMapPath);
++            if (overrideCount == 0 && !hasLegacyOverrides) {
++                return FastChargeMode::NONE;
++            }
++            if (overrideCount == kMarbleSceneOverrides.size() && !hasLegacyOverrides) {
++                return FastChargeMode::FAST_CHARGE;
++            }
++
++            LOG(WARNING) << "Inconsistent marble thermal override state: " << overrideCount << "/"
++                         << kMarbleSceneOverrides.size()
++                         << " scene files, legacy=" << hasLegacyOverrides;
++            return {};
++        }
+         case FastChargeBackend::NONE:
+         default:
+             return {};
+@@ -263,9 +280,12 @@ std::optional<std::string> FastCharge::readBatteryStatus() const {
+     return android::base::Trim(content);
+ }
+ 
+-bool FastCharge::isChargeSessionActive() const {
++std::optional<bool> FastCharge::isChargeSessionActive() const {
+     auto batteryStatus = readBatteryStatus();
+-    return batteryStatus && isChargingStatus(*batteryStatus);
++    if (!batteryStatus) {
++        return {};
++    }
++    return isChargingStatus(*batteryStatus);
+ }
+ 
+ bool FastCharge::isBatteryPowerSupplyEvent(const char* msg, ssize_t len) const {
+@@ -299,8 +319,17 @@ bool FastCharge::applyModeLocked(FastChargeMode mode) {
+ }
+ 
+ bool FastCharge::reconcileLocked() {
+-    const FastChargeMode targetMode =
+-            isChargeSessionActive() ? mRequestedMode : FastChargeMode::NONE;
++    const auto chargeSessionActive = isChargeSessionActive();
++    if (!chargeSessionActive) {
++        return false;
++    }
++
++    mChargeSessionActive = *chargeSessionActive;
++    return reconcileLocked(*chargeSessionActive);
++}
++
++bool FastCharge::reconcileLocked(bool chargeSessionActive) {
++    const FastChargeMode targetMode = chargeSessionActive ? mRequestedMode : FastChargeMode::NONE;
+     return applyModeLocked(targetMode);
+ }
+ 
+@@ -349,6 +378,10 @@ bool FastCharge::applyNodeModeLocked(FastChargeMode mode) {
+ }
+ 
+ bool FastCharge::applyMarbleModeLocked(FastChargeMode mode) {
++    if (mAppliedMode && *mAppliedMode == mode) {
++        return true;
++    }
++
+     if (mode == FastChargeMode::NONE) {
+         return restoreMarbleDefaultLocked();
+     }
+@@ -358,10 +391,6 @@ bool FastCharge::applyMarbleModeLocked(FastChargeMode mode) {
+         return false;
+     }
+ 
+-    if (mAppliedMode && *mAppliedMode == mode) {
+-        return true;
+-    }
+-
+     if (!writeMarbleThermalOverrideLocked()) {
+         return false;
+     }
+@@ -406,6 +435,13 @@ bool FastCharge::writeMarbleThermalOverrideLocked() {
+         return false;
+     }
+ 
++    // Remove files used by the previous implementation before installing the
++    // complete per-scene override set.
++    if (!deleteFileIfPresent(kMarbleThermalMapPath) ||
++        !deleteFileIfPresent(kMarbleThermalOdmMapPath)) {
++        return false;
++    }
++
+     bool ok = true;
+     for (const auto& entry : kMarbleSceneOverrides) {
+         auto payload = decodeHex(entry.payloadHex);
+@@ -517,7 +553,16 @@ void FastCharge::monitorUevents() {
+         }
+ 
+         std::lock_guard lock(mLock);
+-        reconcileLocked();
++        const auto chargeSessionActive = isChargeSessionActive();
++        if (!chargeSessionActive) {
++            continue;
++        }
++        if (mChargeSessionActive && *mChargeSessionActive == *chargeSessionActive) {
++            continue;
++        }
++
++        mChargeSessionActive = *chargeSessionActive;
++        reconcileLocked(*chargeSessionActive);
+     }
+ 
+     close(epollFd);
+diff --git a/health/aidl/default/FastCharge.h b/health/aidl/default/FastCharge.h
+index 23e9e92..58632d0 100644
+--- a/health/aidl/default/FastCharge.h
++++ b/health/aidl/default/FastCharge.h
+@@ -82,10 +82,11 @@ class FastCharge : public BnFastCharge {
+   private:
+     std::optional<FastChargeMode> readAppliedMode() const;
+     std::optional<std::string> readBatteryStatus() const;
+-    bool isChargeSessionActive() const;
++    std::optional<bool> isChargeSessionActive() const;
+     bool isBatteryPowerSupplyEvent(const char* msg, ssize_t len) const;
+     bool applyModeLocked(FastChargeMode mode);
+     bool reconcileLocked();
++    bool reconcileLocked(bool chargeSessionActive);
+     void monitorUevents();
+     FastChargeBackend detectBackend() const;
+     int64_t getSupportedModes() const;
+@@ -102,6 +103,7 @@ class FastCharge : public BnFastCharge {
+     mutable std::mutex mLock;
+     FastChargeMode mRequestedMode = FastChargeMode::NONE;
+     std::optional<FastChargeMode> mAppliedMode;
++    std::optional<bool> mChargeSessionActive;
+ };
+ 
+ }  // namespace health
+-- 
+2.43.0
+

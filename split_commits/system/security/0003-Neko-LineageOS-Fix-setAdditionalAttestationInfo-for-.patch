@@ -1,0 +1,59 @@
+From daf00b4433f87369b158cdfce787709a7c4435cf Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 23 Jul 2026 12:03:51 +0800
+Subject: [PATCH] Neko LineageOS: Fix setAdditionalAttestationInfo for SOFTWARE
+ KeyMint
+
+Module information used for attestation was only sent to the TEE and
+StrongBox KeyMint instances. Keys generated through the SOFTWARE
+KeyMint instance therefore omitted MODULE_HASH from the software
+enforced authorization list, despite the supplementary module
+information being available from Keystore.
+
+Send the same module hash to the optional SOFTWARE KeyMint instance
+when it supports KeyMint V4 or newer. Keep failures non-fatal because
+SOFTWARE KeyMint remains optional and must not prevent the device from
+booting.
+
+This fixes MODULE_HASH consistency checks for TEE Soft Emu Generate
+mode.
+
+Change-Id: I1c3cacb53284a1abb478d0037352ec15aec8c349
+---
+ keystore2/src/maintenance.rs | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/keystore2/src/maintenance.rs b/keystore2/src/maintenance.rs
+index 3865485..b5023cb 100644
+--- a/keystore2/src/maintenance.rs
++++ b/keystore2/src/maintenance.rs
+@@ -547,7 +547,25 @@ impl Maintenance {
+             "setAdditionalAttestationInfo",
+             |dev| dev.setAdditionalAttestationInfo(&kps),
+             Some(KEYMINT_V4),
+-        )
++        )?;
++
++        // TEE Soft Emu Generate mode creates attestations with the SOFTWARE KeyMint instance.
++        // Unlike the platform hardware security levels above, SOFTWARE is optional, so failure to
++        // populate it must not block boot. When present and at KeyMint V4+, it must receive the
++        // same module hash or its attestation extension will omit Tag::MODULE_HASH.
++        match Maintenance::call_with_watchdog(
++            SecurityLevel::SOFTWARE,
++            "setAdditionalAttestationInfo",
++            &|dev| dev.setAdditionalAttestationInfo(&kps),
++            Some(KEYMINT_V4),
++        ) {
++            Ok(()) => info!("Call to setAdditionalAttestationInfo succeeded for SOFTWARE"),
++            Err(e) => warn!(
++                "Call to setAdditionalAttestationInfo failed for optional SOFTWARE KeyMint: {e}"
++            ),
++        }
++
++        Ok(())
+     }
+ 
+     fn encode_module_info(module_info: Vec<ModuleInfo>) -> Result<Vec<u8>, der::Error> {
+-- 
+2.43.0
+
