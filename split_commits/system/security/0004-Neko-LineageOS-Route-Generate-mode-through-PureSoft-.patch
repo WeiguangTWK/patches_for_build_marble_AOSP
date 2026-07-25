@@ -1,0 +1,333 @@
+From f0401ea52f540b854e264f8b005b27b167ba6188 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 24 Jul 2026 08:47:09 +0800
+Subject: [PATCH] Neko LineageOS: Route Generate mode through PureSoft TEE
+
+Add an internal KEYSTORE selector for the PureSoft KeyMint TEE persona
+used by TEE Soft Emu Generate mode.
+
+Keep generated key blobs associated with the SOFTWARE routing UUID
+while reporting TRUSTED_ENVIRONMENT through KeyMint characteristics
+and KeyInfo. This prevents the emulated device from replacing or
+conflicting with the genuine TEE device.
+
+Track the reported security level separately from the routing UUID and
+preserve leaves signed by a software-generated ATTEST_KEY so their
+certificate chains remain intact.
+
+The regular SOFTWARE compatibility device remains unchanged, and TEE
+Soft Emu disabled, Patch, and Auto hardware paths continue to use their
+existing devices.
+
+Change-Id: I264a7163bb5225e0af191de648873fc37d9e42f7
+---
+ .../compat/IKeystoreCompatService.aidl        |  3 ++
+ keystore2/src/globals.rs                      | 10 +++-
+ keystore2/src/km_compat/km_compat.cpp         | 20 ++++++++
+ keystore2/src/km_compat/tests.rs              | 17 ++++++-
+ keystore2/src/security_level.rs               | 15 ++++--
+ keystore2/src/service.rs                      | 48 +++++++++----------
+ keystore2/src/tee_soft_debug.rs               | 19 ++++++++
+ 7 files changed, 101 insertions(+), 31 deletions(-)
+
+diff --git a/keystore2/aidl/android/security/compat/IKeystoreCompatService.aidl b/keystore2/aidl/android/security/compat/IKeystoreCompatService.aidl
+index 8e347f0..06fb54b 100644
+--- a/keystore2/aidl/android/security/compat/IKeystoreCompatService.aidl
++++ b/keystore2/aidl/android/security/compat/IKeystoreCompatService.aidl
+@@ -40,6 +40,9 @@ interface IKeystoreCompatService {
+      *       by hardware (b/216468666).
+      * - SOFTWARE: implementation is entirely software based.  In this case, the returned device
+      *   supports the current version of the IKeyMintDevice interface.
++     * - KEYSTORE: an internal-only selector for the pure-software TEE persona used by TEE Soft
++     *   Emu. The returned device reports TRUSTED_ENVIRONMENT; KEYSTORE is never returned as a
++     *   device security level.
+      */
+     IKeyMintDevice getKeyMintDevice (SecurityLevel securityLevel);
+ 
+diff --git a/keystore2/src/globals.rs b/keystore2/src/globals.rs
+index d79130a..a2f5d12 100644
+--- a/keystore2/src/globals.rs
++++ b/keystore2/src/globals.rs
+@@ -260,8 +260,16 @@ fn connect_keymint(
+         let keystore_compat_service: Strong<dyn IKeystoreCompatService> =
+             map_binder_status_code(binder::get_interface("android.security.compat"))
+                 .context(ks_err!("Trying to connect to compat service."))?;
++        // Keep the platform SOFTWARE compat device untouched for back-level KeyMint emulation.
++        // KEYSTORE is an internal selector for the separate pure-software TEE persona; the cache
++        // and key-blob routing UUID remain SOFTWARE so this device cannot replace genuine TEE.
++        let compat_selector = if *security_level == SecurityLevel::SOFTWARE {
++            SecurityLevel::KEYSTORE
++        } else {
++            *security_level
++        };
+         let km =
+-            map_binder_status(keystore_compat_service.getKeyMintDevice(*security_level))
++            map_binder_status(keystore_compat_service.getKeyMintDevice(compat_selector))
+                 .map_err(|e| match e {
+                     Error::BinderTransaction(StatusCode::NAME_NOT_FOUND) => {
+                         Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE)
+diff --git a/keystore2/src/km_compat/km_compat.cpp b/keystore2/src/km_compat/km_compat.cpp
+index 87bf5da..5e71321 100644
+--- a/keystore2/src/km_compat/km_compat.cpp
++++ b/keystore2/src/km_compat/km_compat.cpp
+@@ -40,6 +40,7 @@ using ::aidl::android::hardware::security::keymint::CreateKeyMintDevice;
+ using ::aidl::android::hardware::security::keymint::Digest;
+ using ::aidl::android::hardware::security::keymint::KeyParameterValue;
+ using ::aidl::android::hardware::security::keymint::PaddingMode;
++using ::aidl::android::hardware::security::keymint::PureSoftBootMode;
+ using ::aidl::android::hardware::security::keymint::Tag;
+ using ::android::hardware::hidl_vec;
+ using ::android::hardware::keymaster::V4_0::TagType;
+@@ -1537,6 +1538,23 @@ std::shared_ptr<IKeyMintDevice> getSoftwareKeymintDevice() {
+     return swDevice;
+ }
+ 
++std::shared_ptr<IKeyMintDevice> getTeeSoftKeymintDevice() {
++    static std::mutex mutex;
++    static std::shared_ptr<IKeyMintDevice> teeSoftDevice;
++    std::lock_guard<std::mutex> lock(mutex);
++    if (!teeSoftDevice) {
++        // Keep this device behind a dedicated internal selector. Keystore assigns its generated
++        // blobs the distinct SOFTWARE routing UUID, while the implementation deliberately uses
++        // the pure-software TEE persona for self-consistent attestation records,
++        // KeyCharacteristics and KeyInfo. Its attestation boot state is an explicit part of this
++        // internal persona rather than a snapshot of runtime-spoofed boot properties. Genuine
++        // /default TEE remains independently selected.
++        teeSoftDevice = CreateKeyMintDevice(KeyMintSecurityLevel::TRUSTED_ENVIRONMENT,
++                                            PureSoftBootMode::VERIFIED_LOCKED);
++    }
++    return teeSoftDevice;
++}
++
+ std::shared_ptr<KeyMintDevice>
+ KeyMintDevice::getWrappedKeymasterDevice(KeyMintSecurityLevel securityLevel) {
+     if (auto dev = getDevice(securityLevel)) {
+@@ -1549,6 +1567,8 @@ std::shared_ptr<IKeyMintDevice>
+ KeyMintDevice::createKeyMintDevice(KeyMintSecurityLevel securityLevel) {
+     if (securityLevel == KeyMintSecurityLevel::SOFTWARE) {
+         return getSoftwareKeymintDevice();
++    } else if (securityLevel == KeyMintSecurityLevel::KEYSTORE) {
++        return getTeeSoftKeymintDevice();
+     } else {
+         return getWrappedKeymasterDevice(securityLevel);
+     }
+diff --git a/keystore2/src/km_compat/tests.rs b/keystore2/src/km_compat/tests.rs
+index 9aa01e6..609b71b 100644
+--- a/keystore2/src/km_compat/tests.rs
++++ b/keystore2/src/km_compat/tests.rs
+@@ -439,12 +439,14 @@ fn test_get_key_characteristics() {
+ fn test_soft_curve25519() {
+     ensure_compat_service_started();
+ 
+-    // We should always be able to get the software implementation of KeyMint.
++    // We should always be able to get the platform software implementation of KeyMint.
+     let compat_service: Strong<dyn IKeystoreCompatService> =
+         binder::get_interface(COMPAT_NAME).expect("Failed to get compat service");
+     let soft_dev = compat_service
+         .getKeyMintDevice(SecurityLevel::SOFTWARE)
+         .expect("Failed to get SOFTWARE KeyMint device");
++    let hw_info = soft_dev.getHardwareInfo().expect("Failed to get SOFTWARE hardware info");
++    assert_eq!(hw_info.securityLevel, SecurityLevel::SOFTWARE);
+ 
+     let kps = vec![
+         KeyParameter { tag: Tag::ALGORITHM, value: KeyParameterValue::Algorithm(Algorithm::EC) },
+@@ -463,3 +465,16 @@ fn test_soft_curve25519() {
+     ];
+     assert!(soft_dev.generateKey(&kps, /* attest_key= */ None).is_ok());
+ }
++
++#[test]
++fn test_tee_soft_internal_device_reports_tee() {
++    ensure_compat_service_started();
++
++    let compat_service: Strong<dyn IKeystoreCompatService> =
++        binder::get_interface(COMPAT_NAME).expect("Failed to get compat service");
++    let tee_soft_dev = compat_service
++        .getKeyMintDevice(SecurityLevel::KEYSTORE)
++        .expect("Failed to get internal TEE Soft KeyMint device");
++    let hw_info = tee_soft_dev.getHardwareInfo().expect("Failed to get fake TEE hardware info");
++    assert_eq!(hw_info.securityLevel, SecurityLevel::TRUSTED_ENVIRONMENT);
++}
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index 499d69e..f2284f2 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -147,9 +147,10 @@ impl KeystoreSecurityLevel {
+     pub fn new_native_binder(
+         security_level: SecurityLevel,
+         id_rotation_state: IdRotationState,
+-    ) -> Result<(Strong<dyn IKeystoreSecurityLevel>, Uuid)> {
++    ) -> Result<(Strong<dyn IKeystoreSecurityLevel>, Uuid, SecurityLevel)> {
+         let (dev, hw_info, km_uuid) = get_keymint_device(&security_level)
+             .context(ks_err!("KeystoreSecurityLevel::new_native_binder."))?;
++        let reported_security_level = hw_info.securityLevel;
+         let result = BnKeystoreSecurityLevel::new_binder(
+             Self {
+                 security_level,
+@@ -162,7 +163,7 @@ impl KeystoreSecurityLevel {
+             },
+             BinderFeatures { set_requesting_sid: true, ..BinderFeatures::default() },
+         );
+-        Ok((result, km_uuid))
++        Ok((result, km_uuid, reported_security_level))
+     }
+ 
+     fn watch_millis(&self, id: &'static str, millis: u64) -> Option<wd::WatchPoint> {
+@@ -838,8 +839,13 @@ impl KeystoreSecurityLevel {
+                             Ok((dev, hw_info)) => {
+                                 effective_generation_security_level = hw_info.securityLevel;
+                                 effective_generation_km_uuid = km_uuid;
++                                // The SOFTWARE compat route may deliberately host a pure-soft
++                                // KeyMint instance that reports TRUSTED_ENVIRONMENT.  Determine
++                                // provenance from its stable routing UUID, not from the level it
++                                // reports to clients.  Dependent keys must retain the leaf that
++                                // this software ATTEST_KEY actually signed.
+                                 used_software_generation =
+-                                    hw_info.securityLevel == SecurityLevel::SOFTWARE;
++                                    km_uuid == SecurityLevel::SOFTWARE.into();
+                                 info!(
+                                     "tee soft debug: using user-generated attestation key via km_uuid={:?}, sec_level={:?}, version={}, alias={:?}, attest_alias={:?}",
+                                     km_uuid,
+@@ -1014,8 +1020,7 @@ impl KeystoreSecurityLevel {
+                 &params,
+                 TeeSoftDebugGenerationContext {
+                     has_external_attestation_key: has_external_attestation_key
+-                        && !has_rkpd_attestation_key
+-                        && !used_software_generation,
++                        && !has_rkpd_attestation_key,
+                     uses_tracked_attest_key,
+                     used_software_generation,
+                 },
+diff --git a/keystore2/src/service.rs b/keystore2/src/service.rs
+index edca6b0..da6b14b 100644
+--- a/keystore2/src/service.rs
++++ b/keystore2/src/service.rs
+@@ -63,6 +63,7 @@ use log::{error, info};
+ pub struct KeystoreService {
+     i_sec_level_by_uuid: HashMap<Uuid, Strong<dyn IKeystoreSecurityLevel>>,
+     uuid_by_sec_level: HashMap<SecurityLevel, Uuid>,
++    reported_sec_level_by_uuid: HashMap<Uuid, SecurityLevel>,
+ }
+ 
+ impl KeystoreService {
+@@ -71,7 +72,7 @@ impl KeystoreService {
+         id_rotation_state: IdRotationState,
+     ) -> Result<Strong<dyn IKeystoreService>> {
+         let mut result: Self = Default::default();
+-        let (dev, uuid) = match KeystoreSecurityLevel::new_native_binder(
++        let (dev, uuid, _reported_sec_level) = match KeystoreSecurityLevel::new_native_binder(
+             SecurityLevel::TRUSTED_ENVIRONMENT,
+             id_rotation_state.clone(),
+         ) {
+@@ -87,27 +88,24 @@ impl KeystoreService {
+         result.uuid_by_sec_level.insert(SecurityLevel::TRUSTED_ENVIRONMENT, uuid);
+ 
+         // Strongbox is optional, so we ignore errors and turn the result into an Option.
+-        if let Ok((dev, uuid)) =
+-            KeystoreSecurityLevel::new_native_binder(
+-                SecurityLevel::STRONGBOX,
+-                id_rotation_state.clone(),
+-            )
+-        {
++        if let Ok((dev, uuid, _reported_sec_level)) = KeystoreSecurityLevel::new_native_binder(
++            SecurityLevel::STRONGBOX,
++            id_rotation_state.clone(),
++        ) {
+             result.i_sec_level_by_uuid.insert(uuid, dev);
+             result.uuid_by_sec_level.insert(SecurityLevel::STRONGBOX, uuid);
+         }
+ 
+         // SOFTWARE is optional from the service-construction perspective, but required for
+-        // tee soft debug Generate mode. Register it when available so software-generated keys
+-        // can round-trip through getKeyEntry/export paths.
+-        if let Ok((dev, uuid)) =
+-            KeystoreSecurityLevel::new_native_binder(
+-                SecurityLevel::SOFTWARE,
+-                id_rotation_state.clone(),
+-            )
+-        {
++        // tee soft debug Generate mode. Register it by UUID so software-generated keys can
++        // round-trip through getKeyEntry/export paths, but do not expose it through
++        // getSecurityLevel(SOFTWARE), which is not a public Keystore security level.
++        if let Ok((dev, uuid, reported_sec_level)) = KeystoreSecurityLevel::new_native_binder(
++            SecurityLevel::SOFTWARE,
++            id_rotation_state.clone(),
++        ) {
+             result.i_sec_level_by_uuid.insert(uuid, dev);
+-            result.uuid_by_sec_level.insert(SecurityLevel::SOFTWARE, uuid);
++            result.reported_sec_level_by_uuid.insert(uuid, reported_sec_level);
+         }
+ 
+         let uuid_by_sec_level = result.uuid_by_sec_level.clone();
+@@ -123,12 +121,14 @@ impl KeystoreService {
+         ))
+     }
+ 
+-    fn uuid_to_sec_level(&self, uuid: &Uuid) -> SecurityLevel {
+-        self.uuid_by_sec_level
+-            .iter()
+-            .find(|(_, v)| **v == *uuid)
+-            .map(|(s, _)| *s)
+-            .unwrap_or(SecurityLevel::SOFTWARE)
++    fn uuid_to_reported_sec_level(&self, uuid: &Uuid) -> SecurityLevel {
++        self.reported_sec_level_by_uuid.get(uuid).copied().unwrap_or_else(|| {
++            self.uuid_by_sec_level
++                .iter()
++                .find(|(_, v)| **v == *uuid)
++                .map(|(s, _)| *s)
++                .unwrap_or(SecurityLevel::SOFTWARE)
++        })
+     }
+ 
+     fn get_i_sec_level_by_uuid(&self, uuid: &Uuid) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
+@@ -258,7 +258,7 @@ impl KeystoreService {
+             "keystore2 export: key={:?}, caller_uid={:?}, key_sec_level={:?}, i_sec_level_present={}, exported_chain_summary={:?}",
+             key,
+             caller_uid,
+-            self.uuid_to_sec_level(key_entry.km_uuid()),
++            self.uuid_to_reported_sec_level(key_entry.km_uuid()),
+             i_sec_level.is_some(),
+             exported_summary
+         );
+@@ -271,7 +271,7 @@ impl KeystoreService {
+                     nspace: key_id_guard.id(),
+                     ..Default::default()
+                 },
+-                keySecurityLevel: self.uuid_to_sec_level(key_entry.km_uuid()),
++                keySecurityLevel: self.uuid_to_reported_sec_level(key_entry.km_uuid()),
+                 certificate,
+                 certificateChain: certificate_chain,
+                 modificationTimeMs: key_entry
+diff --git a/keystore2/src/tee_soft_debug.rs b/keystore2/src/tee_soft_debug.rs
+index 5de0cbb..012cf3a 100644
+--- a/keystore2/src/tee_soft_debug.rs
++++ b/keystore2/src/tee_soft_debug.rs
+@@ -1452,6 +1452,25 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         return;
+     }
+ 
++    if has_external_attestation_key && uses_tracked_attest_key && used_software_generation {
++        // The SOFTWARE KeyMint generated this leaf with the private half of the selected
++        // ATTEST_KEY.  Keep that signature intact: callers construct the effective chain as
++        // `generated leaf + ATTEST_KEY certificate + ATTEST_KEY certificateChain`.  Re-signing
++        // this leaf with the keybox key would make its immediate parent the keybox certificate
++        // instead, breaking the app-attestation-key chain contract (and potentially crossing
++        // RSA/EC families).
++        if creation_result.certificateChain.is_empty() {
++            return;
++        }
++        creation_result.certificateChain.truncate(1);
++        info!(
++            "tee soft debug: tracked SOFTWARE attestation key preserved KeyMint-signed leaf-only response for uid={:?}, alias={:?}",
++            caller_uid,
++            attest_key_descriptor.and_then(|d| d.alias.as_deref())
++        );
++        return;
++    }
++
+     if has_external_attestation_key && uses_tracked_attest_key {
+         let alias = attest_key_descriptor.and_then(|d| normalize_alias(d.alias.as_deref()));
+         let Some(alias) = alias else {
+-- 
+2.43.0
+
