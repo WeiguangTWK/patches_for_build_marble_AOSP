@@ -1,0 +1,102 @@
+From 251a0dd4520307eb4e1e4e44b64cdf98e29c9d29 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 27 Jul 2026 09:08:43 +0800
+Subject: [PATCH] Neko LineageOS: libcore: support partial Zygote preload
+
+Add preload hooks that allow exec-spawned app processes to rebuild only
+the required runtime state while preserving existing Zygote behavior.
+
+Change-Id: If729ea619ca41a3db54e4fbd8d19f492167821de
+---
+ api/module-lib-current.txt                    |  2 ++
+ .../main/java/dalvik/system/ZygoteHooks.java  | 33 ++++++++++++++-----
+ 2 files changed, 26 insertions(+), 9 deletions(-)
+
+diff --git a/api/module-lib-current.txt b/api/module-lib-current.txt
+index 5fad4a3..58ffdae 100644
+--- a/api/module-lib-current.txt
++++ b/api/module-lib-current.txt
+@@ -392,7 +392,9 @@ package dalvik.system {
+   public final class ZygoteHooks {
+     method public static void gcAndFinalize();
+     method public static boolean isIndefiniteThreadSuspensionSafe();
++    method public static void onBeginPreload(boolean);
+     method public static void onBeginPreload();
++    method public static void onEndPreload(boolean);
+     method public static void onEndPreload();
+     method public static void postForkChild(int, boolean, boolean, String);
+     method public static void postForkCommon();
+diff --git a/dalvik/src/main/java/dalvik/system/ZygoteHooks.java b/dalvik/src/main/java/dalvik/system/ZygoteHooks.java
+index 69c2207..87e11f1 100644
+--- a/dalvik/src/main/java/dalvik/system/ZygoteHooks.java
++++ b/dalvik/src/main/java/dalvik/system/ZygoteHooks.java
+@@ -71,13 +71,14 @@ public final class ZygoteHooks {
+      * @hide
+      */
+     @SystemApi(client = MODULE_LIBRARIES)
+-    public static void onBeginPreload() {
+-        com.android.i18n.system.ZygoteHooks.onBeginPreload();
+-
+-        ICU.initializeCacheInZygote();
+-        DecimalFormatData.initializeCacheInZygote();
+-        SimpleDateFormatData.initializeCacheInZygote();
+-        Collator.getInstance();
++    public static void onBeginPreload(boolean fullPreload) {
++        if (fullPreload) {
++            com.android.i18n.system.ZygoteHooks.onBeginPreload();
++            ICU.initializeCacheInZygote();
++            DecimalFormatData.initializeCacheInZygote();
++            SimpleDateFormatData.initializeCacheInZygote();
++            Collator.getInstance();
++        }
+ 
+         // Look up JaCoCo on the boot classpath, if it exists. This will be used later for enabling
+         // memory-mapped Java coverage.
+@@ -93,13 +94,19 @@ public final class ZygoteHooks {
+         }
+     }
+ 
++    /** @hide */
++    @SystemApi(client = MODULE_LIBRARIES)
++    public static void onBeginPreload() {
++        onBeginPreload(true);
++    }
++
+     /**
+      * Called when the zygote has completed preloading classes and data.
+      *
+      * @hide
+      */
+     @SystemApi(client = MODULE_LIBRARIES)
+-    public static void onEndPreload() {
++    public static void onEndPreload(boolean fullPreload) {
+         // TODO(b/395108129): Switch to individual modules profile for preloading HttpEngine for
+         // devices from S -> V. This should be a cleaner way to do preloading without having the
+         // code live in libcore.
+@@ -130,7 +137,9 @@ public final class ZygoteHooks {
+                 // disjoint.
+             }
+         }
+-        com.android.i18n.system.ZygoteHooks.onEndPreload();
++        if (fullPreload) {
++            com.android.i18n.system.ZygoteHooks.onEndPreload();
++        }
+ 
+         // Clone standard descriptors as originals closed / rebound during zygote post fork.
+         FileDescriptor.in.cloneForFork();
+@@ -138,6 +147,12 @@ public final class ZygoteHooks {
+         FileDescriptor.err.cloneForFork();
+     }
+ 
++    /** @hide */
++    @SystemApi(client = MODULE_LIBRARIES)
++    public static void onEndPreload() {
++        onEndPreload(true);
++    }
++
+     /**
+      * Called after GC but before fork, it cleans stale cache entries in
+      * BaseLocale and Locale, so to avoid the cleaning to happen in every
+-- 
+2.43.0
+

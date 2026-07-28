@@ -1,0 +1,259 @@
+From dc44f15fd584c0566f3aef19699823fc9c6d2681 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 27 Jul 2026 09:11:51 +0800
+Subject: [PATCH] Neko LineageOS: Settings: add memory safety compatibility
+ mode switch
+
+Expose the per-app Scudo compatibility switch and warn before enabling it
+for apps that may handle payment or financial data.
+
+Change-Id: I8956a918509999db3c19aa00e2334cf8988ac848
+---
+ res/values-zh-rCN/strings.xml                 |   5 +
+ res/values-zh-rTW/strings.xml                 |   5 +
+ res/values/strings.xml                        |   7 +
+ .../spa/app/appinfo/AppInfoSettings.kt        |   1 +
+ ...morySafetyCompatibilitySwitchPreference.kt | 169 ++++++++++++++++++
+ 5 files changed, 187 insertions(+)
+ create mode 100644 src/com/android/settings/spa/app/appinfo/MemorySafetyCompatibilitySwitchPreference.kt
+
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index cc96aca..d622135 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -2010,6 +2010,11 @@
+     <string name="lineage_visibility_block_summary">"在运行时向此应用隐藏 LineageOS 应用"</string>
+     <string name="play_store_install_spoof_title">"伪装为Play商店安装"</string>
+     <string name="play_store_install_spoof_summary">"请确保软件包确实来自官方"</string>
++    <string name="memory_safety_compatibility_title">"内存安全宽容模式"</string>
++    <string name="memory_safety_compatibility_summary">"开启后改用兼容性更高的内存分配器，对存在内存缺陷或采用特殊代码保护的软件更友好。可能降低部分内存错误的检测能力。"</string>
++    <string name="memory_safety_compatibility_warning_title">"确认开启宽容模式？"</string>
++    <string name="memory_safety_compatibility_warning_message">"%1$s 可能涉及支付或金融服务。此模式可能降低部分内存错误的检测能力；若应用来源不可信，可能带来严重安全风险。仅在确认来源可靠且应用无法正常运行时开启。"</string>
++    <string name="memory_safety_compatibility_enable_anyway">"仍然开启"</string>
+     <string name="cache_header_label" msgid="2441967971921741047">"缓存"</string>
+     <string name="clear_cache_btn_text" msgid="8597272828928143723">"清除缓存"</string>
+     <string name="cache_size_label" msgid="313456088966822757">"缓存"</string>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index 2c41310..b6d84c3 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -2008,6 +2008,11 @@
+     <string name="permissions_label" msgid="1708927634370314404">"權限"</string>
+     <string name="play_store_install_spoof_title">"偽裝為 Play 商店安裝"</string>
+     <string name="play_store_install_spoof_summary">"請確認套件確實來自官方來源"</string>
++    <string name="memory_safety_compatibility_title">"記憶體安全寬容模式"</string>
++    <string name="memory_safety_compatibility_summary">"開啟後改用相容性更高的記憶體配置器，對存在記憶體缺陷或採用特殊程式碼保護的軟體更友善。可能降低部分記憶體錯誤的偵測能力。"</string>
++    <string name="memory_safety_compatibility_warning_title">"確認開啟寬容模式？"</string>
++    <string name="memory_safety_compatibility_warning_message">"%1$s 可能涉及付款或金融服務。此模式可能降低部分記憶體錯誤的偵測能力；若應用程式來源不可信，可能帶來嚴重安全風險。僅在確認來源可靠且應用程式無法正常執行時開啟。"</string>
++    <string name="memory_safety_compatibility_enable_anyway">"仍要開啟"</string>
+     <string name="cache_header_label" msgid="2441967971921741047">"快取"</string>
+     <string name="clear_cache_btn_text" msgid="8597272828928143723">"清除快取"</string>
+     <string name="cache_size_label" msgid="313456088966822757">"快取"</string>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index e5bdd78..025ea4b 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -4679,6 +4679,13 @@
+     <!-- Manage applications, individual application info screen, switch summary warning for install
+          source spoofing. -->
+     <string name="play_store_install_spoof_summary">Please ensure the package is actually from an official source</string>
++    <!-- Manage applications, individual application info screen, switch that selects the more
++         compatible allocator for an app. -->
++    <string name="memory_safety_compatibility_title">Memory safety compatibility mode</string>
++    <string name="memory_safety_compatibility_summary">Uses a more compatible memory allocator for apps with memory defects or specialized code protection. This may reduce detection of some memory errors.</string>
++    <string name="memory_safety_compatibility_warning_title">Turn on compatibility mode?</string>
++    <string name="memory_safety_compatibility_warning_message">%1$s may handle payments or financial data. This mode may reduce detection of some memory errors and could pose a serious security risk if the app is untrusted. Only turn it on when the app is from a trusted source and cannot run normally.</string>
++    <string name="memory_safety_compatibility_enable_anyway">Turn on anyway</string>
+     <!-- Manage applications, Header name used for cache information -->
+     <string name="cache_header_label">Cache</string>
+     <!-- Manage applications, text label for button -->
+diff --git a/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt b/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
+index 768cf4f..0e72eb1 100644
+--- a/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
++++ b/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
+@@ -149,6 +149,7 @@ private fun AppInfoSettings(packageInfoPresenter: PackageInfoPresenter) {
+             AppPermissionPreference(app)
+             LineageAppVisibilityBlockSwitchPreference(app)
+             PlayStoreInstallSpoofSwitchPreference(app)
++            MemorySafetyCompatibilitySwitchPreference(app)
+             ManageTargetAppFunctionAccessPreference(app)
+             ManageAgentAppFunctionAccessPreference(app)
+             AppStoragePreference(app)
+diff --git a/src/com/android/settings/spa/app/appinfo/MemorySafetyCompatibilitySwitchPreference.kt b/src/com/android/settings/spa/app/appinfo/MemorySafetyCompatibilitySwitchPreference.kt
+new file mode 100644
+index 0000000..49c0a80
+--- /dev/null
++++ b/src/com/android/settings/spa/app/appinfo/MemorySafetyCompatibilitySwitchPreference.kt
+@@ -0,0 +1,169 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.spa.app.appinfo
++
++import android.app.ActivityManager
++import android.app.compat.CompatChanges
++import android.content.Context
++import android.content.pm.ApplicationInfo
++import android.os.Build
++import android.os.Process
++import android.os.RemoteException
++import android.os.UserHandle
++import android.util.Log
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.saveable.rememberSaveable
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import androidx.lifecycle.compose.collectAsStateWithLifecycle
++import com.android.settings.R
++import com.android.settingslib.spa.widget.preference.SwitchPreference
++import com.android.settingslib.spa.widget.preference.SwitchPreferenceModel
++import com.android.settingslib.spaprivileged.model.app.userId
++import java.util.Locale
++import kotlinx.coroutines.flow.MutableStateFlow
++
++private const val TAG = "MemorySafetyCompat"
++private const val USE_SCUDO_ALLOCATOR = 391684437L
++
++private val FINANCIAL_APP_KEYWORDS =
++    listOf(
++        "bank",
++        "banking",
++        "pay",
++        "payment",
++        "wallet",
++        "finance",
++        "financial",
++        "credit",
++        "银行",
++        "支付",
++        "钱包",
++        "金融",
++        "银联",
++    )
++
++@Composable
++fun MemorySafetyCompatibilitySwitchPreference(app: ApplicationInfo) {
++  val context = LocalContext.current
++  val presenter = remember(app) { MemorySafetyCompatibilityPresenter(context, app) }
++  if (!presenter.isAvailable()) return
++
++  val isCheckedState = presenter.isCheckedFlow.collectAsStateWithLifecycle()
++  var showFinancialWarning by rememberSaveable { mutableStateOf(false) }
++
++  SwitchPreference(
++      object : SwitchPreferenceModel {
++        override val title = context.getString(R.string.memory_safety_compatibility_title)
++        override val summary = { context.getString(R.string.memory_safety_compatibility_summary) }
++        override val checked = { isCheckedState.value }
++        override val onCheckedChange: (Boolean) -> Unit = { newChecked ->
++          if (newChecked && presenter.isPotentiallyFinancialApp()) {
++            showFinancialWarning = true
++          } else {
++            presenter.setEnabled(newChecked)
++          }
++        }
++      }
++  )
++
++  if (showFinancialWarning) {
++    AlertDialog(
++        onDismissRequest = { showFinancialWarning = false },
++        title = { Text(stringResource(R.string.memory_safety_compatibility_warning_title)) },
++        text = {
++          Text(
++              stringResource(
++                  R.string.memory_safety_compatibility_warning_message,
++                  presenter.appLabel,
++              )
++          )
++        },
++        confirmButton = {
++          TextButton(
++              onClick = {
++                showFinancialWarning = false
++                presenter.setEnabled(true)
++              }
++          ) {
++            Text(stringResource(R.string.memory_safety_compatibility_enable_anyway))
++          }
++        },
++        dismissButton = {
++          TextButton(onClick = { showFinancialWarning = false }) {
++            Text(stringResource(R.string.cancel))
++          }
++        },
++    )
++  }
++}
++
++private class MemorySafetyCompatibilityPresenter(
++    private val context: Context,
++    private val app: ApplicationInfo,
++) {
++  val appLabel: String =
++      runCatching { app.loadLabel(context.packageManager).toString() }.getOrDefault(app.packageName)
++
++  private val isChecked = MutableStateFlow(readEnabled())
++  val isCheckedFlow = isChecked
++
++  fun isAvailable(): Boolean {
++    if (app.uid < Process.FIRST_APPLICATION_UID) return false
++    if ((app.flags and ApplicationInfo.FLAG_SYSTEM) != 0) return false
++    if ((app.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0) return false
++    if ((app.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) return false
++    val primaryCpuAbi = app.primaryCpuAbi ?: return false
++    return Build.is64BitAbi(primaryCpuAbi)
++  }
++
++  fun isPotentiallyFinancialApp(): Boolean {
++    val searchable = "${app.packageName} $appLabel".lowercase(Locale.ROOT)
++    return FINANCIAL_APP_KEYWORDS.any(searchable::contains)
++  }
++
++  fun setEnabled(enabled: Boolean) {
++    try {
++      ActivityManager.getService().setAllocatorCompatibilityMode(app.packageName, enabled)
++      isChecked.value = enabled
++    } catch (e: RemoteException) {
++      Log.e(TAG, "Failed to contact ActivityManager for ${app.packageName}", e)
++    } catch (e: RuntimeException) {
++      Log.e(TAG, "Failed to set allocator compatibility mode for ${app.packageName}", e)
++    }
++  }
++
++  private fun readEnabled(): Boolean =
++      runCatching {
++            CompatChanges.isChangeEnabled(
++                USE_SCUDO_ALLOCATOR,
++                app.packageName,
++                UserHandle.of(app.userId),
++            )
++          }
++          .onFailure {
++            Log.e(TAG, "Failed to read allocator compatibility mode for ${app.packageName}", it)
++          }
++          .getOrDefault(false)
++}
+-- 
+2.43.0
+

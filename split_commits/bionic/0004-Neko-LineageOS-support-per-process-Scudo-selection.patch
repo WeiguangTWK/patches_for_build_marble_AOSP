@@ -1,0 +1,115 @@
+From 7f406e092dcd2b1398384ea0120d6aa343cc151b Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 27 Jul 2026 09:02:08 +0800
+Subject: [PATCH] Neko LineageOS: support per-process Scudo selection
+
+Build Scudo alongside mimalloc and select its dispatch table when
+LIBC_USE_SCUDO=1 is present during libc initialization.
+
+Change-Id: I246880792f8c6d88523b57228298603c6fbb293c
+---
+ libc/bionic/malloc_common.cpp         | 50 +++++++++++++++++++++++++++
+ libc/bionic/malloc_common.h           |  6 ++++
+ libc/bionic/malloc_common_dynamic.cpp |  4 +++
+ 3 files changed, 60 insertions(+)
+
+diff --git a/libc/bionic/malloc_common.cpp b/libc/bionic/malloc_common.cpp
+index 1e0ef14..e7fcb4d 100644
+--- a/libc/bionic/malloc_common.cpp
++++ b/libc/bionic/malloc_common.cpp
+@@ -356,10 +356,60 @@ static constexpr MallocDispatch __libc_malloc_default_dispatch __attribute__((un
+   Malloc(malloc_info),
+ };
+ 
++#if defined(BOTH_MIMALLOC_AND_SCUDO)
++
++#define ScudoMalloc(function) scudo_ ## function
++
++static constexpr MallocDispatch __scudo_malloc_dispatch = {
++  ScudoMalloc(calloc),
++  ScudoMalloc(free),
++  ScudoMalloc(mallinfo),
++  ScudoMalloc(malloc),
++  ScudoMalloc(malloc_usable_size),
++  ScudoMalloc(memalign),
++  ScudoMalloc(posix_memalign),
++#if defined(HAVE_DEPRECATED_MALLOC_FUNCS)
++  ScudoMalloc(pvalloc),
++#endif
++  ScudoMalloc(realloc),
++#if defined(HAVE_DEPRECATED_MALLOC_FUNCS)
++  ScudoMalloc(valloc),
++#endif
++  ScudoMalloc(malloc_iterate),
++  ScudoMalloc(malloc_disable),
++  ScudoMalloc(malloc_enable),
++  ScudoMalloc(mallopt),
++  ScudoMalloc(aligned_alloc),
++  ScudoMalloc(malloc_info),
++};
++
++static const MallocDispatch* native_allocator_dispatch = &__libc_malloc_default_dispatch;
++
++void InitNativeAllocatorDispatch(libc_globals* globals) {
++  const char* value = getenv("LIBC_USE_SCUDO");
++  const bool use_scudo = value != nullptr && value[0] == '1' && value[1] == '\0';
++  if (!use_scudo) {
++    return;
++  }
++
++  globals->malloc_dispatch_table = __scudo_malloc_dispatch;
++  globals->current_dispatch_table = &globals->malloc_dispatch_table;
++  globals->default_dispatch_table = &globals->malloc_dispatch_table;
++  native_allocator_dispatch = &__scudo_malloc_dispatch;
++}
++
++const MallocDispatch* NativeAllocatorDispatch() {
++  return native_allocator_dispatch;
++}
++
++#else
++
+ const MallocDispatch* NativeAllocatorDispatch() {
+   return &__libc_malloc_default_dispatch;
+ }
+ 
++#endif
++
+ #if !defined(LIBC_STATIC)
+ void MallocInitImpl(libc_globals* globals);
+ #endif
+diff --git a/libc/bionic/malloc_common.h b/libc/bionic/malloc_common.h
+index 4294b82..4405f9a 100644
+--- a/libc/bionic/malloc_common.h
++++ b/libc/bionic/malloc_common.h
+@@ -60,6 +60,12 @@ __END_DECLS
+ #include <mimalloc_adapt.h>
+ #define Malloc(function)  mimalloc_ ## function
+ 
++#if defined(USE_SCUDO)
++#include "scudo.h"
++#define BOTH_MIMALLOC_AND_SCUDO
++void InitNativeAllocatorDispatch(libc_globals* globals);
++#endif
++
+ #elif defined(USE_SCUDO)
+ 
+ #include "scudo.h"
+diff --git a/libc/bionic/malloc_common_dynamic.cpp b/libc/bionic/malloc_common_dynamic.cpp
+index e2c6eb1..148d61a 100644
+--- a/libc/bionic/malloc_common_dynamic.cpp
++++ b/libc/bionic/malloc_common_dynamic.cpp
+@@ -376,6 +376,10 @@ extern "C" size_t __scudo_get_stack_depot_size();
+ 
+ // Initializes memory allocation framework once per process.
+ void MallocInitImpl(libc_globals* globals) {
++#if defined(BOTH_MIMALLOC_AND_SCUDO)
++  InitNativeAllocatorDispatch(globals);
++#endif
++
+   char prop[PROP_VALUE_MAX];
+   char* options = prop;
+ 
+-- 
+2.43.0
+

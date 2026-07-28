@@ -1,0 +1,1158 @@
+From 0fef5141952e5f6227a0e5ab613ca909616b20ee Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 27 Jul 2026 09:07:09 +0800
+Subject: [PATCH] Neko LineageOS: Zygote: add per-app Scudo compatibility mode
+
+Re-exec selected 64-bit app processes so libc can select Scudo at startup.
+Restore required runtime state and system resources across exec.
+
+Change-Id: I77c2b3ac742a461f8d96fc77a757a8dfc3ec21cc
+---
+ cmds/app_process/app_main.cpp                 |  13 +-
+ core/java/android/app/IActivityManager.aidl   |  12 +
+ core/java/android/content/res/ApkAssets.java  |   4 +
+ .../android/content/res/AssetManager.java     |  52 +++-
+ .../com/android/internal/os/ExecInit.java     | 124 ++++++++
+ .../com/android/internal/os/WrapperInit.java  |   2 +-
+ core/java/com/android/internal/os/Zygote.java |  10 +
+ .../android/internal/os/ZygoteConnection.java |  15 +-
+ .../com/android/internal/os/ZygoteInit.java   |  79 +++--
+ core/jni/com_android_internal_os_Zygote.cpp   | 293 ++++++++++++++++++
+ ...ndroid_internal_os_ZygoteCommandBuffer.cpp |  13 +
+ libs/androidfw/AssetManager2.cpp              |  25 +-
+ libs/androidfw/include/androidfw/ApkAssets.h  |   4 +
+ .../include/androidfw/AssetManager2.h         |   4 +
+ libs/androidfw/include/androidfw/LoadedArsc.h |   4 +
+ .../server/am/ActivityManagerService.java     |  28 ++
+ .../com/android/server/am/ProcessList.java    |  18 ++
+ 17 files changed, 652 insertions(+), 48 deletions(-)
+ create mode 100644 core/java/com/android/internal/os/ExecInit.java
+
+diff --git a/cmds/app_process/app_main.cpp b/cmds/app_process/app_main.cpp
+index 4e41f2c1a..3ef2b8db4 100644
+--- a/cmds/app_process/app_main.cpp
++++ b/cmds/app_process/app_main.cpp
+@@ -85,8 +85,10 @@ public:
+         AndroidRuntime* ar = AndroidRuntime::getRuntime();
+         ar->callMain(mClassName, mClass, mArgs);
+ 
+-        IPCThreadState::self()->stopProcess();
+-        hardware::IPCThreadState::self()->stopProcess();
++        if (mClassName != "com.android.internal.os.ExecInit") {
++            IPCThreadState::self()->stopProcess();
++            hardware::IPCThreadState::self()->stopProcess();
++        }
+     }
+ 
+     virtual void onZygoteInit()
+@@ -335,7 +337,12 @@ int main(int argc, char* const argv[])
+     if (zygote) {
+         runtime.start("com.android.internal.os.ZygoteInit", args, zygote);
+     } else if (!className.empty()) {
+-        runtime.start("com.android.internal.os.RuntimeInit", args, zygote);
++        const char* isExecSpawned = getenv("IS_EXEC_SPAWNED_APP_PROCESS");
++        if (isExecSpawned != nullptr && strcmp(isExecSpawned, "1") == 0) {
++            runtime.start("com.android.internal.os.ZygoteInit", args, false);
++        } else {
++            runtime.start("com.android.internal.os.RuntimeInit", args, zygote);
++        }
+     } else {
+         fprintf(stderr, "Error: no class name or --zygote supplied.\n");
+         app_usage();
+diff --git a/core/java/android/app/IActivityManager.aidl b/core/java/android/app/IActivityManager.aidl
+index 7a6ace796..0cc9a907f 100644
+--- a/core/java/android/app/IActivityManager.aidl
++++ b/core/java/android/app/IActivityManager.aidl
+@@ -1051,6 +1051,18 @@ interface IActivityManager {
+     @EnforcePermission("INTERACT_ACROSS_USERS_FULL")
+     IBinder refreshIntentCreatorToken(in Intent intent);
+ 
++    /** Returns the immutable framework idmaps cached by system_server. @hide */
++    String[] getSystemIdmapPaths();
++
++    /**
++     * Enables or disables the Scudo allocator compatibility mode for a package.
++     *
++     * <p>This is deliberately narrower than the general platform compatibility override API.
++     * @hide
++     */
++    @EnforcePermission("OVERRIDE_COMPAT_CHANGE_CONFIG")
++    void setAllocatorCompatibilityMode(in String packageName, boolean enabled);
++
+     /**
+      * Reports ART optimization info.
+      */
+diff --git a/core/java/android/content/res/ApkAssets.java b/core/java/android/content/res/ApkAssets.java
+index 4f84dad65..d08b876ec 100644
+--- a/core/java/android/content/res/ApkAssets.java
++++ b/core/java/android/content/res/ApkAssets.java
+@@ -88,12 +88,16 @@ public final class ApkAssets {
+      */
+     public static final int PROPERTY_ONLY_OVERLAYABLES = 1 << 5;
+ 
++    /** Internal identity for the Lineage system resource package. @hide */
++    public static final int PROPERTY_LINEAGE_SYSTEM = 1 << 7;
++
+     /** Flags that change the behavior of loaded apk assets. */
+     @IntDef(prefix = { "PROPERTY_" }, value = {
+             PROPERTY_SYSTEM,
+             PROPERTY_DYNAMIC,
+             PROPERTY_LOADER,
+             PROPERTY_OVERLAY,
++            PROPERTY_LINEAGE_SYSTEM,
+     })
+     @Retention(RetentionPolicy.SOURCE)
+     public @interface PropertyFlags {}
+diff --git a/core/java/android/content/res/AssetManager.java b/core/java/android/content/res/AssetManager.java
+index 2d081f0fe..5ad67845a 100644
+--- a/core/java/android/content/res/AssetManager.java
++++ b/core/java/android/content/res/AssetManager.java
+@@ -28,6 +28,7 @@ import android.annotation.Nullable;
+ import android.annotation.StringRes;
+ import android.annotation.StyleRes;
+ import android.annotation.TestApi;
++import android.app.ActivityManager;
+ import android.app.ResourcesManager;
+ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.pm.ActivityInfo;
+@@ -39,6 +40,8 @@ import android.os.ParcelFileDescriptor;
+ import android.ravenwood.annotation.RavenwoodKeepWholeClass;
+ import android.ravenwood.annotation.RavenwoodReplace;
+ import android.ravenwood.annotation.RavenwoodThrow;
++import android.system.ErrnoException;
++import android.system.Os;
+ import android.util.ArrayMap;
+ import android.util.ArraySet;
+ import android.util.Log;
+@@ -48,6 +51,7 @@ import android.util.TypedValue;
+ import com.android.internal.annotations.GuardedBy;
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.content.om.OverlayConfig;
++import com.android.internal.os.ExecInit;
+ import com.android.internal.ravenwood.RavenwoodHelperBridge;
+ 
+ import java.io.FileDescriptor;
+@@ -268,6 +272,9 @@ public final class AssetManager implements AutoCloseable {
+         }
+     }
+ 
++    /** Cached by system_server for app processes that discard Zygote state through exec. @hide */
++    public static volatile String[] systemIdmapPaths_;
++
+     /**
+      * This must be called from Zygote so that system assets are shared by all applications.
+      * @hide
+@@ -285,13 +292,50 @@ public final class AssetManager implements AutoCloseable {
+             apkAssets.add(ApkAssets.loadFromPath(frameworkPath, ApkAssets.PROPERTY_SYSTEM));
+ 
+             // TODO(Ravenwood): overlay support?
+-            final String[] systemIdmapPaths =
+-                    RavenwoodHelperBridge.getInstance().isRunningOnRavenwood() ? new String[0] :
+-                    OverlayConfig.getZygoteInstance().createImmutableFrameworkIdmapsInZygote();
++            final String[] systemIdmapPaths;
++            if (RavenwoodHelperBridge.getInstance().isRunningOnRavenwood()) {
++                systemIdmapPaths = new String[0];
++            } else if (ExecInit.isExecSpawned) {
++                String[] cachedPaths;
++                try {
++                    cachedPaths = ActivityManager.getService().getSystemIdmapPaths();
++                    Objects.requireNonNull(cachedPaths);
++                } catch (Throwable t) {
++                    Log.e(TAG, "Unable to retrieve system idmap paths", t);
++                    cachedPaths = new String[0];
++                }
++                systemIdmapPaths = cachedPaths;
++            } else {
++                systemIdmapPaths = OverlayConfig.getZygoteInstance()
++                        .createImmutableFrameworkIdmapsInZygote();
++                systemIdmapPaths_ = systemIdmapPaths;
++            }
+             for (String idmapPath : systemIdmapPaths) {
+                 apkAssets.add(ApkAssets.loadOverlayFromPath(idmapPath, ApkAssets.PROPERTY_SYSTEM));
+             }
+-            apkAssets.add(ApkAssets.loadFromPath(getLineageApkPath(), ApkAssets.PROPERTY_SYSTEM));
++            final int lineageFlags =
++                    ApkAssets.PROPERTY_SYSTEM | ApkAssets.PROPERTY_LINEAGE_SYSTEM;
++            if (ExecInit.isExecSpawned) {
++                final String fdString = Os.getenv(ExecInit.SYSTEM_RESOURCES_FD);
++                final String sizeString = Os.getenv(ExecInit.SYSTEM_RESOURCES_SIZE);
++                if (fdString == null || sizeString == null) {
++                    throw new IOException("Missing exec system resource descriptor");
++                }
++                final int fd = Integer.parseInt(fdString);
++                final long size = Long.parseLong(sizeString);
++                try {
++                    Os.unsetenv(ExecInit.SYSTEM_RESOURCES_FD);
++                    Os.unsetenv(ExecInit.SYSTEM_RESOURCES_SIZE);
++                } catch (ErrnoException e) {
++                    throw new IOException("Failed to clear system resource environment", e);
++                }
++                try (ParcelFileDescriptor resourceFd = ParcelFileDescriptor.adoptFd(fd)) {
++                    apkAssets.add(ApkAssets.loadFromFd(resourceFd.getFileDescriptor(),
++                            "system-resources", 0, size, lineageFlags, null));
++                }
++            } else {
++                apkAssets.add(ApkAssets.loadFromPath(getLineageApkPath(), lineageFlags));
++            }
+             sSystemApkAssetsSet = new ArraySet<>(apkAssets);
+             sSystemApkAssets = apkAssets.toArray(new ApkAssets[0]);
+             if (sSystem == null) {
+diff --git a/core/java/com/android/internal/os/ExecInit.java b/core/java/com/android/internal/os/ExecInit.java
+new file mode 100644
+index 000000000..ff675d43f
+--- /dev/null
++++ b/core/java/com/android/internal/os/ExecInit.java
+@@ -0,0 +1,124 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.internal.os;
++
++import android.os.Process;
++import android.os.Trace;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.util.Slog;
++import android.util.TimingsTraceLog;
++
++import dalvik.system.VMRuntime;
++
++/**
++ * Re-executes a specialized Zygote child so libc can select its native allocator at startup.
++ *
++ * @hide
++ */
++public final class ExecInit {
++    private ExecInit() {}
++
++    public static final String IS_EXEC_SPAWNED_APP_PROCESS =
++            "IS_EXEC_SPAWNED_APP_PROCESS";
++    public static final String SYSTEM_RESOURCES_FD =
++            "EXEC_SYSTEM_RESOURCES_FD";
++    public static final String SYSTEM_RESOURCES_SIZE =
++            "EXEC_SYSTEM_RESOURCES_SIZE";
++
++    public static void main(String[] args) {
++        final int targetSdkVersion = Integer.parseInt(args[0], 10);
++        final int runtimeFlags = Integer.parseInt(args[1], 10);
++        isExecSpawned = true;
++
++        // The exec discarded Zygote preloaded Java state. Recreate the subset expected by apps.
++        ZygoteInit.preload(new TimingsTraceLog("ExecInitTiming", Trace.TRACE_TAG_DALVIK), false);
++
++        final String[] runtimeArgs = new String[args.length - 2];
++        System.arraycopy(args, 2, runtimeArgs, 0, runtimeArgs.length);
++        final Runnable r = execInit(targetSdkVersion, runtimeArgs);
++
++        Zygote.nativeHandleRuntimeFlags(runtimeFlags);
++        pendingExecInit = r;
++    }
++
++    private static Runnable pendingExecInit;
++
++    static Runnable getPendingExecInit() {
++        final Runnable result = pendingExecInit;
++        if (result == null) {
++            throw new IllegalStateException("pendingExecInit is null");
++        }
++        pendingExecInit = null;
++        return result;
++    }
++
++    /** This method does not return after a successful exec. */
++    public static void execApplication(String niceName, int targetSdkVersion,
++            String instructionSet, int runtimeFlags, String[] args) {
++        final int niceArgs = niceName == null ? 0 : 1;
++        final int baseArgs = 6 + niceArgs;
++        final String[] argv = new String[baseArgs + args.length];
++        argv[0] = VMRuntime.is64BitInstructionSet(instructionSet)
++                ? "/system/bin/app_process64" : "/system/bin/app_process32";
++        argv[1] = "/system/bin";
++        argv[2] = "--application";
++        if (niceName != null) {
++            argv[3] = "--nice-name=" + niceName;
++        }
++        argv[3 + niceArgs] = "com.android.internal.os.ExecInit";
++        argv[4 + niceArgs] = Integer.toString(targetSdkVersion);
++        argv[5 + niceArgs] = Integer.toString(runtimeFlags);
++        System.arraycopy(args, 0, argv, baseArgs, args.length);
++
++        WrapperInit.preserveCapabilities();
++        try {
++            if ((runtimeFlags & Zygote.USE_SCUDO_ALLOCATOR) != 0) {
++                // Read by bionic before the new process performs allocator initialization.
++                Os.setenv("LIBC_USE_SCUDO", "1", true);
++            }
++            Os.setenv(IS_EXEC_SPAWNED_APP_PROCESS, "1", true);
++            Os.execv(argv[0], argv);
++        } catch (ErrnoException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
++    public static boolean isExecSpawned;
++
++    private static Runnable execInit(int targetSdkVersion, String[] argv) {
++        if (RuntimeInit.DEBUG) {
++            Slog.d(RuntimeInit.TAG, "RuntimeInit: Starting application from exec");
++        }
++
++        ClassLoader classLoader = null;
++        if (argv != null && argv.length > 2 && argv[0].equals("-cp")) {
++            classLoader = ZygoteInit.createPathClassLoader(argv[1], targetSdkVersion);
++            Thread.currentThread().setContextClassLoader(classLoader);
++
++            final String[] removedArgs = new String[argv.length - 2];
++            System.arraycopy(argv, 2, removedArgs, 0, argv.length - 2);
++            argv = removedArgs;
++        }
++
++        Zygote.nativePreApplicationInit();
++        if (Process.isIsolated()) {
++            System.gc();
++        }
++        return RuntimeInit.applicationInit(targetSdkVersion, null, argv, classLoader);
++    }
++}
+diff --git a/core/java/com/android/internal/os/WrapperInit.java b/core/java/com/android/internal/os/WrapperInit.java
+index 6860759ee..928796396 100644
+--- a/core/java/com/android/internal/os/WrapperInit.java
++++ b/core/java/com/android/internal/os/WrapperInit.java
+@@ -186,7 +186,7 @@ public class WrapperInit {
+      *       This is acceptable here as failure will leave the wrapped app with strictly less
+      *       capabilities, which may make it crash, but not exceed its allowances.
+      */
+-    private static void preserveCapabilities() {
++    static void preserveCapabilities() {
+         StructCapUserHeader header = new StructCapUserHeader(
+                 OsConstants._LINUX_CAPABILITY_VERSION_3, 0);
+         StructCapUserData[] data;
+diff --git a/core/java/com/android/internal/os/Zygote.java b/core/java/com/android/internal/os/Zygote.java
+index 168e4e5b3..51847c647 100644
+--- a/core/java/com/android/internal/os/Zygote.java
++++ b/core/java/com/android/internal/os/Zygote.java
+@@ -204,6 +204,12 @@ public final class Zygote {
+     /** Load 4KB ELF files on 16KB device using appcompat mode */
+     public static final int ENABLE_PAGE_SIZE_APP_COMPAT = 1 << 26;
+ 
++    /** Start this process with Scudo instead of the default native allocator. */
++    public static final int USE_SCUDO_ALLOCATOR = 1 << 29;
++
++    // Keep this in sync with isSimpleForkCommand() in ZygoteCommandBuffer.cpp.
++    public static final int RUNTIME_FLAGS_DEPENDENT_ON_EXEC_SPAWNING = USE_SCUDO_ALLOCATOR;
++
+     /** No external storage should be mounted. */
+     public static final int MOUNT_EXTERNAL_NONE = IVold.REMOUNT_MODE_NONE;
+     /** Default external storage should be mounted. */
+@@ -477,6 +483,9 @@ public final class Zygote {
+      */
+     static native void nativePreApplicationInit();
+ 
++    /** Reapplies allocator-related runtime flags after an exec-spawn. @hide */
++    public static native void nativeHandleRuntimeFlags(int runtimeFlags);
++
+     /**
+      * Special method to start the system server process. In addition to the
+      * common actions performed in forkAndSpecialize, the pid of the child
+@@ -1172,6 +1181,7 @@ public final class Zygote {
+     @SuppressWarnings("unused")
+     private static void callPostForkChildHooks(int runtimeFlags, boolean isSystemServer,
+             boolean isZygote, String instructionSet) {
++        runtimeFlags &= ~USE_SCUDO_ALLOCATOR;
+         ZygoteHooks.postForkChild(runtimeFlags, isSystemServer, isZygote, instructionSet);
+     }
+ 
+diff --git a/core/java/com/android/internal/os/ZygoteConnection.java b/core/java/com/android/internal/os/ZygoteConnection.java
+index 897339db4..0a3364521 100644
+--- a/core/java/com/android/internal/os/ZygoteConnection.java
++++ b/core/java/com/android/internal/os/ZygoteConnection.java
+@@ -243,7 +243,9 @@ class ZygoteConnection {
+                 }
+ 
+                 if (parsedArgs.mInvokeWith != null || parsedArgs.mStartChildZygote
+-                        || !multipleOK || peer.getUid() != Process.SYSTEM_UID) {
++                        || !multipleOK || peer.getUid() != Process.SYSTEM_UID
++                        || (parsedArgs.mRuntimeFlags
++                                & Zygote.RUNTIME_FLAGS_DEPENDENT_ON_EXEC_SPAWNING) != 0) {
+                     Log.w(TAG, "Resorting to Java fork code; multipleOK = " + multipleOK
+                             + (parsedArgs.mInvokeWith != null ? "; invokeWith used" : ""));
+                     // Continue using old code for now. TODO: Handle these cases in the other path.
+@@ -528,6 +530,17 @@ class ZygoteConnection {
+             throw new IllegalStateException("WrapperInit.execApplication unexpectedly returned");
+         } else {
+             if (!isZygote) {
++                final int runtimeFlags = parsedArgs.mRuntimeFlags;
++                final boolean useExecInit =
++                        (runtimeFlags & Zygote.RUNTIME_FLAGS_DEPENDENT_ON_EXEC_SPAWNING) != 0
++                        && (runtimeFlags & ApplicationInfo.FLAG_DEBUGGABLE) == 0;
++                if (useExecInit) {
++                    ExecInit.execApplication(parsedArgs.mNiceName, parsedArgs.mTargetSdkVersion,
++                            VMRuntime.getCurrentInstructionSet(), runtimeFlags,
++                            parsedArgs.mRemainingArgs);
++                    throw new IllegalStateException(
++                            "ExecInit.execApplication unexpectedly returned");
++                }
+                 return ZygoteInit.zygoteInit(parsedArgs.mTargetSdkVersion,
+                         parsedArgs.mDisabledCompatChanges,
+                         parsedArgs.mRemainingArgs, null /* classLoader */);
+diff --git a/core/java/com/android/internal/os/ZygoteInit.java b/core/java/com/android/internal/os/ZygoteInit.java
+index e90b277f5..5d780bb78 100644
+--- a/core/java/com/android/internal/os/ZygoteInit.java
++++ b/core/java/com/android/internal/os/ZygoteInit.java
+@@ -124,23 +124,25 @@ public class ZygoteInit {
+      */
+     private static ClassLoader sCachedSystemServerClassLoader = null;
+ 
+-    static void preload(TimingsTraceLog bootTimingsTraceLog) {
++    static void preload(TimingsTraceLog bootTimingsTraceLog, boolean fullPreload) {
+         Log.d(TAG, "begin preload");
+         bootTimingsTraceLog.traceBegin("BeginPreload");
+-        beginPreload();
++        beginPreload(fullPreload);
+         bootTimingsTraceLog.traceEnd(); // BeginPreload
+-        bootTimingsTraceLog.traceBegin("PreloadClasses");
+-        preloadClasses();
+-        bootTimingsTraceLog.traceEnd(); // PreloadClasses
+-        bootTimingsTraceLog.traceBegin("CacheNonBootClasspathClassLoaders");
+-        cacheNonBootClasspathClassLoaders();
+-        bootTimingsTraceLog.traceEnd(); // CacheNonBootClasspathClassLoaders
+-        bootTimingsTraceLog.traceBegin("PreloadResources");
+-        Resources.preloadResources();
+-        bootTimingsTraceLog.traceEnd(); // PreloadResources
+-        Trace.traceBegin(Trace.TRACE_TAG_DALVIK, "PreloadAppProcessHALs");
+-        nativePreloadAppProcessHALs();
+-        Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
++        if (fullPreload) {
++            bootTimingsTraceLog.traceBegin("PreloadClasses");
++            preloadClasses();
++            bootTimingsTraceLog.traceEnd(); // PreloadClasses
++            bootTimingsTraceLog.traceBegin("CacheNonBootClasspathClassLoaders");
++            cacheNonBootClasspathClassLoaders();
++            bootTimingsTraceLog.traceEnd(); // CacheNonBootClasspathClassLoaders
++            bootTimingsTraceLog.traceBegin("PreloadResources");
++            Resources.preloadResources();
++            bootTimingsTraceLog.traceEnd(); // PreloadResources
++            Trace.traceBegin(Trace.TRACE_TAG_DALVIK, "PreloadAppProcessHALs");
++            nativePreloadAppProcessHALs();
++            Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
++        }
+         Trace.traceBegin(Trace.TRACE_TAG_DALVIK, "PreloadGraphicsDriver");
+         maybePreloadGraphicsDriver();
+         Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+@@ -149,7 +151,7 @@ public class ZygoteInit {
+ 
+         // TODO: remove the try/catch and the flag read as soon as the flag is ramped and 25Q2
+         // starts building from source.
+-        if (preloadHttpengineInZygote()) {
++        if (fullPreload && preloadHttpengineInZygote()) {
+             try {
+                 HttpEngine.preload();
+             } catch (NoSuchMethodError e){
+@@ -165,14 +167,20 @@ public class ZygoteInit {
+         }
+         // Ask the WebViewFactory to do any initialization that must run in the zygote process,
+         // for memory sharing purposes.
+-        WebViewFactory.prepareWebViewInZygote();
+-        endPreload();
+-        warmUpJcaProviders();
++        if (fullPreload) {
++            WebViewFactory.prepareWebViewInZygote();
++        }
++        endPreload(fullPreload);
++        warmUpJcaProviders(fullPreload);
+         Log.d(TAG, "end preload");
+ 
+         sPreloadComplete = true;
+     }
+ 
++    static void preload(TimingsTraceLog bootTimingsTraceLog) {
++        preload(bootTimingsTraceLog, true);
++    }
++
+     static void lazyPreload() {
+         Preconditions.checkState(!sPreloadComplete);
+         Log.i(TAG, "Lazily preloading resources.");
+@@ -180,14 +188,14 @@ public class ZygoteInit {
+         preload(new TimingsTraceLog("ZygoteInitTiming_lazy", Trace.TRACE_TAG_DALVIK));
+     }
+ 
+-    private static void beginPreload() {
++    private static void beginPreload(boolean fullPreload) {
+         Log.i(TAG, "Calling ZygoteHooks.beginPreload()");
+ 
+-        ZygoteHooks.onBeginPreload();
++        ZygoteHooks.onBeginPreload(fullPreload);
+     }
+ 
+-    private static void endPreload() {
+-        ZygoteHooks.onEndPreload();
++    private static void endPreload(boolean fullPreload) {
++        ZygoteHooks.onEndPreload(fullPreload);
+ 
+         Log.i(TAG, "Called ZygoteHooks.endPreload()");
+     }
+@@ -235,7 +243,7 @@ public class ZygoteInit {
+      * By doing it here we avoid that each app does it when requesting a service from the provider
+      * for the first time.
+      */
+-    private static void warmUpJcaProviders() {
++    private static void warmUpJcaProviders(boolean fullPreload) {
+         long startTime = SystemClock.uptimeMillis();
+         Trace.traceBegin(
+                 Trace.TRACE_TAG_DALVIK, "Starting installation of AndroidKeyStoreProvider");
+@@ -245,15 +253,17 @@ public class ZygoteInit {
+                 + (SystemClock.uptimeMillis() - startTime) + "ms.");
+         Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+ 
+-        startTime = SystemClock.uptimeMillis();
+-        Trace.traceBegin(
+-                Trace.TRACE_TAG_DALVIK, "Starting warm up of JCA providers");
+-        for (Provider p : Security.getProviders()) {
+-            p.warmUpServiceProvision();
++        if (fullPreload) {
++            startTime = SystemClock.uptimeMillis();
++            Trace.traceBegin(
++                    Trace.TRACE_TAG_DALVIK, "Starting warm up of JCA providers");
++            for (Provider p : Security.getProviders()) {
++                p.warmUpServiceProvision();
++            }
++            Log.i(TAG, "Warmed up JCA providers in "
++                    + (SystemClock.uptimeMillis() - startTime) + "ms.");
++            Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+         }
+-        Log.i(TAG, "Warmed up JCA providers in "
+-                + (SystemClock.uptimeMillis() - startTime) + "ms.");
+-        Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+     }
+ 
+     private static boolean isExperimentEnabled(String experiment) {
+@@ -812,6 +822,13 @@ public class ZygoteInit {
+      */
+     @UnsupportedAppUsage
+     public static void main(String[] argv) {
++        if ("1".equals(Os.getenv(ExecInit.IS_EXEC_SPAWNED_APP_PROCESS))) {
++            RuntimeInit.main(argv);
++            // Keep the main-thread stack close to the regular Zygote-spawned path.
++            ExecInit.getPendingExecInit().run();
++            return;
++        }
++
+         ZygoteServer zygoteServer = null;
+ 
+         // Mark zygote start. This ensures that thread creation will throw
+diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
+index a92c6c871..f1a7dd68a 100644
+--- a/core/jni/com_android_internal_os_Zygote.cpp
++++ b/core/jni/com_android_internal_os_Zygote.cpp
+@@ -22,14 +22,17 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <cstring>
+ #include <functional>
+ #include <iterator>
+ #include <list>
++#include <limits>
+ #include <optional>
+ #include <sstream>
+ #include <string>
+ #include <string_view>
+ #include <unordered_set>
++#include <vector>
+ 
+ #include <android/fdsan.h>
+ #include <arpa/inet.h>
+@@ -45,6 +48,7 @@
+ #include <sys/capability.h>
+ #include <sys/eventfd.h>
+ #include <sys/mount.h>
++#include <sys/mman.h>
+ #include <sys/personality.h>
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
+@@ -61,8 +65,10 @@
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
++#include <android-base/scopeguard.h>
+ #include <android-base/stringprintf.h>
+ #include <android-base/unique_fd.h>
++#include <androidfw/ResourceTypes.h>
+ #include <bionic/malloc.h>
+ #include <bionic/mte.h>
+ #include <cutils/fs.h>
+@@ -76,6 +82,8 @@
+ #include <stats_socket.h>
+ #include <utils/String8.h>
+ #include <utils/Trace.h>
++#include <ziparchive/zip_archive.h>
++#include <ziparchive/zip_writer.h>
+ 
+ #include <nativehelper/JNIHelp.h>
+ #include <nativehelper/ScopedLocalRef.h>
+@@ -176,6 +184,218 @@ static constexpr const uint64_t LOWER_HALF_WORD_MASK = 0x0000'0000'FFFF'FFFF;
+ static constexpr const char* kCurProfileDirPath = "/data/misc/profiles/cur";
+ static constexpr const char* kRefProfileDirPath = "/data/misc/profiles/ref";
+ 
++
++static constexpr jint kUseScudoAllocator = 1 << 29;
++static constexpr const char* kExecSystemResourcesFd = "EXEC_SYSTEM_RESOURCES_FD";
++static constexpr const char* kExecSystemResourcesSize = "EXEC_SYSTEM_RESOURCES_SIZE";
++static constexpr const char* kSystemResourcesPath =
++        "/system/framework/org.system.platform-res.apk";
++static constexpr const char* kSystemResourcesDebugName = "system-resources";
++
++static bool RewriteSystemResourcePackageName(std::vector<uint8_t>* data, std::string* error) {
++    using android::ResChunk_header;
++    using android::ResTable_header;
++    using android::ResTable_package;
++
++    if (data->size() < sizeof(ResTable_header)) {
++        *error = "resources.arsc is smaller than its table header";
++        return false;
++    }
++    auto* table = reinterpret_cast<ResTable_header*>(data->data());
++    const size_t table_size = dtohl(table->header.size);
++    size_t offset = dtohs(table->header.headerSize);
++    if (dtohs(table->header.type) != android::RES_TABLE_TYPE ||
++        offset < sizeof(ResTable_header) || table_size > data->size()) {
++        *error = "resources.arsc has an invalid table header";
++        return false;
++    }
++
++    constexpr uint32_t kPackageId = 0x3f;
++    constexpr std::string_view kOriginalName = "lineageos.platform";
++    constexpr std::string_view kPublicName = "org.system.platform";
++    size_t rewritten = 0;
++    while (offset < table_size) {
++        if (table_size - offset < sizeof(ResChunk_header)) {
++            *error = "resources.arsc contains a truncated chunk header";
++            return false;
++        }
++        auto* chunk = reinterpret_cast<ResChunk_header*>(data->data() + offset);
++        const size_t chunk_size = dtohl(chunk->size);
++        const size_t header_size = dtohs(chunk->headerSize);
++        if (chunk_size < header_size || chunk_size > table_size - offset) {
++            *error = "resources.arsc contains an invalid chunk";
++            return false;
++        }
++        if (dtohs(chunk->type) == android::RES_TABLE_PACKAGE_TYPE) {
++            if (header_size < sizeof(ResTable_package)) {
++                *error = "resources.arsc contains a truncated package header";
++                return false;
++            }
++            auto* package = reinterpret_cast<ResTable_package*>(chunk);
++            if (dtohl(package->id) == kPackageId) {
++                std::string current_name;
++                for (uint16_t code_unit : package->name) {
++                    const uint16_t value = dtohs(code_unit);
++                    if (value == 0) break;
++                    if (value > 0x7f) {
++                        *error = "0x3f resource package has a non-ASCII name";
++                        return false;
++                    }
++                    current_name.push_back(static_cast<char>(value));
++                }
++                if (current_name != kOriginalName) {
++                    *error = StringPrintf("unexpected 0x3f resource package name: %s",
++                                          current_name.c_str());
++                    return false;
++                }
++                std::fill(std::begin(package->name), std::end(package->name), 0);
++                for (size_t i = 0; i < kPublicName.size(); ++i) {
++                    package->name[i] = htods(static_cast<uint16_t>(kPublicName[i]));
++                }
++                ++rewritten;
++            }
++        }
++        offset += chunk_size;
++    }
++    if (offset != table_size || rewritten != 1) {
++        *error = StringPrintf("expected one 0x3f resource package, rewrote %zu", rewritten);
++        return false;
++    }
++    return true;
++}
++
++static bool PrepareExecSystemResources(std::string* error) {
++    ZipArchiveHandle archive = nullptr;
++    int32_t result = OpenArchive(kSystemResourcesPath, &archive);
++    if (result != 0) {
++        *error = StringPrintf("failed to open system resources: %s", ErrorCodeString(result));
++        return false;
++    }
++    auto archive_guard = android::base::make_scope_guard([&]() { CloseArchive(archive); });
++
++    android::base::unique_fd resource_fd(
++            memfd_create(kSystemResourcesDebugName, MFD_ALLOW_SEALING));
++    if (resource_fd.get() == -1) {
++        *error = StringPrintf("memfd_create failed: %s", strerror(errno));
++        return false;
++    }
++    const int output_fd = dup(resource_fd.get());
++    if (output_fd == -1) {
++        *error = StringPrintf("dup resource memfd failed: %s", strerror(errno));
++        return false;
++    }
++    FILE* output = fdopen(output_fd, "w+b");
++    if (output == nullptr) {
++        close(output_fd);
++        *error = StringPrintf("fdopen resource memfd failed: %s", strerror(errno));
++        return false;
++    }
++    auto output_guard = android::base::make_scope_guard([&]() { fclose(output); });
++
++    bool found_table = false;
++    {
++        ZipWriter writer(output);
++        void* cookie = nullptr;
++        result = StartIteration(archive, &cookie);
++        if (result != 0) {
++            *error = StringPrintf("failed to iterate system resources: %s",
++                                  ErrorCodeString(result));
++            return false;
++        }
++        auto iteration_guard =
++                android::base::make_scope_guard([&]() { EndIteration(cookie); });
++
++        ZipEntry64 entry;
++        std::string name;
++        while ((result = Next(cookie, &entry, &name)) == 0) {
++            const bool is_table = name == "resources.arsc";
++            const bool is_resource = name.compare(0, 4, "res/") == 0;
++            const bool is_asset = name.compare(0, 7, "assets/") == 0;
++            if ((!is_table && !is_resource && !is_asset) ||
++                (!name.empty() && name.back() == '/')) {
++                continue;
++            }
++            if (entry.uncompressed_length > std::numeric_limits<uint32_t>::max()) {
++                *error = StringPrintf("system resource entry is too large: %s", name.c_str());
++                return false;
++            }
++            std::vector<uint8_t> contents(static_cast<size_t>(entry.uncompressed_length));
++            result = ExtractToMemory(archive, &entry, contents.data(), contents.size());
++            if (result != 0) {
++                *error = StringPrintf("failed to extract %s: %s", name.c_str(),
++                                      ErrorCodeString(result));
++                return false;
++            }
++            if (is_table) {
++                if (found_table) {
++                    *error = "system resource APK contains duplicate resources.arsc";
++                    return false;
++                }
++                if (!RewriteSystemResourcePackageName(&contents, error)) return false;
++                found_table = true;
++                result = writer.StartAlignedEntry(name, 0, 4);
++            } else {
++                result = writer.StartEntry(
++                        name, ZipWriter::kCompress | ZipWriter::kDefaultCompression);
++            }
++            if (result == 0) result = writer.WriteBytes(contents.data(), contents.size());
++            if (result == 0) result = writer.FinishEntry();
++            if (result != 0) {
++                *error = StringPrintf("failed to write %s: %s", name.c_str(),
++                                      ZipWriter::ErrorCodeString(result));
++                return false;
++            }
++        }
++        if (result != -1) {
++            *error = StringPrintf("failed while iterating system resources: %s",
++                                  ErrorCodeString(result));
++            return false;
++        }
++        if (!found_table) {
++            *error = "system resource APK has no resources.arsc";
++            return false;
++        }
++        result = writer.Finish();
++        if (result != 0) {
++            *error = StringPrintf("failed to finish system resource ZIP: %s",
++                                  ZipWriter::ErrorCodeString(result));
++            return false;
++        }
++    }
++
++    if (fflush(output) != 0) {
++        *error = StringPrintf("failed to flush system resource ZIP: %s", strerror(errno));
++        return false;
++    }
++    const off64_t resource_size = ftello64(output);
++    if (resource_size <= 0) {
++        *error = StringPrintf("failed to determine system resource ZIP size: %s", strerror(errno));
++        return false;
++    }
++    output_guard.Disable();
++    if (fclose(output) != 0) {
++        *error = StringPrintf("failed to close system resource ZIP: %s", strerror(errno));
++        return false;
++    }
++
++    const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
++    if (fcntl(resource_fd.get(), F_ADD_SEALS, seals) == -1) {
++        *error = StringPrintf("failed to seal system resource memfd: %s", strerror(errno));
++        return false;
++    }
++    const std::string fd_string = std::to_string(resource_fd.get());
++    const std::string size_string = std::to_string(resource_size);
++    if (setenv(kExecSystemResourcesFd, fd_string.c_str(), 1) == -1 ||
++        setenv(kExecSystemResourcesSize, size_string.c_str(), 1) == -1) {
++        *error = StringPrintf("failed to export system resource memfd: %s", strerror(errno));
++        unsetenv(kExecSystemResourcesFd);
++        unsetenv(kExecSystemResourcesSize);
++        return false;
++    }
++    (void)resource_fd.release();
++    return true;
++}
++
+ /**
+  * The maximum value that the gUSAPPoolSizeMax variable may take.  This value
+  * is a mirror of ZygoteServer.USAP_POOL_SIZE_MAX_LIMIT
+@@ -1894,6 +2114,66 @@ static void BindMountStorageDirs(JNIEnv* env, jobjectArray pkg_data_info_list,
+   }
+ }
+ 
++static void HandleRuntimeFlags(JNIEnv* env, jint& runtime_flags, const char* process_name,
++                               const char* nice_name_ptr) {
++    if ((runtime_flags & RuntimeFlags::DEBUG_ENABLE_PTRACE) != 0) {
++        EnableDebugger();
++        runtime_flags &= ~RuntimeFlags::DEBUG_ENABLE_PTRACE;
++    }
++    if ((runtime_flags & RuntimeFlags::PROFILE_FROM_SHELL) != 0) {
++        if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) == -1) {
++            ALOGE("prctl(PR_SET_DUMPABLE) failed: %s", strerror(errno));
++            RuntimeAbort(env, __LINE__, "prctl(PR_SET_DUMPABLE, 1) failed");
++        }
++    }
++
++    HeapTaggingLevel heap_tagging_level;
++    switch (runtime_flags & RuntimeFlags::MEMORY_TAG_LEVEL_MASK) {
++        case RuntimeFlags::MEMORY_TAG_LEVEL_TBI:
++            heap_tagging_level = M_HEAP_TAGGING_LEVEL_TBI;
++            break;
++        case RuntimeFlags::MEMORY_TAG_LEVEL_ASYNC:
++            heap_tagging_level = M_HEAP_TAGGING_LEVEL_ASYNC;
++            break;
++        case RuntimeFlags::MEMORY_TAG_LEVEL_SYNC:
++            heap_tagging_level = M_HEAP_TAGGING_LEVEL_SYNC;
++            break;
++        default:
++            heap_tagging_level = M_HEAP_TAGGING_LEVEL_NONE;
++            break;
++    }
++    mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, heap_tagging_level);
++    runtime_flags &= ~RuntimeFlags::MEMORY_TAG_LEVEL_MASK;
++
++    if (!(runtime_flags & RuntimeFlags::NATIVE_HEAP_ZERO_INIT_ENABLED)) {
++        mallopt(M_BIONIC_ZERO_INIT, 0);
++    }
++    runtime_flags &= ~RuntimeFlags::NATIVE_HEAP_ZERO_INIT_ENABLED;
++
++    android_mallopt_gwp_asan_options_t gwp_asan_options;
++    const char* kGwpAsanAppRecoverableSysprop =
++            "persist.device_config.memory_safety_native.gwp_asan_recoverable_apps";
++    gwp_asan_options.program_name = nice_name_ptr ?: process_name;
++    switch (runtime_flags & RuntimeFlags::GWP_ASAN_LEVEL_MASK) {
++        default:
++        case RuntimeFlags::GWP_ASAN_LEVEL_DEFAULT:
++            gwp_asan_options.mode = GetBoolProperty(kGwpAsanAppRecoverableSysprop, true)
++                    ? Mode::APP_MANIFEST_DEFAULT : Mode::APP_MANIFEST_NEVER;
++            break;
++        case RuntimeFlags::GWP_ASAN_LEVEL_NEVER:
++            gwp_asan_options.mode = Mode::APP_MANIFEST_NEVER;
++            break;
++        case RuntimeFlags::GWP_ASAN_LEVEL_ALWAYS:
++            gwp_asan_options.mode = Mode::APP_MANIFEST_ALWAYS;
++            break;
++        case RuntimeFlags::GWP_ASAN_LEVEL_LOTTERY:
++            gwp_asan_options.mode = Mode::APP_MANIFEST_DEFAULT;
++            break;
++    }
++    android_mallopt(M_INITIALIZE_GWP_ASAN, &gwp_asan_options, sizeof(gwp_asan_options));
++    runtime_flags &= ~RuntimeFlags::GWP_ASAN_LEVEL_MASK;
++}
++
+ // Utility routine to specialize a zygote child process.
+ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids, jint runtime_flags,
+                              jobjectArray rlimits, jlong permitted_capabilities,
+@@ -1913,6 +2193,14 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+     auto instruction_set = extract_fn(managed_instruction_set);
+     auto app_data_dir = extract_fn(managed_app_data_dir);
+ 
++    if (!is_system_server && (runtime_flags & kUseScudoAllocator) != 0) {
++        std::string resource_error;
++        if (!PrepareExecSystemResources(&resource_error)) {
++            fail_fn(CREATE_ERROR("failed to prepare exec system resources: %s",
++                                 resource_error.c_str()));
++        }
++    }
++
+     // Permit bounding capabilities
+     permitted_capabilities |= bounding_capabilities;
+ 
+@@ -3099,6 +3387,10 @@ static void com_android_internal_os_Zygote_nativeAllowFilesOpenedByPreload(JNIEn
+     gPreloadFdsExtracted = true;
+ }
+ 
++static void nativeHandleRuntimeFlagsWrapper(JNIEnv* env, jclass, jint runtime_flags) {
++    HandleRuntimeFlags(env, runtime_flags, nullptr, nullptr);
++}
++
+ static const JNINativeMethod gMethods[] = {
+         {"nativeForkAndSpecialize",
+          "(II[II[[IILjava/lang/String;Ljava/lang/String;[I[IZLjava/lang/String;Ljava/lang/"
+@@ -3151,6 +3443,7 @@ static const JNINativeMethod gMethods[] = {
+          (void*)com_android_internal_os_Zygote_nativeMarkOpenedFilesBeforePreload},
+         {"nativeAllowFilesOpenedByPreload", "()V",
+          (void*)com_android_internal_os_Zygote_nativeAllowFilesOpenedByPreload},
++        {"nativeHandleRuntimeFlags", "(I)V", (void*)nativeHandleRuntimeFlagsWrapper},
+ };
+ 
+ int register_com_android_internal_os_Zygote(JNIEnv* env) {
+diff --git a/core/jni/com_android_internal_os_ZygoteCommandBuffer.cpp b/core/jni/com_android_internal_os_ZygoteCommandBuffer.cpp
+index 2fbe4e8a6..cb59eedcc 100644
+--- a/core/jni/com_android_internal_os_ZygoteCommandBuffer.cpp
++++ b/core/jni/com_android_internal_os_ZygoteCommandBuffer.cpp
+@@ -177,6 +177,9 @@ class NativeCommandBuffer {
+     static const size_t NN_LENGTH = strlen(NICE_NAME);
+     static const size_t ITA_LENGTH = strlen(IS_TOP_APP);
+ 
++    static const char* RUNTIME_FLAGS = "--runtime-flags=";
++    static const size_t RF_LENGTH = strlen(RUNTIME_FLAGS);
++
+     bool saw_setuid = false, saw_setgid = false;
+     bool saw_runtime_args = false;
+     bool is_top_app = false;
+@@ -192,6 +195,16 @@ class NativeCommandBuffer {
+         saw_runtime_args = true;
+         continue;
+       }
++      if (static_cast<size_t>(arg_end - arg_start) >= RF_LENGTH &&
++          strncmp(arg_start, RUNTIME_FLAGS, RF_LENGTH) == 0) {
++        int flags = digitsVal(arg_start + RF_LENGTH, arg_end);
++        const int USE_SCUDO_ALLOCATOR = 1 << 29;
++        if (flags & USE_SCUDO_ALLOCATOR) {
++          // ExecInit is only available from the Java fork path.
++          return std::make_pair(false, false);
++        }
++        continue;
++      }
+       if (static_cast<size_t>(arg_end - arg_start) >= NN_LENGTH &&
+           strncmp(arg_start, NICE_NAME, NN_LENGTH) == 0) {
+         size_t name_len = arg_end - (arg_start + NN_LENGTH);
+diff --git a/libs/androidfw/AssetManager2.cpp b/libs/androidfw/AssetManager2.cpp
+index 5750c9cb9..f78cb2310 100644
+--- a/libs/androidfw/AssetManager2.cpp
++++ b/libs/androidfw/AssetManager2.cpp
+@@ -53,14 +53,7 @@ constexpr uint8_t kAppPackageId = 0x7f;
+ using EntryValue = std::variant<Res_value, incfs::verified_map_ptr<ResTable_map_entry>>;
+ 
+ bool IsLineageSdkPackage(const LoadedPackage& package, const ApkAssets& apk_assets) {
+-  if (package.GetPackageId() != kLineageSdkPackageId) {
+-    return false;
+-  }
+-  if (package.GetPackageName() == "lineageos.platform") {
+-    return true;
+-  }
+-  const std::optional<std::string_view> path = apk_assets.GetPath();
+-  return path.has_value() && *path == "/system/framework/org.system.platform-res.apk";
++  return package.GetPackageId() == kLineageSdkPackageId && apk_assets.IsLineageSystemAsset();
+ }
+ 
+ /* NOTE: table_entry has been verified in LoadedPackage::GetEntryFromOffset(),
+@@ -265,6 +258,9 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+ 
+       // Add the package to the set of packages with the same ID.
+       PackageGroup* package_group = &package_groups_[idx];
++      if (IsLineageSdkPackage(*package, *apk_assets)) {
++        package_group->is_lineage_system_package_ = true;
++      }
+       if (shadows_lineage_package) {
+         package_group->packages_.insert(package_group->packages_.begin(), ConfiguredPackage{});
+         package_group->packages_.front().loaded_package_ = package.get();
+@@ -288,6 +284,13 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+         // Overlay target ApkAssets must have been created using path based load apis.
+         target_assets_package_ids.emplace(*apk_assets_path, package_id);
+       }
++      if (IsLineageSdkPackage(*package, *apk_assets)) {
++        // Idmaps are generated against the canonical on-disk target. An exec-spawned process
++        // loads equivalent resources from a sealed memfd, so retain the canonical lookup key
++        // strictly inside AssetManager.
++        target_assets_package_ids.emplace("/system/framework/org.system.platform-res.apk",
++                                          package_id);
++      }
+     }
+   }
+ 
+@@ -305,6 +308,12 @@ void AssetManager2::BuildDynamicRefTable(ApkAssetsList apk_assets) {
+     for (auto&& inner_group : package_groups_) {
+       inner_group.dynamic_ref_table->addMapping(name_16,
+                                                 group.dynamic_ref_table->mAssignedPackageId);
++      if (group.is_lineage_system_package_) {
++        // Keep references built against the original SDK package working even when the public
++        // package header in the compatibility copy uses a neutral name.
++        inner_group.dynamic_ref_table->addMapping(String16("lineageos.platform"),
++                                                  group.dynamic_ref_table->mAssignedPackageId);
++      }
+     }
+ 
+     for (const auto& package : group.packages_) {
+diff --git a/libs/androidfw/include/androidfw/ApkAssets.h b/libs/androidfw/include/androidfw/ApkAssets.h
+index 45c625c57..94dcd6684 100644
+--- a/libs/androidfw/include/androidfw/ApkAssets.h
++++ b/libs/androidfw/include/androidfw/ApkAssets.h
+@@ -119,6 +119,10 @@ class ApkAssets : public RefBase {
+     return loaded_idmap_ != nullptr;
+   }
+ 
++  bool IsLineageSystemAsset() const {
++    return (property_flags_ & PROPERTY_LINEAGE_SYSTEM) != 0;
++  }
++
+   // Returns whether the resources.arsc is allocated in RAM (not mmapped).
+   bool IsTableAllocated() const {
+     return resources_asset_ != nullptr && resources_asset_->isAllocated();
+diff --git a/libs/androidfw/include/androidfw/AssetManager2.h b/libs/androidfw/include/androidfw/AssetManager2.h
+index d0e0836fc..b2efc94f7 100644
+--- a/libs/androidfw/include/androidfw/AssetManager2.h
++++ b/libs/androidfw/include/androidfw/AssetManager2.h
+@@ -417,6 +417,10 @@ class AssetManager2 {
+       // A library reference table that contains build-package ID to runtime-package ID mappings.
+       std::shared_ptr<DynamicRefTable> dynamic_ref_table;
+ 
++      // True when this group contains the internally identified Lineage system resources. The
++      // public package name may deliberately differ for exec-spawned compatibility processes.
++      bool is_lineage_system_package_ = false;
++
+       explicit PackageGroup(std::shared_ptr<DynamicRefTable> ref_table = {})
+           : dynamic_ref_table(ref_table ? std::move(ref_table)
+                                         : std::make_shared<DynamicRefTable>()) {
+diff --git a/libs/androidfw/include/androidfw/LoadedArsc.h b/libs/androidfw/include/androidfw/LoadedArsc.h
+index 34d294e7c..2ae90f2d8 100644
+--- a/libs/androidfw/include/androidfw/LoadedArsc.h
++++ b/libs/androidfw/include/androidfw/LoadedArsc.h
+@@ -104,6 +104,10 @@ enum : package_property_t {
+ 
+   // Optimize the resource lookups by name via an in-memory lookup table.
+   PROPERTY_OPTIMIZE_NAME_LOOKUPS = 1U << 6U,
++
++  // The ApkAssets contains the Lineage system resource package. This internal identity is kept
++  // separate from both the backing path and the package name exposed by resources.arsc.
++  PROPERTY_LINEAGE_SYSTEM = 1U << 7U,
+ };
+ 
+ struct OverlayableInfo {
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index 143294982..24c181688 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -276,6 +276,7 @@ import android.app.usage.UsageEvents.Event;
+ import android.app.usage.UsageStatsManager;
+ import android.app.usage.UsageStatsManagerInternal;
+ import android.appwidget.AppWidgetManagerInternal;
++import android.compat.Compatibility;
+ import android.content.AttributionSource;
+ import android.content.AutofillOptions;
+ import android.content.BroadcastReceiver;
+@@ -418,6 +419,7 @@ import com.android.internal.app.ProcessMap;
+ import com.android.internal.app.SystemUserHomeActivity;
+ import com.android.internal.app.procstats.ProcessState;
+ import com.android.internal.app.procstats.ProcessStats;
++import com.android.internal.compat.CompatibilityChangeConfig;
+ import com.android.internal.content.InstallLocationUtils;
+ import com.android.internal.messages.nano.SystemMessageProto.SystemMessage;
+ import com.android.internal.notification.SystemNotificationChannels;
+@@ -19934,6 +19936,32 @@ public class ActivityManagerService extends IActivityManager.Stub
+         });
+     }
+ 
++    @Override
++    public String[] getSystemIdmapPaths() {
++        return android.content.res.AssetManager.systemIdmapPaths_;
++    }
++
++    @Override
++    public void setAllocatorCompatibilityMode(@NonNull String packageName, boolean enabled) {
++        setAllocatorCompatibilityMode_enforcePermission();
++        Objects.requireNonNull(packageName);
++
++        final ArraySet<Long> enabledChanges = new ArraySet<>();
++        final ArraySet<Long> disabledChanges = new ArraySet<>();
++        (enabled ? enabledChanges : disabledChanges).add(ProcessList.USE_SCUDO_ALLOCATOR);
++        final CompatibilityChangeConfig overrides = new CompatibilityChangeConfig(
++                new Compatibility.ChangeConfig(enabledChanges, disabledChanges));
++
++        final long identity = Binder.clearCallingIdentity();
++        try {
++            // PlatformCompat persists the override and terminates the target package so the
++            // allocator choice is applied when its process is recreated.
++            mPlatformCompat.setOverrides(overrides, packageName);
++        } finally {
++            Binder.restoreCallingIdentity(identity);
++        }
++    }
++
+     @Override
+     public void reportOptimizationInfo(@NonNull IBinder app, @NonNull String compilerFilter,
+             @NonNull String compilationReason) {
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index a421ee65f..cd619ea61 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -83,7 +83,9 @@ import android.app.IApplicationThread;
+ import android.app.IProcessObserver;
+ import android.app.UidObserver;
+ import android.compat.annotation.ChangeId;
++import android.compat.annotation.Disabled;
+ import android.compat.annotation.EnabledAfter;
++import android.compat.annotation.Overridable;
+ import android.content.BroadcastReceiver;
+ import android.content.ComponentName;
+ import android.content.Context;
+@@ -399,6 +401,12 @@ public final class ProcessList implements ProcessStateController.ProcessLruUpdat
+     @EnabledAfter(targetSdkVersion = Build.VERSION_CODES.Q)
+     private static final long APP_DATA_DIRECTORY_ISOLATION = 143937733; // See b/143937733
+ 
++    /** Use Scudo instead of the system default allocator for compatibility. */
++    @ChangeId
++    @Disabled
++    @Overridable
++    public static final long USE_SCUDO_ALLOCATOR = 391684437L;
++
+     ActivityManagerService mService = null;
+ 
+     // To kill process groups asynchronously
+@@ -2105,6 +2113,16 @@ public final class ProcessList implements ProcessStateController.ProcessLruUpdat
+             runtimeFlags |= Zygote.getMemorySafetyRuntimeFlags(
+                     definingAppInfo, app.processInfo, instructionSet, mPlatformCompat);
+ 
++            final boolean allocatorCompatEligible = instructionSet != null
++                    && VMRuntime.is64BitInstructionSet(instructionSet)
++                    && !definingAppInfo.isSystemApp()
++                    && (definingAppInfo.flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0;
++            if (allocatorCompatEligible
++                    && mPlatformCompat.isChangeEnabled(
++                            USE_SCUDO_ALLOCATOR, definingAppInfo)) {
++                runtimeFlags |= Zygote.USE_SCUDO_ALLOCATOR;
++            }
++
+             // the per-user SELinux context must be set
+             if (TextUtils.isEmpty(app.info.seInfoUser)) {
+                 Slog.wtf(ActivityManagerService.TAG, "SELinux tag not defined",
+-- 
+2.43.0
+

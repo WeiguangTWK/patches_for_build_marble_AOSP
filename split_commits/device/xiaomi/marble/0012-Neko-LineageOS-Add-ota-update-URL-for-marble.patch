@@ -1,0 +1,27 @@
+From 5decfcfd32f74a60b3de966c24984a0e8d61bd64 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 27 Jul 2026 11:54:40 +0800
+Subject: [PATCH] Neko LineageOS: Add ota update URL for marble
+
+Change-Id: I29d4f0665bf529f7acaefc577f3ac172961356b4
+---
+ device.mk | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/device.mk b/device.mk
+index fb7aed7..58a76b6 100644
+--- a/device.mk
++++ b/device.mk
+@@ -58,7 +58,8 @@ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/properties/build_IN.prop:$(TARGET_COPY_OUT_ODM)/etc/build_IN.prop
+ 
+ PRODUCT_SYSTEM_PROPERTIES += \
+-    debug.graphics.game_default_frame_rate.disabled=true
++    debug.graphics.game_default_frame_rate.disabled=true \
++    ro.updater.uri=https://raw.githubusercontent.com/WeiguangTWK/nekolos-ota/refs/heads/main/marble-microg.json
+ 
+ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/properties/build_CN.prop:$(TARGET_COPY_OUT_RECOVERY)/root/vendor/odm/etc/build_CN.prop \
+-- 
+2.43.0
+

@@ -1,0 +1,40 @@
+From 2a71a429bcf425db852393903539651b66fa5293 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 27 Jul 2026 11:51:30 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Changed update info URL prop
+
+Change-Id: I97d8829b0b1b2e154b908f638374d688d4b39844
+---
+ README.md                                                       | 2 +-
+ .../java/org/lineageos/updater/deviceinfo/DeviceInfoUtils.kt    | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/README.md b/README.md
+index fe55146..cb5b3cd 100644
+--- a/README.md
++++ b/README.md
+@@ -11,7 +11,7 @@ Simple application to download and apply OTA packages.
+ Server requirements
+ -------------------
+ The app sends `GET` requests to the URL defined by the `updater_server_url`
+-resource (or the `lineage.updater.uri` system property) and expects as response
++resource (or the `ro.updater.uri` system property) and expects as response
+ a JSON with the following structure:
+ ```json
+ [
+diff --git a/app/src/main/java/org/lineageos/updater/deviceinfo/DeviceInfoUtils.kt b/app/src/main/java/org/lineageos/updater/deviceinfo/DeviceInfoUtils.kt
+index 126a7a4..2764db2 100644
+--- a/app/src/main/java/org/lineageos/updater/deviceinfo/DeviceInfoUtils.kt
++++ b/app/src/main/java/org/lineageos/updater/deviceinfo/DeviceInfoUtils.kt
+@@ -20,7 +20,7 @@ object DeviceInfoUtils : SettingsLibDeviceInfoUtils() {
+     private const val PROP_NEXT_DEVICE = "ro.updater.next_device"
+     private const val PROP_RELEASE_TYPE = "ro.lineage.releasetype"
+     private const val PROP_UPDATER_ALLOW_DOWNGRADING = "lineage.updater.allow_downgrading"
+-    private const val PROP_UPDATER_URI = "lineage.updater.uri"
++    private const val PROP_UPDATER_URI = "ro.updater.uri"
+     private const val PROP_UPDATE_RECOVERY = "persist.vendor.recovery_update"
+ 
+     // Read-only
+-- 
+2.43.0
+
