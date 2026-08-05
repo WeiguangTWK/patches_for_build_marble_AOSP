@@ -1,0 +1,29 @@
+From 63a4bfe3b5ee1a47886fe5599167cac7247119a0 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 20:55:05 +0800
+Subject: [PATCH] Neko LineageOS: [OHOS Adaption] Add HAP/APP installer
+
+Change-Id: I4bb8dfb91099fea697f94788dc4973e4f320d543
+---
+ config/common_mobile.mk | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/config/common_mobile.mk b/config/common_mobile.mk
+index 251f4af..22e6123 100644
+--- a/config/common_mobile.mk
++++ b/config/common_mobile.mk
+@@ -18,7 +18,10 @@ PRODUCT_PACKAGES += \
+     AvatarPicker \
+     Backgrounds \
+     Glimpse \
+-    LatinIME
++    LatinIME \
++    OpenHarmonyAppInstaller
++
++$(call inherit-product-if-exists, external/ohcompat/arkui_runtime/runtime.mk)
+ 
+ ifeq ($(PRODUCT_TYPE), go)
+ PRODUCT_PACKAGES += \
+-- 
+2.43.0
+

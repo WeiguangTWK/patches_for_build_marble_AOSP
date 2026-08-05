@@ -1,0 +1,41 @@
+From a5f16540593733a9f747ffee5ef4f314d99c8b17 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 20:58:17 +0800
+Subject: [PATCH] Neko LineageOS: [OHOS Adaption] Add sign verify support for
+ OpenHarmonyAppInstaller
+
+Change-Id: I6cc3dd2d0b8759b3f909bc7c008fbbc14a850d8a
+---
+ Android.bp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index 86b1643..c1b9d9d 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -48,6 +48,22 @@ java_library_host {
+     },
+ }
+ 
++// Device-side subset used by the LineageOS OpenHarmony compatibility installer.
++// The library is pure Java; cloud KMS providers and the command-line frontend
++// remain host-only.
++java_library {
++    name: "apksig-device",
++    srcs: ["src/main/java/**/*.java"],
++    exclude_srcs: [
++        "src/main/java/com/android/apksig/kms/aws/**/*.java",
++        "src/main/java/com/android/apksig/kms/gcp/**/*.java",
++    ],
++    sdk_version: "core_platform",
++    java_version: "1.8",
++    installable: false,
++    visibility: ["//packages/apps/OpenHarmonyAppInstaller"],
++}
++
+ java_library_host {
+     name: "apksig-kms-provider-aws",
+     srcs: [
+-- 
+2.43.0
+

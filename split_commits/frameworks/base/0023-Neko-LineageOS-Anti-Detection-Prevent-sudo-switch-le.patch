@@ -1,0 +1,30 @@
+From 2636c98dd65419f1dd7c8eb84730a9af5fd1c1f7 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 20:46:00 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] Prevent sudo switch leaking
+ lineage res
+
+Some Detector (e.g. Native Detector) will detect environ, enabling memory security compatable mode will cause detection
+
+Change-Id: I2db5a1d3e3cfcf8072ecb39ec78c580c324256a9
+---
+ core/java/com/android/internal/os/ExecInit.java | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/core/java/com/android/internal/os/ExecInit.java b/core/java/com/android/internal/os/ExecInit.java
+index ff675d43f..23b8b4099 100644
+--- a/core/java/com/android/internal/os/ExecInit.java
++++ b/core/java/com/android/internal/os/ExecInit.java
+@@ -90,6 +90,9 @@ public final class ExecInit {
+             if ((runtimeFlags & Zygote.USE_SCUDO_ALLOCATOR) != 0) {
+                 // Read by bionic before the new process performs allocator initialization.
+                 Os.setenv("LIBC_USE_SCUDO", "1", true);
++                // This class path is only consumed while starting system_server. Do not expose
++                // system-server implementation details in the fresh application environment.
++                Os.unsetenv("SYSTEMSERVERCLASSPATH");
+             }
+             Os.setenv(IS_EXEC_SPAWNED_APP_PROCESS, "1", true);
+             Os.execv(argv[0], argv);
+-- 
+2.43.0
+

@@ -1,0 +1,24 @@
+From f19a100c2d5cabee4ce9072c25e06411fb6ba3c5 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 20:50:45 +0800
+Subject: [PATCH] Neko LineageOS: [OHOS Adaption] Add hap/app extension
+ handling
+
+Change-Id: I518119101ec6a0526afd92b4a025705e165baadc
+---
+ mime/java-res/vendor.mime.types | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/mime/java-res/vendor.mime.types b/mime/java-res/vendor.mime.types
+index afb8f9e4e..1ef10958a 100644
+--- a/mime/java-res/vendor.mime.types
++++ b/mime/java-res/vendor.mime.types
+@@ -39,3 +39,5 @@
+ #
+ # Add your custom mappings below this line (with no "#" at the start of the line):
+ 
++application/vnd.openharmony.app app
++application/vnd.openharmony.hap hap
+-- 
+2.43.0
+

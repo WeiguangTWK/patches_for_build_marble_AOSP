@@ -1,0 +1,31 @@
+From fbf8edf11d9f050ae35a3973c31e9165cc48b3d0 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 22:09:13 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] Adapt to Lineage framework
+ jar file rename
+
+Change-Id: I35a3c8be2a73ecf731341171142043c7b2617f11
+---
+ common/private/file_contexts | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index c27e069..fe76b22 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -12,9 +12,9 @@
+ 
+ # Keep Lineage platform framework artifacts out of untrusted app reach.
+ /system/framework/org\.system\.platform-res\.apk u:object_r:lineage_platform_framework_file:s0
+-/system/framework/org\.lineageos\.platform\.jar u:object_r:lineage_platform_framework_file:s0
+-/system/framework/oat/arm64/org\.lineageos\.platform\.vdex u:object_r:lineage_platform_framework_file:s0
+-/system/framework/oat/arm64/org\.lineageos\.platform\.odex u:object_r:lineage_platform_framework_file:s0
++/system/framework/miui-framework\.jar u:object_r:lineage_platform_framework_file:s0
++/system/framework/oat/arm64/miui-framework\.vdex u:object_r:lineage_platform_framework_file:s0
++/system/framework/oat/arm64/miui-framework\.odex u:object_r:lineage_platform_framework_file:s0
+ 
+ # Keep Lineage build metadata and feature permission XML out of untrusted app reach.
+ /(product|system/product)/etc/build-manifest\.xml u:object_r:lineage_permission_file:s0
+-- 
+2.43.0
+

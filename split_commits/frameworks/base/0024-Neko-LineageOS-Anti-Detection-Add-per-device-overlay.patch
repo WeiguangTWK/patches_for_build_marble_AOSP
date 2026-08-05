@@ -1,0 +1,26 @@
+From a53a6893584111ce9391ae038bdebe078c380c2a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 20:49:33 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] Add per-device overlay into
+ hide list
+
+Change-Id: I9c5d50e7733d7564817ea07c0979f0327b3c449e
+---
+ .../java/com/android/server/pm/LineageAppVisibilityService.java  | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/services/core/java/com/android/server/pm/LineageAppVisibilityService.java b/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
+index 12203eb56..9e8f10d0c 100644
+--- a/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
++++ b/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
+@@ -212,6 +212,7 @@ public final class LineageAppVisibilityService extends SystemService {
+         packages.add("co.aospa.sense");
+         packages.add("org.protonaosp.deviceconfig");
+         packages.add("org.lineageos.dspvolume.xiaomi");
++        packages.add("lineageos.platform.overlay.marble");
+         return packages;
+     }
+ 
+-- 
+2.43.0
+

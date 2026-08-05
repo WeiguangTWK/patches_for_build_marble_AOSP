@@ -1,0 +1,26 @@
+From 93f31df1be9392951790f8857d1ffefabe342a19 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 22:11:02 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] Rename Lineage framework
+ resource
+
+Change-Id: I6b412555508286a03d55486aac3b65dceb46d3ea
+---
+ Android.bp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Android.bp b/Android.bp
+index 255c3a1..880ae59 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -97,6 +97,7 @@ java_defaults {
+ 
+ java_library {
+     name: "org.lineageos.platform",
++    stem: "miui-framework",
+     defaults: ["lineage-sdk-defaults"],
+     installable: true,
+     sdk_version: "core_platform",
+-- 
+2.43.0
+

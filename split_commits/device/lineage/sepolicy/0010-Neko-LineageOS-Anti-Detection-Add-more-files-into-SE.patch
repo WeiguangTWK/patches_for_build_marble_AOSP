@@ -1,0 +1,46 @@
+From 057b82f6f3cb2e454a7ea86b67cc034b3e8e729f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 20:52:36 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] Add more files into SELinux
+ denylist
+
+Although there is no known detection on these files, it is still a easy leak for LineageOS
+
+Change-Id: If56f5c7d29ad5d895b3b5c0ff6c9c1e8b9fd1b15
+---
+ common/private/file_contexts | 6 +++++-
+ common/vendor/file_contexts  | 1 +
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index 9fda3a2..c27e069 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -16,7 +16,11 @@
+ /system/framework/oat/arm64/org\.lineageos\.platform\.vdex u:object_r:lineage_platform_framework_file:s0
+ /system/framework/oat/arm64/org\.lineageos\.platform\.odex u:object_r:lineage_platform_framework_file:s0
+ 
+-# Keep Lineage feature permission XML out of untrusted app reach.
++# Keep Lineage build metadata and feature permission XML out of untrusted app reach.
++/(product|system/product)/etc/build-manifest\.xml u:object_r:lineage_permission_file:s0
++/system/etc/build_flags\.json u:object_r:lineage_permission_file:s0
++/(system_ext|system/system_ext)/etc/build_flags\.json u:object_r:lineage_permission_file:s0
++/(product|system/product)/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+ /(product|system/product)/etc/permissions/org\.lineageos\.settings\.xml u:object_r:lineage_permission_file:s0
+ /(product|system/product)/etc/permissions/org\.lineageos\.trust\.xml u:object_r:lineage_permission_file:s0
+ /(product|system/product)/etc/permissions/org\.lineageos\.profiles\.xml u:object_r:lineage_permission_file:s0
+diff --git a/common/vendor/file_contexts b/common/vendor/file_contexts
+index 3cf088c..c9504ff 100644
+--- a/common/vendor/file_contexts
++++ b/common/vendor/file_contexts
+@@ -4,6 +4,7 @@
+ # Keep vendor policy blob out of untrusted app reach.
+ /(vendor|system/vendor)/etc/selinux/vendor_sepolicy\.cil u:object_r:sepolicy_file:s0
+ /(vendor|system/vendor)/etc/selinux/vendor_file_contexts u:object_r:file_contexts_file:s0
++/(vendor|system/vendor)/etc/build_flags\.json u:object_r:vendor_file:s0
+ 
+ # Fingerprint HAL
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.biometrics\.fingerprint@2\.0-service u:object_r:hal_fingerprint_default_exec:s0
+-- 
+2.43.0
+

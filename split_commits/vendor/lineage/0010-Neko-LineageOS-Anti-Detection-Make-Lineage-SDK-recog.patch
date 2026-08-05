@@ -1,0 +1,44 @@
+From aad6a348b06d1d09a1043261bafdd1036707f61b Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 5 Aug 2026 22:12:38 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] Make Lineage SDK recognize
+ renamed framework resource
+
+Change-Id: I41f952bf56d468bb501c7618053567eb05a8c95d
+---
+ config/lineage_sdk_common.mk | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/config/lineage_sdk_common.mk b/config/lineage_sdk_common.mk
+index 7bb150e..d476bde 100644
+--- a/config/lineage_sdk_common.mk
++++ b/config/lineage_sdk_common.mk
+@@ -14,17 +14,22 @@ PRODUCT_PACKAGES += \
+     org.system.platform-res \
+     org.lineageos.platform
+ 
++# Keep the module name stable while installing the system server library under
++# a device-facing name that does not expose the LineageOS namespace.
++PRODUCT_CONFIGURED_JAR_LOCATION_OVERRIDES += \
++    platform:org.lineageos.platform:platform:miui-framework
++
+ # AOSP has no support of loading framework resources from /system_ext
+ # so the SDK has to stay in /system for now
+ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+     system/framework/org.lineageos.platform-res.apk \
+-    system/framework/org.lineageos.platform.jar
++    system/framework/miui-framework.jar
+ 
+ # Allow-list odex and vdex when OVERRIDE_DISABLE_DEXOPT_ALL isn't set.
+ # OVERRIDE_DISABLE_DEXOPT_ALL is usually set to true for eng builds. We allow-list the below mainly for user and userdebug builds.
+ # Refer build/target/product/runtime_libart.mk.
+ ifneq ($(OVERRIDE_DISABLE_DEXOPT_ALL),true)
+ PRODUCT_ARTIFACT_PATH_REQUIREMENT_ALLOWED_LIST += \
+-    system/framework/oat/%/org.lineageos.platform.odex \
+-    system/framework/oat/%/org.lineageos.platform.vdex
++    system/framework/oat/%/miui-framework.odex \
++    system/framework/oat/%/miui-framework.vdex
+ endif
+-- 
+2.43.0
+
