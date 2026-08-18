@@ -1,0 +1,187 @@
+From 92de52c00f68d759ec556bda49e49ccc2acd361f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 17 Aug 2026 15:43:48 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Refine play install source
+ spoof
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-by: Furkan Karcıoğlu <45714956+frknkrc44@users.noreply.github.com>
+Change-Id: I494c7d979129a28f0665b0551c446c6e77e98712
+---
+ .../com/android/server/pm/ComputerEngine.java | 97 ++++++++++++-------
+ 1 file changed, 61 insertions(+), 36 deletions(-)
+
+diff --git a/services/core/java/com/android/server/pm/ComputerEngine.java b/services/core/java/com/android/server/pm/ComputerEngine.java
+index 671dcc5e7..b5d06d42e 100644
+--- a/services/core/java/com/android/server/pm/ComputerEngine.java
++++ b/services/core/java/com/android/server/pm/ComputerEngine.java
+@@ -56,6 +56,7 @@ import static com.android.server.pm.PackageManagerService.DEBUG_PACKAGE_INFO;
+ import static com.android.server.pm.PackageManagerService.DEBUG_PREFERRED;
+ import static com.android.server.pm.PackageManagerService.EMPTY_INT_ARRAY;
+ import static com.android.server.pm.PackageManagerService.HIDE_EPHEMERAL_APIS;
++import static com.android.server.pm.PackageManagerService.PLATFORM_PACKAGE_NAME;
+ import static com.android.server.pm.PackageManagerService.TAG;
+ import static com.android.server.pm.PackageManagerServiceUtils.compareSignatureArrays;
+ import static com.android.server.pm.PackageManagerServiceUtils.compareSignatures;
+@@ -1536,6 +1537,24 @@ public class ComputerEngine implements Computer {
+         return Optional.of(fakeSignature);
+     }
+ 
++    private static Optional<SigningDetails> generateFakeSigningDetails(AndroidPackage p) {
++        final Optional<Signature> fakeSignature = generateFakeSignature(p);
++        if (fakeSignature.isEmpty()) {
++            return Optional.empty();
++        }
++        final Signature[] signatures = new Signature[]{fakeSignature.get()};
++        try {
++            return Optional.of(new SigningDetails(
++                    signatures,
++                    SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V3,
++                    SigningDetails.toSigningKeys(signatures),
++                    null));
++        } catch (CertificateException e) {
++            Slog.e(TAG, "Caught an exception when creating signing keys: ", e);
++            return Optional.empty();
++        }
++    }
++
+     public final PackageInfo generatePackageInfo(PackageStateInternal ps,
+             @PackageManager.PackageInfoFlagsBits long flags, int userId) {
+         if (!mUserManager.exists(userId)) return null;
+@@ -1600,20 +1619,9 @@ public class ComputerEngine implements Computer {
+                 }
+             }
+ 
+-            generateFakeSignature(p).ifPresent(fakeSignature -> {
+-                packageInfo.signatures = new Signature[]{fakeSignature};
+-                try {
+-                    packageInfo.signingInfo = new SigningInfo(
+-                            new SigningDetails(
+-                                    packageInfo.signatures,
+-                                    SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V3,
+-                                    SigningDetails.toSigningKeys(packageInfo.signatures),
+-                                    null
+-                            )
+-                    );
+-                } catch (CertificateException e) {
+-                    Slog.e(TAG, "Caught an exception when creating signing keys: ", e);
+-                }
++            generateFakeSigningDetails(p).ifPresent(fakeSigningDetails -> {
++                packageInfo.signatures = fakeSigningDetails.getSignatures();
++                packageInfo.signingInfo = new SigningInfo(fakeSigningDetails);
+             });
+ 
+             maybeApplyCompatibilitySignatureSpoofToPackageInfo(packageInfo, ps.getPackageName(),
+@@ -2712,11 +2720,25 @@ public class ComputerEngine implements Computer {
+         return packages;
+     }
+ 
+-    private boolean shouldSpoofAsPlayStoreInstallation(int callingUid) {
++    private boolean shouldSpoofAsPlayStoreInstallation(int callingUid,
++            @NonNull String targetPackageName) {
++        if (PLATFORM_PACKAGE_NAME.equals(targetPackageName)
++                || isApexPackage(targetPackageName)) {
++            return false;
++        }
++        final PackageStateInternal targetPs = mSettings.getPackage(targetPackageName);
++        if (targetPs == null || targetPs.isSystem() || targetPs.isUpdatedSystemApp()) {
++            return false;
++        }
+         if (isSystemOrRootOrShell(callingUid)) {
+             return false;
+         }
+         int resolvedCallingUid = callingUid;
++        // SDK sandbox processes inherit only their client app's spoof policy. Visibility and
++        // permission checks continue to use the original Binder calling UID at each query site.
++        if (Process.isSdkSandboxUid(resolvedCallingUid)) {
++            resolvedCallingUid = Process.getAppUidForSdkSandboxUid(resolvedCallingUid);
++        }
+         if (Process.isIsolated(resolvedCallingUid)) {
+             resolvedCallingUid = getIsolatedOwner(resolvedCallingUid);
+         }
+@@ -2747,23 +2769,28 @@ public class ComputerEngine implements Computer {
+     }
+ 
+     @NonNull
+-    private InstallSourceInfo buildSpoofedPlayStoreInstallSourceInfo() {
+-        return new InstallSourceInfo(
++    private InstallSource buildSpoofedPlayStoreInstallSource(@UserIdInt int userId) {
++        final PackageStateInternal ps = mSettings.getPackage(PLAY_STORE_PACKAGE_NAME);
++        final int installerUid = ps == null
++                ? INVALID_UID : UserHandle.getUid(userId, ps.getAppId());
++        InstallSource installSource = InstallSource.create(
+                 PLAY_STORE_PACKAGE_NAME,
+-                getPlayStoreSigningInfo(),
+                 PLAY_STORE_PACKAGE_NAME,
+                 PLAY_STORE_PACKAGE_NAME,
++                installerUid,
+                 PLAY_STORE_PACKAGE_NAME,
++                null /* installerAttributionTag */,
+                 PackageInstaller.PACKAGE_SOURCE_STORE);
+-    }
+-
+-    @Nullable
+-    private SigningInfo getPlayStoreSigningInfo() {
+-        final PackageStateInternal ps = mSettings.getPackage(PLAY_STORE_PACKAGE_NAME);
+-        if (ps == null || ps.getSigningDetails() == SigningDetails.UNKNOWN) {
+-            return null;
++        SigningDetails signingDetails = ps == null ? SigningDetails.UNKNOWN
++                : ps.getSigningDetails();
++        if (ps != null && ps.getPkg() != null) {
++            signingDetails = generateFakeSigningDetails(ps.getPkg()).orElse(signingDetails);
++        }
++        if (signingDetails != SigningDetails.UNKNOWN) {
++            installSource = installSource.setInitiatingPackageSignatures(
++                    new PackageSignatures(signingDetails));
+         }
+-        return new SigningInfo(ps.getSigningDetails());
++        return installSource;
+     }
+ 
+     /**
+@@ -5357,10 +5384,8 @@ public class ComputerEngine implements Computer {
+         if (installSource == null) {
+             throw new IllegalArgumentException("Unknown package: " + packageName);
+         }
+-        if (shouldSpoofAsPlayStoreInstallation(callingUid)) {
+-            return PLAY_STORE_PACKAGE_NAME;
+-        }
+-        String installerPackageName = installSource.mInstallerPackageName;
++        String installerPackageName = shouldSpoofAsPlayStoreInstallation(callingUid, packageName)
++                ? PLAY_STORE_PACKAGE_NAME : installSource.mInstallerPackageName;
+         if (installerPackageName != null) {
+             final PackageStateInternal ps = mSettings.getPackage(installerPackageName);
+             if (ps == null || shouldFilterApplicationIncludingUninstalledNotArchived(ps, callingUid,
+@@ -5402,13 +5427,13 @@ public class ComputerEngine implements Computer {
+         String originatingPackageName;
+         String updateOwnerPackageName;
+ 
+-        final InstallSource installSource = getInstallSource(packageName, callingUid, userId);
+-        if (installSource == null) {
++        final InstallSource storedInstallSource = getInstallSource(packageName, callingUid, userId);
++        if (storedInstallSource == null) {
+             return null;
+         }
+-        if (shouldSpoofAsPlayStoreInstallation(callingUid)) {
+-            return buildSpoofedPlayStoreInstallSourceInfo();
+-        }
++        final InstallSource installSource = shouldSpoofAsPlayStoreInstallation(
++                callingUid, packageName)
++                ? buildSpoofedPlayStoreInstallSource(userId) : storedInstallSource;
+ 
+         installerPackageName = installSource.mInstallerPackageName;
+         if (installerPackageName != null) {
+@@ -5772,7 +5797,7 @@ public class ComputerEngine implements Computer {
+         if (pkg == null) {
+             return false;
+         }
+-        if (shouldSpoofAsPlayStoreInstallation(callingUid)) {
++        if (shouldSpoofAsPlayStoreInstallation(callingUid, pkg.getPackageName())) {
+             final PackageStateInternal ps = getPackageStateInternal(PLAY_STORE_PACKAGE_NAME);
+             return ps != null && UserHandle.isSameApp(ps.getAppId(), callingUid);
+         }
+-- 
+2.43.0
+

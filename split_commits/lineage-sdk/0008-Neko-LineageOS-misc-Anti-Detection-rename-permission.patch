@@ -1,0 +1,25 @@
+From 16f4d1431f1eddb5c17cf3603b7b843b7ef33e8f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 7 Aug 2026 15:04:21 +0800
+Subject: [PATCH] Neko LineageOS: [misc][Anti-Detection] rename permission file
+
+Change-Id: Ida990f38da8f074e11de55aaf67dba806d130489
+---
+ sdk/src/java/lineageos/app/LineageContextConstants.java | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/sdk/src/java/lineageos/app/LineageContextConstants.java b/sdk/src/java/lineageos/app/LineageContextConstants.java
+index 3c9612a..ed0938c 100644
+--- a/sdk/src/java/lineageos/app/LineageContextConstants.java
++++ b/sdk/src/java/lineageos/app/LineageContextConstants.java
+@@ -155,6 +155,6 @@ public final class LineageContextConstants {
+          * utilized by the lineage sdk and LineageParts.
+          */
+         @SdkConstant(SdkConstant.SdkConstantType.FEATURE)
+-        public static final String PUSH_BROKER = "org.lineageos.push";
++        public static final String PUSH_BROKER = "com.android.pushbroker";
+     }
+ }
+-- 
+2.43.0
+

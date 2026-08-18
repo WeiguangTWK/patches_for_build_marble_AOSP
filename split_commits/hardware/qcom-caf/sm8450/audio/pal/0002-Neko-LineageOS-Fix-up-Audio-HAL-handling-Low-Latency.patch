@@ -1,0 +1,87 @@
+From 93872410ca331111cb65d6c651e138da4d7a39d5 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 17 Aug 2026 15:38:31 +0800
+Subject: [PATCH] Neko LineageOS: Fix up Audio HAL handling Low Latency Input
+
+Some game requires instance talking (e.g. VRChat) will attempt to use ULL record and failed with:
+No matching MIID found for tag: 0xc000000b, error:-22
+Tx session start is failed with status -22
+failed to start stream. ret=-22
+
+This commit fixes the issue
+
+Change-Id: I57146920dbb0a8f87954ef0c992599e0b3c1d3c0
+---
+ session/src/SessionAlsaPcm.cpp | 49 +++++++++++++++++-----------------
+ 1 file changed, 24 insertions(+), 25 deletions(-)
+
+diff --git a/session/src/SessionAlsaPcm.cpp b/session/src/SessionAlsaPcm.cpp
+index 7d0ec8b..354b4da 100644
+--- a/session/src/SessionAlsaPcm.cpp
++++ b/session/src/SessionAlsaPcm.cpp
+@@ -1192,33 +1192,33 @@ set_mixer:
+                                                    TAG_STREAM_MFC_SR, &miid);
+                        if (status != 0) {
+                            PAL_ERR(LOG_TAG, "getModuleInstanceId failed\n");
+-                           goto exit;
+-                       }
+-                       PAL_DBG(LOG_TAG, "ULL record, miid : %x id = %d\n", miid, pcmDevIds.at(0));
+-                       if (isPalPCMFormat(sAttr.in_media_config.aud_fmt_id))
+-                           streamData.bitWidth = ResourceManager::palFormatToBitwidthLookup(sAttr.in_media_config.aud_fmt_id);
+-                       else
+-                           streamData.bitWidth = sAttr.in_media_config.bit_width;
+-                       streamData.sampleRate = sAttr.in_media_config.sample_rate;
+-                       streamData.numChannel = sAttr.in_media_config.ch_info.channels;
+-                       streamData.rotation_type = PAL_SPEAKER_ROTATION_LR;
+-                       streamData.ch_info = nullptr;
+-                       builder->payloadMFCConfig(&payload, &payloadSize, miid, &streamData);
+-                       if (payloadSize && payload) {
+-                           status = updateCustomPayload(payload, payloadSize);
+-                           freeCustomPayload(&payload, &payloadSize);
+-                           if (0 != status) {
+-                               PAL_ERR(LOG_TAG, "updateCustomPayload Failed\n");
++                       } else {
++                           PAL_DBG(LOG_TAG, "ULL record, miid : %x id = %d\n", miid, pcmDevIds.at(0));
++                           if (isPalPCMFormat(sAttr.in_media_config.aud_fmt_id))
++                               streamData.bitWidth = ResourceManager::palFormatToBitwidthLookup(sAttr.in_media_config.aud_fmt_id);
++                           else
++                               streamData.bitWidth = sAttr.in_media_config.bit_width;
++                           streamData.sampleRate = sAttr.in_media_config.sample_rate;
++                           streamData.numChannel = sAttr.in_media_config.ch_info.channels;
++                           streamData.rotation_type = PAL_SPEAKER_ROTATION_LR;
++                           streamData.ch_info = nullptr;
++                           builder->payloadMFCConfig(&payload, &payloadSize, miid, &streamData);
++                           if (payloadSize && payload) {
++                               status = updateCustomPayload(payload, payloadSize);
++                               freeCustomPayload(&payload, &payloadSize);
++                               if (0 != status) {
++                                   PAL_ERR(LOG_TAG, "updateCustomPayload Failed\n");
++                                   goto exit;
++                               }
++                           }
++                           status = SessionAlsaUtils::setMixerParameter(mixer, pcmDevIds.at(0),
++                                                            customPayload, customPayloadSize);
++                           freeCustomPayload();
++                           if (status != 0) {
++                               PAL_ERR(LOG_TAG, "setMixerParameter failed");
+                                goto exit;
+                            }
+                        }
+-                       status = SessionAlsaUtils::setMixerParameter(mixer, pcmDevIds.at(0),
+-                                                        customPayload, customPayloadSize);
+-                       freeCustomPayload();
+-                       if (status != 0) {
+-                           PAL_ERR(LOG_TAG, "setMixerParameter failed");
+-                           goto exit;
+-                       }
+             }
+             if (ResourceManager::isLpiLoggingEnabled()) {
+                 PAL_INFO(LOG_TAG, "LPI data logging Param ON");
+@@ -3366,4 +3366,3 @@ exit:
+     PAL_DBG(LOG_TAG, "Exit status: %d", status);
+     return status;
+ }
+-
+-- 
+2.43.0
+

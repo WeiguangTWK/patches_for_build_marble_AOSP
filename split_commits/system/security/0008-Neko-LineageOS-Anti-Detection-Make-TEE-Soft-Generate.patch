@@ -1,0 +1,328 @@
+From fe9831bcb4f2a614b790ae374a11a2bb170b1992 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 15 Aug 2026 18:26:55 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Make TEE Soft Generate mode
+ fully software-owned
+
+Treat Generate as a complete software TEE persona instead of allowing
+its attestation path to depend on RKP availability.
+
+Bypass RKP when no explicit attestation key is supplied. Continue to
+load explicit ATTEST_KEY descriptors so their provenance can be
+validated, but only accept keys owned by the software TEE persona.
+Reject RKP and hardware-backed ATTEST_KEYs with INVALID_ARGUMENT and
+never fall back to hardware generation when the software path fails.
+
+Separate the public KeyEntry security-level UUID from the KeyMint UUID
+that owns the blob. Keep generated keys attached to the genuine TEE
+proxy while recording the SOFTWARE UUID only in blob metadata for
+internal operation and ATTEST_KEY routing.
+
+Recover keys written by the previous single-UUID implementation through
+an on-demand cached software proxy, while continuing to report them as
+TRUSTED_ENVIRONMENT. This keeps persistent ATTEST_KEYs usable across
+reboots without exposing the internal SOFTWARE backend.
+
+Change-Id: I949b023510493c9c5d1c015d807e142ce980fd9a
+---
+ keystore2/src/security_level.rs | 56 ++++++++++++++++++++++++---------
+ keystore2/src/service.rs        | 53 +++++++++++++++++++++++++------
+ keystore2/src/tee_soft_debug.rs | 14 +++++++++
+ 3 files changed, 98 insertions(+), 25 deletions(-)
+
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index 1855af7..6f6a38b 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -94,7 +94,11 @@ pub struct KeystoreSecurityLevel {
+ 
+ struct KeyStorageContext<'a> {
+     security_level: SecurityLevel,
+-    km_uuid: Uuid,
++    /// Keystore security-level proxy exposed to clients for this key.
++    key_entry_km_uuid: Uuid,
++    /// KeyMint backend which owns the stored blob. This may differ from the public proxy for the
++    /// software-backed TEE persona.
++    blob_km_uuid: Uuid,
+     tee_soft_attest_key_metadata: Option<&'a TeeSoftAttestKeyMetadata>,
+ }
+ 
+@@ -198,7 +202,8 @@ impl KeystoreSecurityLevel {
+             flags,
+             KeyStorageContext {
+                 security_level: self.security_level,
+-                km_uuid: self.km_uuid,
++                key_entry_km_uuid: self.km_uuid,
++                blob_km_uuid: self.km_uuid,
+                 tee_soft_attest_key_metadata: None,
+             },
+         )
+@@ -281,7 +286,7 @@ impl KeystoreSecurityLevel {
+                     if let Some(tee_soft_metadata) = storage.tee_soft_attest_key_metadata {
+                         tee_soft_metadata.add_to_key_metadata(&mut key_metadata);
+                     }
+-                    blob_metadata.add(BlobMetaEntry::KmUuid(storage.km_uuid));
++                    blob_metadata.add(BlobMetaEntry::KmUuid(storage.blob_km_uuid));
+ 
+                     let key_id = db
+                         .store_new_key(
+@@ -291,7 +296,7 @@ impl KeystoreSecurityLevel {
+                             &BlobInfo::new(&key_blob, &blob_metadata),
+                             &cert_info,
+                             &key_metadata,
+-                            &storage.km_uuid,
++                            &storage.key_entry_km_uuid,
+                         )
+                         .context(ks_err!())?;
+                     Ok(KeyDescriptor {
+@@ -721,7 +726,8 @@ impl KeystoreSecurityLevel {
+         check_key_permission(KeyPerm::Rebind, &key, &None).context(ks_err!())?;
+ 
+         let generation_policy = generation_policy_for_uid(caller_uid, params, self.security_level);
+-        let prefer_local_attest_key_flow = generation_policy.auto_requests_software()
++        let prefer_local_attest_key_flow = generation_policy
++            .bypasses_rkp(attest_key_descriptor.is_some())
+             || should_prefer_local_attest_key_flow_for_uid(
+                 caller_uid,
+                 params,
+@@ -764,6 +770,23 @@ impl KeystoreSecurityLevel {
+             }
+             _ => None,
+         };
++        if generation_policy == TeeSoftDebugGenerationPolicy::Generate {
++            match &attestation_key_info {
++                Some(AttestationKeyInfo::RkpdProvisioned { .. }) => {
++                    return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT)).context(ks_err!(
++                        "Generate mode must not use a remotely provisioned attestation key"
++                    ));
++                }
++                Some(AttestationKeyInfo::UserGenerated { blob_metadata, .. })
++                    if blob_metadata.km_uuid().copied() != Some(SecurityLevel::SOFTWARE.into()) =>
++                {
++                    return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT)).context(ks_err!(
++                        "Generate mode requires an ATTEST_KEY owned by the software TEE persona"
++                    ));
++                }
++                _ => {}
++            }
++        }
+         let uses_tracked_attest_key = persisted_attest_key.is_some();
+         let requested_software_generation = generation_policy.requests_software();
+         let use_software_generation = generation_policy.auto_requests_software()
+@@ -826,19 +849,12 @@ impl KeystoreSecurityLevel {
+                     effective_generation_km_uuid = km_uuid;
+                     Some(Ok(result))
+                 }
+-                Err(e) if generation_policy == TeeSoftDebugGenerationPolicy::Generate => {
+-                    warn!(
+-                        "tee soft debug: SOFTWARE KeyMint unavailable in Generate mode; preserving legacy hardware fallback for uid={:?}: {:?}",
+-                        caller_uid, e
+-                    );
+-                    None
+-                }
+                 Err(e) => Some(Err(e)),
+             }
+         } else {
+             if requested_software_generation {
+                 info!(
+-                    "tee soft debug: Generate mode deferred to the original path because an external attestation key is involved, uid={:?}, alias={:?}",
++                    "tee soft debug: Generate mode using the explicitly supplied software ATTEST_KEY path, uid={:?}, alias={:?}",
+                     caller_uid, key.alias
+                 );
+             }
+@@ -884,6 +900,11 @@ impl KeystoreSecurityLevel {
+                                 (dev, hw_info.versionNumber)
+                             }
+                             Err(e) => {
++                                if generation_policy == TeeSoftDebugGenerationPolicy::Generate {
++                                    return Err(e).context(ks_err!(
++                                        "Generate mode could not resolve the software ATTEST_KEY device"
++                                    ));
++                                }
+                                 error!(
+                                     "Failed to resolve keymint by uuid {:?} for user-generated attest key, fallback to current security level: {:?}",
+                                     km_uuid, e
+@@ -1083,9 +1104,10 @@ impl KeystoreSecurityLevel {
+ 
+         let user = caller_uid.owning_user();
+         info!(
+-            "tee soft debug: storing generated key alias={:?} with effective sec_level={:?}, km_uuid={:?}, used_software_generation={}",
++            "tee soft debug: storing generated key alias={:?} with effective sec_level={:?}, key_entry_km_uuid={:?}, blob_km_uuid={:?}, used_software_generation={}",
+             key.alias,
+             effective_generation_security_level,
++            self.km_uuid,
+             effective_generation_km_uuid,
+             used_software_generation
+         );
+@@ -1096,7 +1118,11 @@ impl KeystoreSecurityLevel {
+             Some(flags),
+             KeyStorageContext {
+                 security_level: effective_generation_security_level,
+-                km_uuid: effective_generation_km_uuid,
++                // Generate presents a TEE persona even when the blob is owned by the internal
++                // SOFTWARE KeyMint. Keep the public KeyEntry on the security-level proxy through
++                // which this request arrived, and route operations using blob metadata.
++                key_entry_km_uuid: self.km_uuid,
++                blob_km_uuid: effective_generation_km_uuid,
+                 tee_soft_attest_key_metadata: new_attest_key_metadata.as_ref(),
+             },
+         )
+diff --git a/keystore2/src/service.rs b/keystore2/src/service.rs
+index 740c235..7e3ad24 100644
+--- a/keystore2/src/service.rs
++++ b/keystore2/src/service.rs
+@@ -16,6 +16,7 @@
+ //! AIDL spec.
+ 
+ use std::collections::HashMap;
++use std::sync::RwLock;
+ 
+ use crate::audit_log::log_key_deleted;
+ use crate::ks_err;
+@@ -59,11 +60,11 @@ use keystore2_selinux as selinux;
+ use log::{error, info};
+ 
+ /// Implementation of the IKeystoreService.
+-#[derive(Default)]
+ pub struct KeystoreService {
+-    i_sec_level_by_uuid: HashMap<Uuid, Strong<dyn IKeystoreSecurityLevel>>,
++    i_sec_level_by_uuid: RwLock<HashMap<Uuid, Strong<dyn IKeystoreSecurityLevel>>>,
+     uuid_by_sec_level: HashMap<SecurityLevel, Uuid>,
+     reported_sec_level_by_uuid: HashMap<Uuid, SecurityLevel>,
++    id_rotation_state: IdRotationState,
+ }
+ 
+ impl KeystoreService {
+@@ -71,7 +72,12 @@ impl KeystoreService {
+     pub fn new_native_binder(
+         id_rotation_state: IdRotationState,
+     ) -> Result<Strong<dyn IKeystoreService>> {
+-        let mut result: Self = Default::default();
++        let mut result = Self {
++            i_sec_level_by_uuid: RwLock::new(HashMap::new()),
++            uuid_by_sec_level: HashMap::new(),
++            reported_sec_level_by_uuid: HashMap::new(),
++            id_rotation_state: id_rotation_state.clone(),
++        };
+         let (dev, uuid, _reported_sec_level) = match KeystoreSecurityLevel::new_native_binder(
+             SecurityLevel::TRUSTED_ENVIRONMENT,
+             id_rotation_state.clone(),
+@@ -84,7 +90,7 @@ impl KeystoreService {
+             }
+         };
+ 
+-        result.i_sec_level_by_uuid.insert(uuid, dev);
++        result.i_sec_level_by_uuid.get_mut().unwrap().insert(uuid, dev);
+         result.uuid_by_sec_level.insert(SecurityLevel::TRUSTED_ENVIRONMENT, uuid);
+ 
+         // Strongbox is optional, so we ignore errors and turn the result into an Option.
+@@ -92,7 +98,7 @@ impl KeystoreService {
+             SecurityLevel::STRONGBOX,
+             id_rotation_state.clone(),
+         ) {
+-            result.i_sec_level_by_uuid.insert(uuid, dev);
++            result.i_sec_level_by_uuid.get_mut().unwrap().insert(uuid, dev);
+             result.uuid_by_sec_level.insert(SecurityLevel::STRONGBOX, uuid);
+         }
+ 
+@@ -104,7 +110,7 @@ impl KeystoreService {
+             SecurityLevel::SOFTWARE,
+             id_rotation_state.clone(),
+         ) {
+-            result.i_sec_level_by_uuid.insert(uuid, dev);
++            result.i_sec_level_by_uuid.get_mut().unwrap().insert(uuid, dev);
+             result.reported_sec_level_by_uuid.insert(uuid, reported_sec_level);
+         }
+ 
+@@ -122,6 +128,12 @@ impl KeystoreService {
+     }
+ 
+     fn uuid_to_reported_sec_level(&self, uuid: &Uuid) -> SecurityLevel {
++        // SOFTWARE is an internal backend selector for the TEE Soft persona, not a public
++        // Keystore security level. This also keeps keys written by the earlier single-UUID
++        // implementation coherent while they are naturally replaced or deleted.
++        if *uuid == SecurityLevel::SOFTWARE.into() {
++            return SecurityLevel::TRUSTED_ENVIRONMENT;
++        }
+         self.reported_sec_level_by_uuid.get(uuid).copied().unwrap_or_else(|| {
+             self.uuid_by_sec_level
+                 .iter()
+@@ -132,8 +144,29 @@ impl KeystoreService {
+     }
+ 
+     fn get_i_sec_level_by_uuid(&self, uuid: &Uuid) -> Result<Strong<dyn IKeystoreSecurityLevel>> {
+-        if let Some(dev) = self.i_sec_level_by_uuid.get(uuid) {
+-            Ok(dev.clone())
++        let cached = self.i_sec_level_by_uuid.read().unwrap().get(uuid).cloned();
++        if let Some(dev) = cached {
++            Ok(dev)
++        } else if *uuid == SecurityLevel::SOFTWARE.into() {
++            // Compatibility for TEE Soft keys produced before public proxy UUID and blob routing
++            // UUID were separated. SOFTWARE registration is optional during early service startup
++            // and may race the compat service, so retry it on demand instead of making existing
++            // persistent keys unreadable for the rest of the boot.
++            let (dev, resolved_uuid, _) = KeystoreSecurityLevel::new_native_binder(
++                SecurityLevel::SOFTWARE,
++                self.id_rotation_state.clone(),
++            )
++            .context(ks_err!("Trying to construct legacy TEE Soft security level proxy."))?;
++            if resolved_uuid != *uuid {
++                return Err(error::Error::sys()).context(ks_err!(
++                    "TEE Soft security level resolved to an unexpected KeyMint UUID."
++                ));
++            }
++            info!(
++                "tee soft debug: recovered legacy SOFTWARE-backed key through an on-demand proxy"
++            );
++            let mut devices = self.i_sec_level_by_uuid.write().unwrap();
++            Ok(devices.entry(*uuid).or_insert(dev).clone())
+         } else {
+             Err(error::Error::sys()).context(ks_err!("KeyMint instance for key not found."))
+         }
+@@ -146,9 +179,9 @@ impl KeystoreService {
+         if let Some(dev) = self
+             .uuid_by_sec_level
+             .get(&sec_level)
+-            .and_then(|uuid| self.i_sec_level_by_uuid.get(uuid))
++            .and_then(|uuid| self.i_sec_level_by_uuid.read().unwrap().get(uuid).cloned())
+         {
+-            Ok(dev.clone())
++            Ok(dev)
+         } else {
+             Err(error::Error::Km(ErrorCode::HARDWARE_TYPE_UNAVAILABLE))
+                 .context(ks_err!("No such security level."))
+diff --git a/keystore2/src/tee_soft_debug.rs b/keystore2/src/tee_soft_debug.rs
+index 4558dfe..1cbd0c6 100644
+--- a/keystore2/src/tee_soft_debug.rs
++++ b/keystore2/src/tee_soft_debug.rs
+@@ -85,6 +85,12 @@ impl TeeSoftDebugGenerationPolicy {
+     pub(crate) fn auto_requests_software(self) -> bool {
+         matches!(self, Self::AutoSoftwareMgf1 | Self::AutoSoftwareTeeUnavailable)
+     }
++
++    /// Generate owns the complete attestation path and must not consume an RKP key. An explicit
++    /// user ATTEST_KEY still has to be loaded so its software provenance can be validated.
++    pub(crate) fn bypasses_rkp(self, has_explicit_attest_key: bool) -> bool {
++        self.auto_requests_software() || (self == Self::Generate && !has_explicit_attest_key)
++    }
+ }
+ 
+ #[derive(Debug)]
+@@ -1640,6 +1646,14 @@ mod tests {
+         assert_eq!(params, original_params);
+     }
+ 
++    #[test]
++    fn generate_bypasses_rkp_but_not_an_explicit_attest_key() {
++        assert!(TeeSoftDebugGenerationPolicy::Generate.bypasses_rkp(false));
++        assert!(!TeeSoftDebugGenerationPolicy::Generate.bypasses_rkp(true));
++        assert!(!TeeSoftDebugGenerationPolicy::Patch.bypasses_rkp(false));
++        assert!(!TeeSoftDebugGenerationPolicy::AutoHardware.bypasses_rkp(false));
++    }
++
+     #[test]
+     fn attest_key_metadata_round_trips_byte_identically() {
+         let state = TeeSoftAttestKeyMetadata {
+-- 
+2.43.0
+

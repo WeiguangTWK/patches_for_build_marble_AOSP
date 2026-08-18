@@ -1,0 +1,91 @@
+From 3b9927b9ae8682b1751fd55222643303f4dbf96d Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sun, 16 Aug 2026 08:30:47 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Fix VINTF version mismatch
+ in Generate mode
+
+In generate mode in previous release of TEE Soft Emu, it will report Keymint 4.0 when actual HW Keymint ver is 1.0,
+causing detection (e.g. Duck Detector)
+
+Change-Id: I3cfb5f28b8e3bc7168d7e3d7f4d4d214e2335546
+---
+ ng/AndroidKeyMintDevice.cpp       | 18 +++++++++++++++++-
+ ng/include/AndroidKeyMintDevice.h | 10 ++++++++++
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/ng/AndroidKeyMintDevice.cpp b/ng/AndroidKeyMintDevice.cpp
+index e04ac7f..6527fce 100644
+--- a/ng/AndroidKeyMintDevice.cpp
++++ b/ng/AndroidKeyMintDevice.cpp
+@@ -226,10 +226,17 @@ AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoft
+ AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
+                                            const vector<uint8_t>& fallbackVerifiedBootKey,
+                                            const vector<uint8_t>& fallbackVerifiedBootHash)
++    : AndroidKeyMintDevice(securityLevel, bootMode, fallbackVerifiedBootKey,
++                           fallbackVerifiedBootHash, KmVersion::KEYMINT_4) {}
++
++AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
++                                           const vector<uint8_t>& fallbackVerifiedBootKey,
++                                           const vector<uint8_t>& fallbackVerifiedBootHash,
++                                           KmVersion keyMintVersion)
+     : impl_(new(std::nothrow)::keymaster::AndroidKeymaster(
+           [&]() -> auto {
+               auto context = new (std::nothrow) PureSoftKeymasterContext(
+-                  KmVersion::KEYMINT_4, static_cast<keymaster_security_level_t>(securityLevel));
++                  keyMintVersion, static_cast<keymaster_security_level_t>(securityLevel));
+               context->SetSystemVersion(::keymaster::GetOsVersion(),
+                                         ::keymaster::GetOsPatchlevel());
+               context->SetVendorPatchlevel(::keymaster::GetVendorPatchlevel());
+@@ -551,6 +558,15 @@ CreateKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
+         securityLevel, bootMode, fallbackVerifiedBootKey, fallbackVerifiedBootHash);
+ }
+ 
++std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel,
++                                                    PureSoftBootMode bootMode,
++                                                    const vector<uint8_t>& fallbackVerifiedBootKey,
++                                                    const vector<uint8_t>& fallbackVerifiedBootHash,
++                                                    KmVersion keyMintVersion) {
++    return ndk::SharedRefBase::make<AndroidKeyMintDevice>(
++        securityLevel, bootMode, fallbackVerifiedBootKey, fallbackVerifiedBootHash, keyMintVersion);
++}
++
+ std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel) {
+     return ndk::SharedRefBase::make<AndroidKeyMintDevice>(securityLevel);
+ }
+diff --git a/ng/include/AndroidKeyMintDevice.h b/ng/include/AndroidKeyMintDevice.h
+index 295243e..4e680de 100644
+--- a/ng/include/AndroidKeyMintDevice.h
++++ b/ng/include/AndroidKeyMintDevice.h
+@@ -19,6 +19,7 @@
+ #include <aidl/android/hardware/security/keymint/BnKeyMintDevice.h>
+ #include <aidl/android/hardware/security/keymint/BnKeyMintOperation.h>
+ #include <aidl/android/hardware/security/keymint/HardwareAuthToken.h>
++#include <keymaster/km_version.h>
+ 
+ namespace keymaster {
+ class AndroidKeymaster;
+@@ -45,6 +46,10 @@ class AndroidKeyMintDevice : public BnKeyMintDevice {
+     AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
+                          const vector<uint8_t>& fallbackVerifiedBootKey,
+                          const vector<uint8_t>& fallbackVerifiedBootHash);
++    AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
++                         const vector<uint8_t>& fallbackVerifiedBootKey,
++                         const vector<uint8_t>& fallbackVerifiedBootHash,
++                         ::keymaster::KmVersion keyMintVersion);
+     virtual ~AndroidKeyMintDevice();
+ 
+     ScopedAStatus getHardwareInfo(KeyMintHardwareInfo* info) override;
+@@ -113,5 +118,10 @@ std::shared_ptr<IKeyMintDevice>
+ CreateKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
+                     const vector<uint8_t>& fallbackVerifiedBootKey,
+                     const vector<uint8_t>& fallbackVerifiedBootHash);
++std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel,
++                                                    PureSoftBootMode bootMode,
++                                                    const vector<uint8_t>& fallbackVerifiedBootKey,
++                                                    const vector<uint8_t>& fallbackVerifiedBootHash,
++                                                    ::keymaster::KmVersion keyMintVersion);
+ 
+ }  // namespace aidl::android::hardware::security::keymint
+-- 
+2.43.0
+

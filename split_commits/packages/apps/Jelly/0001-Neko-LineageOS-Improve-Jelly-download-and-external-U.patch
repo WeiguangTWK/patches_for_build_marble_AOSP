@@ -1,0 +1,212 @@
+From 6de9f01eabe9801ab1bfea0bb54b597ba4c95a22 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 17 Aug 2026 17:25:39 +0800
+Subject: [PATCH] Neko LineageOS: Improve Jelly download and external URL
+ handling
+
+Use the platform RFC 6266 filename parser to correctly handle encoded
+and extended Content-Disposition filenames.
+
+Honor HTTP(S) browser fallback URLs from intent URIs. Consume unhandled
+external protocol navigations so the current page remains active and
+can run its delayed download fallback instead of showing
+ERR_UNKNOWN_URL_SCHEME.
+
+Change-Id: Ibd004a168db91c4fe02874e1aaff0a43212a17ed
+---
+ .../org/lineageos/jelly/utils/UrlUtils.kt     | 88 +------------------
+ .../org/lineageos/jelly/webview/WebClient.kt  | 36 +++++++-
+ 2 files changed, 36 insertions(+), 88 deletions(-)
+
+diff --git a/app/src/main/java/org/lineageos/jelly/utils/UrlUtils.kt b/app/src/main/java/org/lineageos/jelly/utils/UrlUtils.kt
+index 9138466..0ca5813 100644
+--- a/app/src/main/java/org/lineageos/jelly/utils/UrlUtils.kt
++++ b/app/src/main/java/org/lineageos/jelly/utils/UrlUtils.kt
+@@ -6,9 +6,7 @@
+ 
+ package org.lineageos.jelly.utils
+ 
+-import android.net.Uri
+ import android.util.Patterns
+-import android.webkit.MimeTypeMap
+ import android.webkit.URLUtil
+ import java.util.Locale
+ import java.util.regex.Pattern
+@@ -61,30 +59,6 @@ object UrlUtils {
+     fun getFormattedUri(templateUri: String?, query: String?) =
+         URLUtil.composeSearchUrl(query, templateUri, "{searchTerms}")!!
+ 
+-    /** Regex used to parse content-disposition headers */
+-    private val CONTENT_DISPOSITION_PATTERN = Pattern.compile(
+-        "attachment;\\s*filename\\s*=\\s*(\"?)([^\"]*)\\1\\s*$",
+-        Pattern.CASE_INSENSITIVE
+-    )
+-
+-    /**
+-     * Parse the Content-Disposition HTTP Header. The format of the header
+-     * is defined here: http://www.w3.org/Protocols/rfc2616/rfc2616-sec19.html
+-     * This header provides a filename for content that is going to be
+-     * downloaded to the file system. We only support the attachment type.
+-     * Note that RFC 2616 specifies the filename value must be double-quoted.
+-     * Unfortunately some servers do not quote the value so to maintain
+-     * consistent behaviour with other browsers, we allow unquoted values too.
+-     */
+-    private fun parseContentDisposition(contentDisposition: String) = runCatching {
+-        val m = CONTENT_DISPOSITION_PATTERN.matcher(contentDisposition)
+-        if (m.find()) {
+-            return@runCatching m.group(2)
+-        }
+-
+-        return@runCatching null
+-    }.getOrNull()
+-
+     /**
+      * Guesses canonical filename that a download would have, using
+      * the URL and contentDisposition. File extension, if not defined,
+@@ -99,65 +73,5 @@ object UrlUtils {
+         url: String?,
+         contentDisposition: String?,
+         mimeType: String?
+-    ): String {
+-        var tempFilename: String? = null
+-        var extension: String? = null
+-
+-        // If we couldn't do anything with the hint, move toward the content disposition
+-        contentDisposition?.let { disposition ->
+-            tempFilename = parseContentDisposition(disposition)
+-            tempFilename?.let {
+-                val index = it.lastIndexOf('/') + 1
+-                if (index > 0) {
+-                    tempFilename = it.substring(index)
+-                }
+-            }
+-        }
+-
+-        // If all the other http-related approaches failed, use the plain uri
+-        if (tempFilename == null) {
+-            runCatching { Uri.parse(url) }.getOrNull()?.let {
+-                tempFilename = it.lastPathSegment
+-            }
+-        }
+-
+-        // Finally, if couldn't get filename from URI, get a generic filename
+-        var filename = tempFilename ?: "downloadfile"
+-
+-        // Split filename between base and extension
+-        // Add an extension if filename does not have one
+-        val dotIndex = filename.indexOf('.')
+-        if (dotIndex < 0) {
+-            mimeType?.let {
+-                extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(it)
+-            }
+-            extension = extension ?: mimeType?.let {
+-                if (it.lowercase().startsWith("text/")) {
+-                    if (it.equals("text/html", ignoreCase = true)) {
+-                        "html"
+-                    } else {
+-                        "txt"
+-                    }
+-                } else {
+-                    "bin"
+-                }
+-            }
+-        } else {
+-            mimeType?.takeUnless { it == "application/octet-stream" }.let { type ->
+-                // Compare the last segment of the extension against the mime type.
+-                // If there's a mismatch, discard the entire extension.
+-                val lastDotIndex = filename.lastIndexOf('.')
+-                val typeFromExt = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+-                    filename.substring(lastDotIndex + 1)
+-                )
+-                typeFromExt?.takeIf { !typeFromExt.equals(type, ignoreCase = true) }?.let {
+-                    extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(type)
+-                }
+-            }
+-            extension = extension ?: filename.substring(dotIndex + 1)
+-            filename = filename.substring(0, dotIndex)
+-        }
+-
+-        return "${filename}.${extension}"
+-    }
++    ): String = URLUtil.guessFileName(url.orEmpty(), contentDisposition, mimeType)
+ }
+diff --git a/app/src/main/java/org/lineageos/jelly/webview/WebClient.kt b/app/src/main/java/org/lineageos/jelly/webview/WebClient.kt
+index 21dc229..a9ec8c7 100644
+--- a/app/src/main/java/org/lineageos/jelly/webview/WebClient.kt
++++ b/app/src/main/java/org/lineageos/jelly/webview/WebClient.kt
+@@ -45,6 +45,10 @@ internal class WebClient(
+     private val context: Context,
+     private val urlBarLayout: UrlBarLayout,
+ ) : WebViewClient() {
++    companion object {
++        private const val EXTRA_BROWSER_FALLBACK_URL = "browser_fallback_url"
++    }
++
+     private val scripts by lazy {
+         val mediaSessionAPI = AssetLoader.loadAsset(
+             context.resources,
+@@ -85,6 +89,17 @@ internal class WebClient(
+             val url = request.url.toString()
+             val needsLookup = (request.hasGesture()
+                     || !TextUtils.equals(url, webViewExt.lastLoadedUrl))
++            val isAcceptedUrl = UrlUtils.ACCEPTED_URI_SCHEMA.matcher(url).matches()
++
++            if (!isAcceptedUrl) {
++                if (!webViewExt.isIncognito && needsLookup) {
++                    startActivityForUrl(view, url)
++                }
++                // Never ask WebView to load an external protocol. If no app handles it, keeping
++                // the current document alive allows the site's delayed web fallback to run.
++                return true
++            }
++
+             if (!webViewExt.isIncognito
+                 && needsLookup
+                 && startActivityForUrl(view, url)
+@@ -138,6 +153,11 @@ internal class WebClient(
+         intent.addCategory(Intent.CATEGORY_BROWSABLE)
+         intent.component = null
+         intent.selector = null
++        val fallbackUrl = intent.getStringExtra(EXTRA_BROWSER_FALLBACK_URL)
++            ?.let(Uri::parse)
++            ?.takeIf { it.scheme.equals("http", true) || it.scheme.equals("https", true) }
++        // This extra is browser-only metadata and must not be exposed to another app.
++        intent.removeExtra(EXTRA_BROWSER_FALLBACK_URL)
+         val m = UrlUtils.ACCEPTED_URI_SCHEMA.matcher(url)
+         if (m.matches()) {
+             // If there only are browsers for this URL, handle it ourselves
+@@ -150,16 +170,30 @@ internal class WebClient(
+                 context.packageManager.resolveActivity(intent, 0)
+             }
+             if (packageName != null && resolveInfo == null) {
+-                // Explicit intent, but app is not installed - try to redirect to Play Store
++                // intent:// URLs can tell the browser where to continue when their app is absent.
++                // Loading that URL also lets the site choose its own store or direct download.
++                if (fallbackUrl != null) {
++                    view.loadUrl(fallbackUrl.toString())
++                    return true
++                }
++
++                // Explicit intent without a web fallback: try the app store.
+                 val storeUri = Uri.parse("market://search?q=pname:$packageName")
+                 intent = Intent(Intent.ACTION_VIEW, storeUri)
+                     .addCategory(Intent.CATEGORY_BROWSABLE)
++            } else if (resolveInfo == null && fallbackUrl != null) {
++                view.loadUrl(fallbackUrl.toString())
++                return true
+             }
+         }
+         try {
+             context.startActivity(intent)
+             return true
+         } catch (e: ActivityNotFoundException) {
++            if (fallbackUrl != null) {
++                view.loadUrl(fallbackUrl.toString())
++                return true
++            }
+             Snackbar.make(
+                 view, context.getString(R.string.error_no_activity_found),
+                 Snackbar.LENGTH_LONG
+-- 
+2.43.0
+

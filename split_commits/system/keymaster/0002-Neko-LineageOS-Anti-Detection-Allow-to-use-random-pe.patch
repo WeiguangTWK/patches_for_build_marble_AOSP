@@ -1,0 +1,118 @@
+From b48deba8b59f4877a5c3239de5b09a04a5182900 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 15 Aug 2026 12:28:24 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Allow to use random &
+ persistent vbmeta diggest when AVB is disabled
+
+Change-Id: I4392df8d20fefeee50af11a82e2764832e60660c
+---
+ ng/AndroidKeyMintDevice.cpp       | 45 ++++++++++++++++++++++++-------
+ ng/include/AndroidKeyMintDevice.h |  7 +++++
+ 2 files changed, 42 insertions(+), 10 deletions(-)
+
+diff --git a/ng/AndroidKeyMintDevice.cpp b/ng/AndroidKeyMintDevice.cpp
+index 450511b..e04ac7f 100644
+--- a/ng/AndroidKeyMintDevice.cpp
++++ b/ng/AndroidKeyMintDevice.cpp
+@@ -16,6 +16,9 @@
+ 
+ #define LOG_TAG "android.hardware.security.keymint-impl"
+ #include <android-base/logging.h>
++#include <openssl/sha.h>
++
++#include <algorithm>
+ 
+ #include "AndroidKeyMintDevice.h"
+ 
+@@ -218,6 +221,11 @@ AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel)
+     : AndroidKeyMintDevice(securityLevel, PureSoftBootMode::USE_SYSTEM_STATE) {}
+ 
+ AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode)
++    : AndroidKeyMintDevice(securityLevel, bootMode, {}, {}) {}
++
++AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
++                                           const vector<uint8_t>& fallbackVerifiedBootKey,
++                                           const vector<uint8_t>& fallbackVerifiedBootHash)
+     : impl_(new(std::nothrow)::keymaster::AndroidKeymaster(
+           [&]() -> auto {
+               auto context = new (std::nothrow) PureSoftKeymasterContext(
+@@ -231,18 +239,27 @@ AndroidKeyMintDevice::AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoft
+               // of the month as day field.
+               context->SetBootPatchlevel(GetOsPatchlevel() * 100 + 1);
+               auto digest = ::keymaster::GetVbmetaDigest();
+-              if (digest) {
+-                  const bool forceVerifiedLocked =
+-                          bootMode == PureSoftBootMode::VERIFIED_LOCKED;
+-                  std::string bootState = forceVerifiedLocked
+-                          ? "green"
+-                          : ::keymaster::GetVerifiedBootState();
+-                  std::string bootloaderState = forceVerifiedLocked
+-                          ? "locked"
+-                          : ::keymaster::GetBootloaderState();
++              const auto isUsableDigest = [](const vector<uint8_t>& value) {
++                  return value.size() == SHA256_DIGEST_LENGTH &&
++                         !std::all_of(value.begin(), value.end(),
++                                      [](uint8_t byte) { return byte == 0; });
++              };
++              if ((!digest || !isUsableDigest(*digest)) &&
++                  isUsableDigest(fallbackVerifiedBootHash)) {
++                  digest = fallbackVerifiedBootHash;
++              }
++              if (digest && isUsableDigest(*digest)) {
++                  const bool forceVerifiedLocked = bootMode == PureSoftBootMode::VERIFIED_LOCKED;
++                  std::string bootState =
++                      forceVerifiedLocked ? "green" : ::keymaster::GetVerifiedBootState();
++                  std::string bootloaderState =
++                      forceVerifiedLocked ? "locked" : ::keymaster::GetBootloaderState();
+                   if (securityLevel == SecurityLevel::TRUSTED_ENVIRONMENT) {
+-                      if (auto bootKey = ::keymaster::GetVbmetaPublicKeyDigest()) {
++                      auto bootKey = ::keymaster::GetVbmetaPublicKeyDigest();
++                      if (bootKey && isUsableDigest(*bootKey)) {
+                           (void)context->SetVerifiedBootKey(*bootKey);
++                      } else if (isUsableDigest(fallbackVerifiedBootKey)) {
++                          (void)context->SetVerifiedBootKey(fallbackVerifiedBootKey);
+                       }
+                   }
+                   context->SetVerifiedBootInfo(bootState, bootloaderState, *digest);
+@@ -526,6 +543,14 @@ std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel,
+     return ndk::SharedRefBase::make<AndroidKeyMintDevice>(securityLevel, bootMode);
+ }
+ 
++std::shared_ptr<IKeyMintDevice>
++CreateKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
++                    const vector<uint8_t>& fallbackVerifiedBootKey,
++                    const vector<uint8_t>& fallbackVerifiedBootHash) {
++    return ndk::SharedRefBase::make<AndroidKeyMintDevice>(
++        securityLevel, bootMode, fallbackVerifiedBootKey, fallbackVerifiedBootHash);
++}
++
+ std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel) {
+     return ndk::SharedRefBase::make<AndroidKeyMintDevice>(securityLevel);
+ }
+diff --git a/ng/include/AndroidKeyMintDevice.h b/ng/include/AndroidKeyMintDevice.h
+index d8aa2e9..295243e 100644
+--- a/ng/include/AndroidKeyMintDevice.h
++++ b/ng/include/AndroidKeyMintDevice.h
+@@ -42,6 +42,9 @@ class AndroidKeyMintDevice : public BnKeyMintDevice {
+   public:
+     explicit AndroidKeyMintDevice(SecurityLevel securityLevel);
+     AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode);
++    AndroidKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
++                         const vector<uint8_t>& fallbackVerifiedBootKey,
++                         const vector<uint8_t>& fallbackVerifiedBootHash);
+     virtual ~AndroidKeyMintDevice();
+ 
+     ScopedAStatus getHardwareInfo(KeyMintHardwareInfo* info) override;
+@@ -106,5 +109,9 @@ class AndroidKeyMintDevice : public BnKeyMintDevice {
+ std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel);
+ std::shared_ptr<IKeyMintDevice> CreateKeyMintDevice(SecurityLevel securityLevel,
+                                                     PureSoftBootMode bootMode);
++std::shared_ptr<IKeyMintDevice>
++CreateKeyMintDevice(SecurityLevel securityLevel, PureSoftBootMode bootMode,
++                    const vector<uint8_t>& fallbackVerifiedBootKey,
++                    const vector<uint8_t>& fallbackVerifiedBootHash);
+ 
+ }  // namespace aidl::android::hardware::security::keymint
+-- 
+2.43.0
+

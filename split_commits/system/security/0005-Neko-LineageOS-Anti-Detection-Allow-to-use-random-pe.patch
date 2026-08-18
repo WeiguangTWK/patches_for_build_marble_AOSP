@@ -1,0 +1,718 @@
+From d3ef1d88795080bf0fffa51020645c37ef5a02e4 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 15 Aug 2026 12:31:37 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Allow to use random &
+ persistent vbmeta diggest when AVB is disabled
+
+Change-Id: I5e8acac91d6ddd099014404c5aacda47ca5e24f5
+---
+ keystore2/src/crypto/Android.bp               |   2 +
+ keystore2/src/crypto/crypto.cpp               | 285 +++++++++++++-----
+ keystore2/src/crypto/crypto.hpp               |  63 ++--
+ .../crypto/include/tee_soft_boot_identity.h   |  38 +++
+ .../tests/tee_soft_boot_identity_test.cpp     | 144 +++++++++
+ keystore2/src/km_compat/km_compat.cpp         |  14 +-
+ 6 files changed, 441 insertions(+), 105 deletions(-)
+ create mode 100644 keystore2/src/crypto/include/tee_soft_boot_identity.h
+ create mode 100644 keystore2/src/crypto/tests/tee_soft_boot_identity_test.cpp
+
+diff --git a/keystore2/src/crypto/Android.bp b/keystore2/src/crypto/Android.bp
+index aa75d95..342b1f7 100644
+--- a/keystore2/src/crypto/Android.bp
++++ b/keystore2/src/crypto/Android.bp
+@@ -139,12 +139,14 @@ cc_test {
+     srcs: [
+         "tests/certificate_utils_test.cpp",
+         "tests/gtest_main.cpp",
++        "tests/tee_soft_boot_identity_test.cpp",
+     ],
+     test_suites: ["general-tests"],
+     static_libs: [
+         "libkeystore2_crypto",
+     ],
+     shared_libs: [
++        "libbase",
+         "libcrypto",
+     ],
+ }
+diff --git a/keystore2/src/crypto/crypto.cpp b/keystore2/src/crypto/crypto.cpp
+index 9061330..c9c15e4 100644
+--- a/keystore2/src/crypto/crypto.cpp
++++ b/keystore2/src/crypto/crypto.cpp
+@@ -18,12 +18,17 @@
+ 
+ #include "crypto.hpp"
+ 
++#include "tee_soft_boot_identity.h"
++
+ #include "certificate_utils.h"
+ 
+ #include <android-base/properties.h>
+ #include <assert.h>
++#include <errno.h>
++#include <fcntl.h>
+ #include <log/log.h>
+ #include <openssl/aes.h>
++#include <openssl/crypto.h>
+ #include <openssl/ec.h>
+ #include <openssl/ec_key.h>
+ #include <openssl/ecdh.h>
+@@ -35,7 +40,17 @@
+ #include <openssl/rand.h>
+ #include <openssl/sha.h>
+ #include <openssl/x509.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <stdio.h>
++#include <stdlib.h>
+ 
++#include <algorithm>
++#include <array>
++#include <mutex>
++#include <optional>
++#include <string>
+ #include <string_view>
+ #include <vector>
+ 
+@@ -44,6 +59,138 @@
+ constexpr size_t kGcmTagLength = 128 / 8;
+ constexpr size_t kAes128KeySizeBytes = 128 / 8;
+ 
++namespace {
++
++constexpr std::array<uint8_t, 8> kTeeSoftIdentityMagic = {'T', 'S', 'B', 'I', 0, 0, 0, 1};
++constexpr size_t kTeeSoftIdentityPayloadSize =
++    kTeeSoftIdentityMagic.size() + 2 * TEE_SOFT_BOOT_IDENTITY_SIZE;
++constexpr size_t kTeeSoftIdentityFileSize = kTeeSoftIdentityPayloadSize + SHA256_DIGEST_LENGTH;
++
++struct TeeSoftBootIdentity {
++    std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE> boot_key;
++    std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE> boot_hash;
++};
++
++std::mutex& teeSoftIdentityIoMutex() {
++    static std::mutex mutex;
++    return mutex;
++}
++
++bool writeFully(int fd, const uint8_t* data, size_t size) {
++    while (size > 0) {
++        const ssize_t written = TEMP_FAILURE_RETRY(write(fd, data, size));
++        if (written <= 0) return false;
++        data += written;
++        size -= static_cast<size_t>(written);
++    }
++    return true;
++}
++
++bool readIdentityFile(const char* path, TeeSoftBootIdentity* identity) {
++    int fd = TEMP_FAILURE_RETRY(open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
++    if (fd < 0) return false;
++
++    struct stat st = {};
++    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
++        (st.st_mode & 0077) != 0 || st.st_size != static_cast<off_t>(kTeeSoftIdentityFileSize)) {
++        ALOGE("TEE Soft boot identity has invalid owner, mode, type, or size: %s", path);
++        close(fd);
++        errno = EINVAL;
++        return false;
++    }
++
++    std::array<uint8_t, kTeeSoftIdentityFileSize> encoded = {};
++    size_t offset = 0;
++    while (offset < encoded.size()) {
++        const ssize_t count =
++            TEMP_FAILURE_RETRY(read(fd, encoded.data() + offset, encoded.size() - offset));
++        if (count <= 0) {
++            close(fd);
++            errno = EIO;
++            return false;
++        }
++        offset += static_cast<size_t>(count);
++    }
++    uint8_t extra = 0;
++    const ssize_t trailing = TEMP_FAILURE_RETRY(read(fd, &extra, sizeof(extra)));
++    close(fd);
++    if (trailing != 0 ||
++        !std::equal(kTeeSoftIdentityMagic.begin(), kTeeSoftIdentityMagic.end(), encoded.begin())) {
++        ALOGE("TEE Soft boot identity has invalid framing: %s", path);
++        errno = EINVAL;
++        return false;
++    }
++
++    std::array<uint8_t, SHA256_DIGEST_LENGTH> digest = {};
++    if (SHA256(encoded.data(), kTeeSoftIdentityPayloadSize, digest.data()) == nullptr ||
++        CRYPTO_memcmp(digest.data(), encoded.data() + kTeeSoftIdentityPayloadSize, digest.size()) !=
++            0) {
++        ALOGE("TEE Soft boot identity checksum mismatch: %s", path);
++        errno = EINVAL;
++        return false;
++    }
++
++    auto cursor = encoded.begin() + kTeeSoftIdentityMagic.size();
++    std::copy_n(cursor, identity->boot_key.size(), identity->boot_key.begin());
++    cursor += identity->boot_key.size();
++    std::copy_n(cursor, identity->boot_hash.size(), identity->boot_hash.begin());
++    return true;
++}
++
++bool fsyncParentDirectory(const char* path) {
++    const std::string path_string(path);
++    const size_t slash = path_string.rfind('/');
++    const std::string parent = slash == std::string::npos ? "." : path_string.substr(0, slash);
++    int fd = TEMP_FAILURE_RETRY(open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
++    if (fd < 0) return false;
++    const bool ok = TEMP_FAILURE_RETRY(fsync(fd)) == 0;
++    close(fd);
++    return ok;
++}
++
++bool createIdentityFile(const char* path, TeeSoftBootIdentity* identity) {
++    do {
++        if (RAND_bytes(identity->boot_key.data(), identity->boot_key.size()) != 1 ||
++            RAND_bytes(identity->boot_hash.data(), identity->boot_hash.size()) != 1) {
++            ALOGE("Failed to generate TEE Soft boot identity");
++            return false;
++        }
++    } while (std::all_of(identity->boot_key.begin(), identity->boot_key.end(),
++                         [](uint8_t value) { return value == 0; }) ||
++             std::all_of(identity->boot_hash.begin(), identity->boot_hash.end(),
++                         [](uint8_t value) { return value == 0; }));
++
++    std::array<uint8_t, kTeeSoftIdentityFileSize> encoded = {};
++    auto cursor =
++        std::copy(kTeeSoftIdentityMagic.begin(), kTeeSoftIdentityMagic.end(), encoded.begin());
++    cursor = std::copy(identity->boot_key.begin(), identity->boot_key.end(), cursor);
++    std::copy(identity->boot_hash.begin(), identity->boot_hash.end(), cursor);
++    if (SHA256(encoded.data(), kTeeSoftIdentityPayloadSize,
++               encoded.data() + kTeeSoftIdentityPayloadSize) == nullptr) {
++        return false;
++    }
++
++    std::string temp_template = std::string(path) + ".tmp.XXXXXX";
++    std::vector<char> temp_path(temp_template.begin(), temp_template.end());
++    temp_path.push_back('\0');
++    int fd = mkstemp(temp_path.data());
++    if (fd < 0) return false;
++    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
++
++    bool ok = fchmod(fd, 0600) == 0 && writeFully(fd, encoded.data(), encoded.size()) &&
++              TEMP_FAILURE_RETRY(fsync(fd)) == 0;
++    if (close(fd) != 0) ok = false;
++    if (ok && rename(temp_path.data(), path) == 0) {
++        ok = fsyncParentDirectory(path);
++    } else {
++        ok = false;
++    }
++    if (!ok) unlink(temp_path.data());
++    return ok;
++}
++
++}  // namespace
++
+ // Copied from system/security/keystore/blob.cpp.
+ 
+ #if defined(__clang__)
+@@ -87,6 +234,54 @@ bool randomBytes(uint8_t* out, size_t len) {
+     return RAND_bytes(out, len);
+ }
+ 
++bool loadOrCreateTeeSoftBootIdentityAtPath(const char* path, uint8_t* out_boot_key,
++                                           size_t out_boot_key_len, uint8_t* out_boot_hash,
++                                           size_t out_boot_hash_len) {
++    if (path == nullptr || path[0] == '\0' || out_boot_key == nullptr || out_boot_hash == nullptr ||
++        out_boot_key_len != TEE_SOFT_BOOT_IDENTITY_SIZE ||
++        out_boot_hash_len != TEE_SOFT_BOOT_IDENTITY_SIZE) {
++        errno = EINVAL;
++        return false;
++    }
++
++    std::lock_guard<std::mutex> lock(teeSoftIdentityIoMutex());
++    TeeSoftBootIdentity identity = {};
++    if (!readIdentityFile(path, &identity)) {
++        if (errno != ENOENT || !createIdentityFile(path, &identity)) {
++            return false;
++        }
++    }
++    std::copy(identity.boot_key.begin(), identity.boot_key.end(), out_boot_key);
++    std::copy(identity.boot_hash.begin(), identity.boot_hash.end(), out_boot_hash);
++    return true;
++}
++
++bool getTeeSoftBootIdentity(uint8_t* out_boot_key, size_t out_boot_key_len, uint8_t* out_boot_hash,
++                            size_t out_boot_hash_len) {
++    if (out_boot_key == nullptr || out_boot_hash == nullptr ||
++        out_boot_key_len != TEE_SOFT_BOOT_IDENTITY_SIZE ||
++        out_boot_hash_len != TEE_SOFT_BOOT_IDENTITY_SIZE) {
++        errno = EINVAL;
++        return false;
++    }
++
++    static std::mutex cache_mutex;
++    static std::optional<TeeSoftBootIdentity> cached_identity;
++    std::lock_guard<std::mutex> lock(cache_mutex);
++    if (!cached_identity.has_value()) {
++        TeeSoftBootIdentity identity = {};
++        if (!loadOrCreateTeeSoftBootIdentityAtPath(
++                TEE_SOFT_BOOT_IDENTITY_PATH, identity.boot_key.data(), identity.boot_key.size(),
++                identity.boot_hash.data(), identity.boot_hash.size())) {
++            return false;
++        }
++        cached_identity = identity;
++    }
++    std::copy(cached_identity->boot_key.begin(), cached_identity->boot_key.end(), out_boot_key);
++    std::copy(cached_identity->boot_hash.begin(), cached_identity->boot_hash.end(), out_boot_hash);
++    return true;
++}
++
+ /*
+  * Encrypt 'len' data at 'in' with AES-GCM, using 128-bit or 256-bit key at 'key', 96-bit IV at
+  * 'iv' and write output to 'out' (which may be the same location as 'in') and 128-bit tag to
+@@ -710,44 +905,7 @@ static bool extractRootOfTrustBootFields(const std::vector<uint8_t>& tee_enforce
+     return false;
+ }
+ 
+-static bool sha256OfBytes(const uint8_t* data, size_t len, std::vector<uint8_t>* out) {
+-    if (!data || !out) return false;
+-    out->assign(SHA256_DIGEST_LENGTH, 0);
+-    return SHA256(data, len, out->data()) != nullptr;
+-}
+-
+-static bool deriveStableBootDigestsFromSignerCert(const uint8_t* signing_cert_buf, size_t signing_cert_len,
+-                                                  std::vector<uint8_t>* out_boot_key,
+-                                                  std::vector<uint8_t>* out_boot_hash) {
+-    if (!signing_cert_buf || signing_cert_len == 0 || !out_boot_key || !out_boot_hash) {
+-        return false;
+-    }
+-    const uint8_t* p = signing_cert_buf;
+-    bssl::UniquePtr<X509> cert(d2i_X509(nullptr, &p, static_cast<long>(signing_cert_len)));
+-    if (!cert) return false;
+-
+-    bssl::UniquePtr<EVP_PKEY> pubkey(X509_get_pubkey(cert.get()));
+-    if (!pubkey) return false;
+-    int pub_len = i2d_PUBKEY(pubkey.get(), nullptr);
+-    if (pub_len <= 0) return false;
+-    std::vector<uint8_t> pub_der(static_cast<size_t>(pub_len));
+-    uint8_t* pub_ptr = pub_der.data();
+-    if (i2d_PUBKEY(pubkey.get(), &pub_ptr) <= 0) return false;
+-
+-    if (!sha256OfBytes(pub_der.data(), pub_der.size(), out_boot_key)) return false;
+-
+-    std::vector<uint8_t> hash_seed(signing_cert_buf, signing_cert_buf + signing_cert_len);
+-    static constexpr char kDomain[] = "tee_soft_debug_vbmeta_digest_v1";
+-    hash_seed.insert(hash_seed.end(), reinterpret_cast<const uint8_t*>(kDomain),
+-                     reinterpret_cast<const uint8_t*>(kDomain) + sizeof(kDomain) - 1);
+-    if (!sha256OfBytes(hash_seed.data(), hash_seed.size(), out_boot_hash)) return false;
+-
+-    if (isAllZeroDigest(*out_boot_key) || isAllZeroDigest(*out_boot_hash)) return false;
+-    return true;
+-}
+-
+-static bool patchAttestationRootOfTrust(X509* cert, const uint8_t* signing_cert_buf,
+-                                        size_t signing_cert_len) {
++static bool patchAttestationRootOfTrust(X509* cert) {
+     if (!cert) return false;
+ 
+     std::vector<uint8_t> boot_key;
+@@ -795,6 +953,7 @@ static bool patchAttestationRootOfTrust(X509* cert, const uint8_t* signing_cert_
+     // TEESimulator-like fallback chain for boot key/hash:
+     // 1) ro.boot.vbmeta.* properties
+     // 2) original attestation RootOfTrust values
++    // 3) persistent random per-device TEE Soft identity
+     if (!prop_key_ok || !prop_hash_ok) {
+         std::vector<uint8_t> old_boot_key;
+         std::vector<uint8_t> old_boot_hash;
+@@ -807,41 +966,24 @@ static bool patchAttestationRootOfTrust(X509* cert, const uint8_t* signing_cert_
+             }
+         }
+     }
+-    if (boot_key.size() != 32 || isAllZeroDigest(boot_key) || boot_hash.size() != 32 ||
+-        isAllZeroDigest(boot_hash)) {
+-        std::vector<uint8_t> derived_key;
+-        std::vector<uint8_t> derived_hash;
+-        if (deriveStableBootDigestsFromSignerCert(signing_cert_buf, signing_cert_len, &derived_key,
+-                                                  &derived_hash)) {
+-            if (boot_key.size() != 32 || isAllZeroDigest(boot_key)) {
+-                boot_key = std::move(derived_key);
+-                ALOGI("patchAttestationRootOfTrust: derived stable verifiedBootKey from signer cert");
+-            }
+-            if (boot_hash.size() != 32 || isAllZeroDigest(boot_hash)) {
+-                boot_hash = std::move(derived_hash);
+-                ALOGI("patchAttestationRootOfTrust: derived stable verifiedBootHash from signer cert");
+-            }
+-        }
+-    }
+-    if (boot_key.size() != 32 || isAllZeroDigest(boot_key)) {
+-        boot_key.assign(32, 0);
+-        if (!RAND_bytes(boot_key.data(), static_cast<int>(boot_key.size())) ||
+-            isAllZeroDigest(boot_key)) {
+-            ALOGW("patchAttestationRootOfTrust: failed to synthesize verifiedBootKey");
++    if (boot_key.size() != TEE_SOFT_BOOT_IDENTITY_SIZE || isAllZeroDigest(boot_key) ||
++        boot_hash.size() != TEE_SOFT_BOOT_IDENTITY_SIZE || isAllZeroDigest(boot_hash)) {
++        std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE> fallback_key = {};
++        std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE> fallback_hash = {};
++        if (!getTeeSoftBootIdentity(fallback_key.data(), fallback_key.size(), fallback_hash.data(),
++                                    fallback_hash.size())) {
++            ALOGE("patchAttestationRootOfTrust: persistent fallback identity unavailable");
+             sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
+             return false;
+         }
+-        ALOGI("patchAttestationRootOfTrust: synthesized verifiedBootKey fallback");
+-    }
+-    if (boot_hash.size() != 32 || isAllZeroDigest(boot_hash)) {
+-        boot_hash.assign(32, 0);
+-        if (!RAND_bytes(boot_hash.data(), static_cast<int>(boot_hash.size())) ||
+-            isAllZeroDigest(boot_hash)) {
+-            ALOGW("patchAttestationRootOfTrust: failed to synthesize verifiedBootHash");
+-            sk_ASN1_TYPE_pop_free(key_desc, ASN1_TYPE_free);
+-            return false;
++        if (boot_key.size() != TEE_SOFT_BOOT_IDENTITY_SIZE || isAllZeroDigest(boot_key)) {
++            boot_key.assign(fallback_key.begin(), fallback_key.end());
++            ALOGI("patchAttestationRootOfTrust: using persistent per-device verifiedBootKey");
++        }
++        if (boot_hash.size() != TEE_SOFT_BOOT_IDENTITY_SIZE || isAllZeroDigest(boot_hash)) {
++            boot_hash.assign(fallback_hash.begin(), fallback_hash.end());
++            ALOGI("patchAttestationRootOfTrust: using persistent per-device verifiedBootHash");
+         }
+-        ALOGI("patchAttestationRootOfTrust: synthesized verifiedBootHash fallback");
+     }
+ 
+     std::vector<uint8_t> new_tee;
+@@ -922,7 +1064,10 @@ int resignLeafCertificate(const uint8_t* leaf_cert_buf, size_t leaf_cert_len,
+ 
+     // Align key attestation RootOfTrust semantics with simulator behavior:
+     // force Verified state and locked=true, with boot key/hash from vbmeta properties.
+-    (void)patchAttestationRootOfTrust(leaf.get(), signing_cert_buf, signing_cert_len);
++    if (!patchAttestationRootOfTrust(leaf.get())) {
++        ALOGE("resignLeafCertificate: failed to patch RootOfTrust");
++        return 0;
++    }
+ 
+     if (auto e = keystore::signCert(leaf.get(), signing_key.get()); e) {
+         ALOGE("resignLeafCertificate: signCert failed");
+diff --git a/keystore2/src/crypto/crypto.hpp b/keystore2/src/crypto/crypto.hpp
+index 106dfaa..b6ef656 100644
+--- a/keystore2/src/crypto/crypto.hpp
++++ b/keystore2/src/crypto/crypto.hpp
+@@ -18,53 +18,49 @@
+ #define __CRYPTO_H__
+ 
+ #include <stdbool.h>
+-#include <stdint.h>
+ #include <stddef.h>
++#include <stdint.h>
+ 
+ extern "C" {
+-  bool hmacSha256(const uint8_t* key, size_t key_size, const uint8_t* msg, size_t msg_size,
+-                  uint8_t* out, size_t out_size);
+-  bool randomBytes(uint8_t* out, size_t len);
+-  bool AES_gcm_encrypt(const uint8_t* in, uint8_t* out, size_t len,
+-                       const uint8_t* key, size_t key_size, const uint8_t* iv, uint8_t* tag);
+-  bool AES_gcm_decrypt(const uint8_t* in, uint8_t* out, size_t len,
+-                       const uint8_t* key, size_t key_size, const uint8_t* iv,
+-                       const uint8_t* tag);
+-
+-  // Copied from system/security/keystore/keymaster_enforcement.h.
+-  typedef uint64_t km_id_t;
++bool hmacSha256(const uint8_t* key, size_t key_size, const uint8_t* msg, size_t msg_size,
++                uint8_t* out, size_t out_size);
++bool randomBytes(uint8_t* out, size_t len);
++bool AES_gcm_encrypt(const uint8_t* in, uint8_t* out, size_t len, const uint8_t* key,
++                     size_t key_size, const uint8_t* iv, uint8_t* tag);
++bool AES_gcm_decrypt(const uint8_t* in, uint8_t* out, size_t len, const uint8_t* key,
++                     size_t key_size, const uint8_t* iv, const uint8_t* tag);
+ 
+-  bool CreateKeyId(const uint8_t* key_blob, size_t len, km_id_t* out_id);
++// Copied from system/security/keystore/keymaster_enforcement.h.
++typedef uint64_t km_id_t;
+ 
+-  // The salt parameter must be non-nullptr and point to 16 bytes of data.
+-  void PBKDF2(uint8_t* key, size_t key_len, const char* pw, size_t pw_len, const uint8_t* salt);
++bool CreateKeyId(const uint8_t* key_blob, size_t len, km_id_t* out_id);
+ 
+-  #include "openssl/digest.h"
+-  #include "openssl/ec_key.h"
++// The salt parameter must be non-nullptr and point to 16 bytes of data.
++void PBKDF2(uint8_t* key, size_t key_len, const char* pw, size_t pw_len, const uint8_t* salt);
+ 
+-  bool HKDFExtract(uint8_t *out_key, size_t *out_len,
+-                   const uint8_t *secret, size_t secret_len,
+-                   const uint8_t *salt, size_t salt_len);
++#include "openssl/digest.h"
++#include "openssl/ec_key.h"
+ 
+-  bool HKDFExpand(uint8_t *out_key, size_t out_len,
+-                  const uint8_t *prk, size_t prk_len,
+-                  const uint8_t *info, size_t info_len);
++bool HKDFExtract(uint8_t* out_key, size_t* out_len, const uint8_t* secret, size_t secret_len,
++                 const uint8_t* salt, size_t salt_len);
+ 
+-  // We define this as field_elem_size.
+-  static const size_t EC_MAX_BYTES = 32;
++bool HKDFExpand(uint8_t* out_key, size_t out_len, const uint8_t* prk, size_t prk_len,
++                const uint8_t* info, size_t info_len);
+ 
+-  int ECDHComputeKey(void *out, const EC_POINT *pub_key, const EC_KEY *priv_key);
++// We define this as field_elem_size.
++static const size_t EC_MAX_BYTES = 32;
+ 
+-  EC_KEY* ECKEYGenerateKey();
++int ECDHComputeKey(void* out, const EC_POINT* pub_key, const EC_KEY* priv_key);
+ 
+-  size_t ECKEYMarshalPrivateKey(const EC_KEY *priv_key, uint8_t *buf, size_t len);
++EC_KEY* ECKEYGenerateKey();
+ 
+-  EC_KEY* ECKEYParsePrivateKey(const uint8_t *buf, size_t len);
++size_t ECKEYMarshalPrivateKey(const EC_KEY* priv_key, uint8_t* buf, size_t len);
+ 
+-  size_t ECPOINTPoint2Oct(const EC_POINT *point, uint8_t *buf, size_t len);
++EC_KEY* ECKEYParsePrivateKey(const uint8_t* buf, size_t len);
+ 
+-  EC_POINT* ECPOINTOct2Point(const uint8_t *buf, size_t len);
++size_t ECPOINTPoint2Oct(const EC_POINT* point, uint8_t* buf, size_t len);
+ 
++EC_POINT* ECPOINTOct2Point(const uint8_t* buf, size_t len);
+ }
+ 
+ // Parse a DER-encoded X.509 certificate contained in cert_buf, with length
+@@ -147,7 +143,8 @@ int getCertificateTbsSignatureKeyFamily(const uint8_t* cert_buf, size_t cert_len
+ // - bit 2 (0x4): BOOT_PATCHLEVEL found
+ //
+ // Returns 0 if parsing fails or none of the fields are found.
+-int extractAttestationPatchLevels(const uint8_t* cert_buf, size_t cert_len, int32_t* out_os_patchlevel,
+-                                  int32_t* out_vendor_patchlevel, int32_t* out_boot_patchlevel);
++int extractAttestationPatchLevels(const uint8_t* cert_buf, size_t cert_len,
++                                  int32_t* out_os_patchlevel, int32_t* out_vendor_patchlevel,
++                                  int32_t* out_boot_patchlevel);
+ 
+ #endif  //  __CRYPTO_H__
+diff --git a/keystore2/src/crypto/include/tee_soft_boot_identity.h b/keystore2/src/crypto/include/tee_soft_boot_identity.h
+new file mode 100644
+index 0000000..ab64732
+--- /dev/null
++++ b/keystore2/src/crypto/include/tee_soft_boot_identity.h
+@@ -0,0 +1,38 @@
++/*
++ * Copyright 2026 Neko-LineageOS & AVIUM UI
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef KEYSTORE2_TEE_SOFT_BOOT_IDENTITY_H_
++#define KEYSTORE2_TEE_SOFT_BOOT_IDENTITY_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++static constexpr size_t TEE_SOFT_BOOT_IDENTITY_SIZE = 32;
++static constexpr const char* TEE_SOFT_BOOT_IDENTITY_PATH =
++    "/data/misc/keystore/tee_soft_boot_identity.v1";
++
++// Load the persistent per-device fallback identity used by TEE Soft Emu, creating it atomically
++// with cryptographically random values when it does not exist. Existing malformed, insecurely
++// permissioned, or unreadable files are rejected rather than silently rotating the identity.
++bool loadOrCreateTeeSoftBootIdentityAtPath(const char* path, uint8_t* out_boot_key,
++                                           size_t out_boot_key_len, uint8_t* out_boot_hash,
++                                           size_t out_boot_hash_len);
++
++// Process-cached form of loadOrCreateTeeSoftBootIdentityAtPath() for the production location.
++bool getTeeSoftBootIdentity(uint8_t* out_boot_key, size_t out_boot_key_len, uint8_t* out_boot_hash,
++                            size_t out_boot_hash_len);
++
++#endif  // KEYSTORE2_TEE_SOFT_BOOT_IDENTITY_H_
+diff --git a/keystore2/src/crypto/tests/tee_soft_boot_identity_test.cpp b/keystore2/src/crypto/tests/tee_soft_boot_identity_test.cpp
+new file mode 100644
+index 0000000..3532a1e
+--- /dev/null
++++ b/keystore2/src/crypto/tests/tee_soft_boot_identity_test.cpp
+@@ -0,0 +1,144 @@
++/*
++ * Copyright 2026 Neko-LineageOS & AVIUM UI
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "tee_soft_boot_identity.h"
++
++#include <android-base/file.h>
++#include <fcntl.h>
++#include <gtest/gtest.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <array>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++
++using IdentityPart = std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE>;
++
++bool allZero(const IdentityPart& value) {
++    return std::all_of(value.begin(), value.end(), [](uint8_t byte) { return byte == 0; });
++}
++
++std::string identityPath(const android::base::TemporaryDir& dir) {
++    return std::string(dir.path) + "/tee_soft_boot_identity.v1";
++}
++
++TEST(TeeSoftBootIdentityTest, CreatesPrivateStableRandomIdentity) {
++    android::base::TemporaryDir dir;
++    const std::string path = identityPath(dir);
++
++    IdentityPart first_key = {};
++    IdentityPart first_hash = {};
++    ASSERT_TRUE(loadOrCreateTeeSoftBootIdentityAtPath(
++        path.c_str(), first_key.data(), first_key.size(), first_hash.data(), first_hash.size()));
++    EXPECT_FALSE(allZero(first_key));
++    EXPECT_FALSE(allZero(first_hash));
++    EXPECT_NE(first_key, first_hash);
++
++    IdentityPart second_key = {};
++    IdentityPart second_hash = {};
++    ASSERT_TRUE(loadOrCreateTeeSoftBootIdentityAtPath(path.c_str(), second_key.data(),
++                                                      second_key.size(), second_hash.data(),
++                                                      second_hash.size()));
++    EXPECT_EQ(first_key, second_key);
++    EXPECT_EQ(first_hash, second_hash);
++
++    struct stat st = {};
++    ASSERT_EQ(0, stat(path.c_str(), &st));
++    EXPECT_EQ(0, st.st_mode & 0077);
++    EXPECT_TRUE(S_ISREG(st.st_mode));
++}
++
++TEST(TeeSoftBootIdentityTest, RejectsCorruptionWithoutRotatingIdentity) {
++    android::base::TemporaryDir dir;
++    const std::string path = identityPath(dir);
++
++    IdentityPart original_key = {};
++    IdentityPart original_hash = {};
++    ASSERT_TRUE(loadOrCreateTeeSoftBootIdentityAtPath(path.c_str(), original_key.data(),
++                                                      original_key.size(), original_hash.data(),
++                                                      original_hash.size()));
++
++    int fd = open(path.c_str(), O_WRONLY | O_CLOEXEC);
++    ASSERT_GE(fd, 0);
++    const uint8_t corrupt = 0xff;
++    ASSERT_EQ(1, pwrite(fd, &corrupt, sizeof(corrupt), 12));
++    ASSERT_EQ(0, close(fd));
++
++    IdentityPart output_key = {};
++    IdentityPart output_hash = {};
++    EXPECT_FALSE(loadOrCreateTeeSoftBootIdentityAtPath(path.c_str(), output_key.data(),
++                                                       output_key.size(), output_hash.data(),
++                                                       output_hash.size()));
++    EXPECT_TRUE(allZero(output_key));
++    EXPECT_TRUE(allZero(output_hash));
++}
++
++TEST(TeeSoftBootIdentityTest, ConcurrentInitializationReturnsOneIdentity) {
++    android::base::TemporaryDir dir;
++    const std::string path = identityPath(dir);
++    constexpr size_t kThreadCount = 8;
++    std::array<IdentityPart, kThreadCount> keys = {};
++    std::array<IdentityPart, kThreadCount> hashes = {};
++    std::array<bool, kThreadCount> results = {};
++    std::vector<std::thread> threads;
++
++    for (size_t i = 0; i < kThreadCount; ++i) {
++        threads.emplace_back([&, i]() {
++            results[i] = loadOrCreateTeeSoftBootIdentityAtPath(
++                path.c_str(), keys[i].data(), keys[i].size(), hashes[i].data(), hashes[i].size());
++        });
++    }
++    for (auto& thread : threads)
++        thread.join();
++
++    for (size_t i = 0; i < kThreadCount; ++i) {
++        EXPECT_TRUE(results[i]);
++        EXPECT_EQ(keys[0], keys[i]);
++        EXPECT_EQ(hashes[0], hashes[i]);
++    }
++}
++
++TEST(TeeSoftBootIdentityTest, RejectsInsecureFileMode) {
++    android::base::TemporaryDir dir;
++    const std::string path = identityPath(dir);
++
++    IdentityPart key = {};
++    IdentityPart hash = {};
++    ASSERT_TRUE(loadOrCreateTeeSoftBootIdentityAtPath(path.c_str(), key.data(), key.size(),
++                                                      hash.data(), hash.size()));
++    ASSERT_EQ(0, chmod(path.c_str(), 0644));
++
++    EXPECT_FALSE(loadOrCreateTeeSoftBootIdentityAtPath(path.c_str(), key.data(), key.size(),
++                                                       hash.data(), hash.size()));
++}
++
++TEST(TeeSoftBootIdentityTest, RejectsInvalidOutputSizes) {
++    android::base::TemporaryDir dir;
++    const std::string path = identityPath(dir);
++    IdentityPart key = {};
++    IdentityPart hash = {};
++
++    EXPECT_FALSE(loadOrCreateTeeSoftBootIdentityAtPath(path.c_str(), key.data(), key.size() - 1,
++                                                       hash.data(), hash.size()));
++    EXPECT_EQ(-1, access(path.c_str(), F_OK));
++}
++
++}  // namespace
+diff --git a/keystore2/src/km_compat/km_compat.cpp b/keystore2/src/km_compat/km_compat.cpp
+index 5e71321..e2bc218 100644
+--- a/keystore2/src/km_compat/km_compat.cpp
++++ b/keystore2/src/km_compat/km_compat.cpp
+@@ -34,6 +34,7 @@
+ #include <chrono>
+ 
+ #include "certificate_utils.h"
++#include "tee_soft_boot_identity.h"
+ 
+ using ::aidl::android::hardware::security::keymint::Algorithm;
+ using ::aidl::android::hardware::security::keymint::CreateKeyMintDevice;
+@@ -1549,8 +1550,17 @@ std::shared_ptr<IKeyMintDevice> getTeeSoftKeymintDevice() {
+         // KeyCharacteristics and KeyInfo. Its attestation boot state is an explicit part of this
+         // internal persona rather than a snapshot of runtime-spoofed boot properties. Genuine
+         // /default TEE remains independently selected.
+-        teeSoftDevice = CreateKeyMintDevice(KeyMintSecurityLevel::TRUSTED_ENVIRONMENT,
+-                                            PureSoftBootMode::VERIFIED_LOCKED);
++        std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE> fallbackBootKey = {};
++        std::array<uint8_t, TEE_SOFT_BOOT_IDENTITY_SIZE> fallbackBootHash = {};
++        if (!getTeeSoftBootIdentity(fallbackBootKey.data(), fallbackBootKey.size(),
++                                    fallbackBootHash.data(), fallbackBootHash.size())) {
++            LOG(ERROR) << "Persistent TEE Soft boot identity is unavailable";
++            return {};
++        }
++        teeSoftDevice = CreateKeyMintDevice(
++            KeyMintSecurityLevel::TRUSTED_ENVIRONMENT, PureSoftBootMode::VERIFIED_LOCKED,
++            std::vector<uint8_t>(fallbackBootKey.begin(), fallbackBootKey.end()),
++            std::vector<uint8_t>(fallbackBootHash.begin(), fallbackBootHash.end()));
+     }
+     return teeSoftDevice;
+ }
+-- 
+2.43.0
+

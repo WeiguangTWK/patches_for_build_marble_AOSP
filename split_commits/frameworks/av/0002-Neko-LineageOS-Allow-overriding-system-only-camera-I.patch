@@ -1,0 +1,146 @@
+From ba8d7f23798e4d016cacd908851f2ffe6b2a57b4 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Tue, 18 Aug 2026 11:12:35 +0800
+Subject: [PATCH] Neko LineageOS: Allow overriding system-only camera IDs
+
+Some vendor camera providers expose special-purpose camera devices as
+regular public cameras without advertising the SYSTEM_CAMERA capability.
+
+Allow devices to specify these camera IDs through
+ro.camera.systemCameraIds. Add the SYSTEM_CAMERA capability to their
+characteristics and classify them as system-only cameras.
+
+This prevents regular applications from enumerating or opening these
+devices while preserving access for clients holding SYSTEM_CAMERA.
+
+Change-Id: Ib2303e3fa29179fb4da6affc117dc6a5abe06736
+---
+ .../common/CameraProviderManager.cpp          | 40 +++++++++++++++++++
+ .../common/CameraProviderManager.h            |  1 +
+ .../common/aidl/AidlProviderInfo.cpp          |  8 +++-
+ .../common/hidl/HidlProviderInfo.cpp          |  8 +++-
+ 4 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/services/camera/libcameraservice/common/CameraProviderManager.cpp b/services/camera/libcameraservice/common/CameraProviderManager.cpp
+index 7032db0..cd19284 100644
+--- a/services/camera/libcameraservice/common/CameraProviderManager.cpp
++++ b/services/camera/libcameraservice/common/CameraProviderManager.cpp
+@@ -46,6 +46,8 @@
+ #include <camera_metadata_hidden.h>
+ #include <android-base/parseint.h>
+ #include <android-base/logging.h>
++#include <android-base/properties.h>
++#include <android-base/strings.h>
+ #include <android/content/res/CameraCompatibilityInfo.h>
+ #include <cutils/properties.h>
+ #include <hwbinder/IPCThreadState.h>
+@@ -76,6 +78,13 @@ namespace {
+ const bool kEnableLazyHal(property_get_bool("ro.camera.enableLazyHal", false));
+ const std::string kExternalProviderName = "external/0";
+ const std::string kVirtualProviderName = "virtual/0";
++
++bool isFrameworkSystemCamera(const std::string& cameraId) {
++    static const std::vector<std::string> systemCameraIds =
++            android::base::Split(android::base::GetProperty("ro.camera.systemCameraIds", ""), ",");
++    return std::find(systemCameraIds.begin(), systemCameraIds.end(), cameraId) !=
++           systemCameraIds.end();
++}
+ } // anonymous namespace
+ 
+ const float CameraProviderManager::kDepthARTolerance = .1f;
+@@ -1125,7 +1134,38 @@ void CameraProviderManager::ProviderInfo::DeviceInfo3::queryPhysicalCameraIds()
+     }
+ }
+ 
++status_t CameraProviderManager::ProviderInfo::DeviceInfo3::fixupSystemCameraTags() {
++    if (!isFrameworkSystemCamera(mId)) {
++        return OK;
++    }
++
++    camera_metadata_entry_t entryCap =
++            mCameraCharacteristics.find(ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
++    std::vector<uint8_t> capabilities;
++    capabilities.reserve(entryCap.count + 1);
++    for (size_t i = 0; i < entryCap.count; i++) {
++        capabilities.push_back(entryCap.data.u8[i]);
++    }
++    if (std::find(capabilities.begin(), capabilities.end(),
++                  ANDROID_REQUEST_AVAILABLE_CAPABILITIES_SYSTEM_CAMERA) != capabilities.end()) {
++        return OK;
++    }
++
++    capabilities.push_back(ANDROID_REQUEST_AVAILABLE_CAPABILITIES_SYSTEM_CAMERA);
++    status_t res = mCameraCharacteristics.update(ANDROID_REQUEST_AVAILABLE_CAPABILITIES,
++                                                 capabilities.data(), capabilities.size());
++    if (res == OK) {
++        ALOGI("Camera %s marked as a system-only camera by framework configuration", mId.c_str());
++    }
++    return res;
++}
++
+ SystemCameraKind CameraProviderManager::ProviderInfo::DeviceInfo3::getSystemCameraKind() {
++    // Keep the configured camera private even if updating its metadata failed.
++    if (isFrameworkSystemCamera(mId)) {
++        return SystemCameraKind::SYSTEM_ONLY_CAMERA;
++    }
++
+     camera_metadata_entry_t entryCap;
+     entryCap = mCameraCharacteristics.find(ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
+     if (entryCap.count == 1 &&
+diff --git a/services/camera/libcameraservice/common/CameraProviderManager.h b/services/camera/libcameraservice/common/CameraProviderManager.h
+index 40a4254..2861d76 100644
+--- a/services/camera/libcameraservice/common/CameraProviderManager.h
++++ b/services/camera/libcameraservice/common/CameraProviderManager.h
+@@ -773,6 +773,7 @@ private:
+             int mSessionConfigQueryVersion = 0;
+ 
+             void queryPhysicalCameraIds();
++            status_t fixupSystemCameraTags();
+             SystemCameraKind getSystemCameraKind();
+             status_t fixupMonochromeTags();
+             status_t fixupTorchStrengthTags();
+diff --git a/services/camera/libcameraservice/common/aidl/AidlProviderInfo.cpp b/services/camera/libcameraservice/common/aidl/AidlProviderInfo.cpp
+index 8b66e4c..82a30bc 100644
+--- a/services/camera/libcameraservice/common/aidl/AidlProviderInfo.cpp
++++ b/services/camera/libcameraservice/common/aidl/AidlProviderInfo.cpp
+@@ -578,9 +578,15 @@ AidlProviderInfo::AidlDeviceInfo3::AidlDeviceInfo3(
+     mCompositeHeicUltraHDRDisabled = mCameraCharacteristics.exists(
+             ANDROID_HEIC_AVAILABLE_HEIC_ULTRA_HDR_STREAM_CONFIGURATIONS);
+ 
++    status_t res = fixupSystemCameraTags();
++    if (OK != res) {
++        ALOGE("%s: Unable to add system camera capability for camera %s: %s (%d)",
++                __FUNCTION__, id.c_str(), strerror(-res), res);
++    }
++
+     mSystemCameraKind = getSystemCameraKind();
+ 
+-    status_t res = fixupMonochromeTags();
++    res = fixupMonochromeTags();
+     if (OK != res) {
+         ALOGE("%s: Unable to fix up monochrome tags based for older HAL version: %s (%d)",
+                 __FUNCTION__, strerror(-res), res);
+diff --git a/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp b/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp
+index 529eaa9..305d47f 100644
+--- a/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp
++++ b/services/camera/libcameraservice/common/hidl/HidlProviderInfo.cpp
+@@ -613,9 +613,15 @@ HidlProviderInfo::HidlDeviceInfo3::HidlDeviceInfo3(
+         }
+     }
+ 
++    status_t res = fixupSystemCameraTags();
++    if (OK != res) {
++        ALOGE("%s: Unable to add system camera capability for camera %s: %s (%d)",
++                __FUNCTION__, id.c_str(), strerror(-res), res);
++    }
++
+     mSystemCameraKind = getSystemCameraKind();
+ 
+-    status_t res = fixupMonochromeTags();
++    res = fixupMonochromeTags();
+     if (OK != res) {
+         ALOGE("%s: Unable to fix up monochrome tags based for older HAL version: %s (%d)",
+                 __FUNCTION__, strerror(-res), res);
+-- 
+2.43.0
+

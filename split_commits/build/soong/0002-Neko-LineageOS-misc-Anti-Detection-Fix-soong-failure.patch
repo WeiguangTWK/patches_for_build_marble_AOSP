@@ -1,0 +1,107 @@
+From 9ba1fd6747add59046335844b31553a478727358 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Mon, 10 Aug 2026 12:13:07 +0800
+Subject: [PATCH] Neko LineageOS: [misc] [Anti Detection] Fix soong failure
+ after framework res jar rename
+
+Change-Id: I3e41b51f42ddc3a207c8e4cd8d0abb8ab837928a
+---
+ dexpreopt/dexpreopt.go         | 16 ++++++++++++----
+ dexpreopt/system_server_zip.go |  8 ++++----
+ java/dexpreopt_bootjars.go     |  5 +++--
+ 3 files changed, 19 insertions(+), 10 deletions(-)
+
+diff --git a/dexpreopt/dexpreopt.go b/dexpreopt/dexpreopt.go
+index bd5d65a..abb3636 100644
+--- a/dexpreopt/dexpreopt.go
++++ b/dexpreopt/dexpreopt.go
+@@ -211,11 +211,17 @@ func bootProfileCommand(ctx android.PathContext, globalSoong *GlobalSoongConfig,
+ 
+ // Returns the dex location of a system server java library.
+ func GetSystemServerDexLocation(ctx android.PathContext, global *GlobalConfig, lib string) string {
+-	if apex := global.AllApexSystemServerJars(ctx).ApexOfJar(lib); apex != "" {
++	apex := global.AllSystemServerJars(ctx).ApexOfJar(lib)
++	if apex == "" {
++		apex = "platform"
++	}
++	apex, lib = android.OverrideConfiguredJarLocationFor(ctx.Config(), apex, lib)
++
++	if apex != "platform" && apex != "system_ext" {
+ 		return fmt.Sprintf("/apex/%s/javalib/%s.jar", apex, lib)
+ 	}
+ 
+-	if apex := global.AllPlatformSystemServerJars(ctx).ApexOfJar(lib); apex == "system_ext" {
++	if apex == "system_ext" {
+ 		return fmt.Sprintf("/system_ext/framework/%s.jar", lib)
+ 	}
+ 
+@@ -293,7 +299,8 @@ func dexpreoptCommand(ctx android.BuilderContext, globalSoong *GlobalSoongConfig
+ 		}
+ 		for i := 0; i < endIndex; i++ {
+ 			lib := systemServerClasspathJars.Jar(i)
+-			clcHost = append(clcHost, SystemServerDexJarHostPath(ctx, lib))
++			apex := systemServerClasspathJars.Apex(i)
++			clcHost = append(clcHost, SystemServerDexJarHostPath(ctx, apex, lib))
+ 			clcTarget = append(clcTarget, GetSystemServerDexLocation(ctx, global, lib))
+ 		}
+ 
+@@ -585,7 +592,8 @@ func makefileMatch(pattern, s string) bool {
+ // class loader context for dex2oat, as the path to the jar in the Soong module may be unknown
+ // at that time (Soong processes the jars in dependency order, which may be different from the
+ // the system server classpath order).
+-func SystemServerDexJarHostPath(ctx android.PathContext, jar string) android.OutputPath {
++func SystemServerDexJarHostPath(ctx android.PathContext, apex string, jar string) android.OutputPath {
++	jar = android.ModuleStem(ctx.Config(), apex, jar)
+ 	if DexpreoptRunningInSoong {
+ 		// Soong module, just use the default output directory $OUT/soong.
+ 		return android.PathForOutput(ctx, SystemServerDexjarsDir, jar+".jar")
+diff --git a/dexpreopt/system_server_zip.go b/dexpreopt/system_server_zip.go
+index 20e00ce..56c2095 100644
+--- a/dexpreopt/system_server_zip.go
++++ b/dexpreopt/system_server_zip.go
+@@ -27,19 +27,19 @@ func (s *systemServerZipSingleton) GenerateBuildActions(ctx android.SingletonCon
+ 		FlagWithArg("-C ", systemServerDexjarsDir.String())
+ 
+ 	for i := range global.SystemServerJars.Len() {
+-		jar := global.SystemServerJars.Jar(i) + ".jar"
++		jar := android.ModuleStem(ctx.Config(), global.SystemServerJars.Apex(i), global.SystemServerJars.Jar(i)) + ".jar"
+ 		cmd.FlagWithInput("-f ", systemServerDexjarsDir.Join(ctx, jar))
+ 	}
+ 	for i := range global.StandaloneSystemServerJars.Len() {
+-		jar := global.StandaloneSystemServerJars.Jar(i) + ".jar"
++		jar := android.ModuleStem(ctx.Config(), global.StandaloneSystemServerJars.Apex(i), global.StandaloneSystemServerJars.Jar(i)) + ".jar"
+ 		cmd.FlagWithInput("-f ", systemServerDexjarsDir.Join(ctx, jar))
+ 	}
+ 	for i := range global.ApexSystemServerJars.Len() {
+-		jar := global.ApexSystemServerJars.Jar(i) + ".jar"
++		jar := android.ModuleStem(ctx.Config(), global.ApexSystemServerJars.Apex(i), global.ApexSystemServerJars.Jar(i)) + ".jar"
+ 		cmd.FlagWithInput("-f ", systemServerDexjarsDir.Join(ctx, jar))
+ 	}
+ 	for i := range global.ApexStandaloneSystemServerJars.Len() {
+-		jar := global.ApexStandaloneSystemServerJars.Jar(i) + ".jar"
++		jar := android.ModuleStem(ctx.Config(), global.ApexStandaloneSystemServerJars.Apex(i), global.ApexStandaloneSystemServerJars.Jar(i)) + ".jar"
+ 		cmd.FlagWithInput("-f ", systemServerDexjarsDir.Join(ctx, jar))
+ 	}
+ 
+diff --git a/java/dexpreopt_bootjars.go b/java/dexpreopt_bootjars.go
+index 312fc43..06064e8 100644
+--- a/java/dexpreopt_bootjars.go
++++ b/java/dexpreopt_bootjars.go
+@@ -829,11 +829,12 @@ func (d *dexpreoptBootJars) buildBootZip(ctx android.ModuleContext) {
+ 		// "platform" prefix but they will be actually installed to /system partition.
+ 		// For the remaining system server JARs use the partition signified by the prefix.
+ 		// For example, prefix "system_ext:" will use "/system_ext" path.
+-		dir := global.SystemServerJars.Apex(i)
++		dir, jar := android.OverrideConfiguredJarLocationFor(ctx.Config(),
++			global.SystemServerJars.Apex(i), global.SystemServerJars.Jar(i))
+ 		if dir == "platform" {
+ 			dir = "system"
+ 		}
+-		jar := global.SystemServerJars.Jar(i) + ".jar"
++		jar += ".jar"
+ 		cmd.FlagWithArg("-e ", dir+"/framework/"+jar)
+ 		cmd.FlagWithInput("-f ", systemServerDexjarsDir.Join(ctx, jar))
+ 	}
+-- 
+2.43.0
+

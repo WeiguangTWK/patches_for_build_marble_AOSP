@@ -1,0 +1,149 @@
+From d2aac7445b83323de955afc3b8e65ac76ade32be Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sun, 16 Aug 2026 09:45:22 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] TEE Soft Emu - Keep
+ ATTEST_KEY RootOfTrust coherent
+
+Certificate processing was gated only on ATTESTATION_CHALLENGE, while
+PURPOSE_ATTEST_KEY creation commonly omits the challenge.
+
+This left such ATTEST_KEY entries with incomplete signer metadata.
+Keys later generated through the UserGenerated attestation path kept
+their original hardware RootOfTrust, while the RKP path was patched to
+the virtual locked and verified state, exposing a deterministic
+cross-path divergence.
+
+Process certificate responses for both challenged requests and
+ATTEST_KEY creation. When the original self-signed ATTEST_KEY
+certificate has no attestation extension and cannot use the normal
+patch-and-resign path, select a validated native keybox identity and
+persist its matching signer material.
+
+This keeps RKP and explicit ATTEST_KEY paths on the same virtual
+RootOfTrust and preserves a verifiable certificate chain across the
+ATTEST_KEY lifecycle.
+
+Add a regression test for ATTEST_KEY creation without an attestation
+challenge.
+
+Change-Id: Ie8397e40e4fb2e290d723a4a51397a9e81618838
+---
+ keystore2/src/security_level.rs |  6 ++--
+ keystore2/src/tee_soft_debug.rs | 56 +++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index 6f6a38b..906306b 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -34,8 +34,8 @@ use crate::super_key::{KeyBlob, SuperKeyManager};
+ use crate::tee_soft_debug::{
+     generation_policy_for_uid, mark_auto_security_level_unavailable,
+     maybe_override_certificate_chain_for_uid, maybe_sync_patchlevel_authorizations_for_uid,
+-    should_prefer_local_attest_key_flow_for_uid, TeeSoftAttestKeyMetadata,
+-    TeeSoftDebugGenerationContext, TeeSoftDebugGenerationPolicy,
++    should_prefer_local_attest_key_flow_for_uid, should_process_attestation_response,
++    TeeSoftAttestKeyMetadata, TeeSoftDebugGenerationContext, TeeSoftDebugGenerationPolicy,
+ };
+ use crate::utils::{
+     check_device_attestation_permissions, check_key_permission,
+@@ -1067,7 +1067,7 @@ impl KeystoreSecurityLevel {
+         let mut creation_result = creation_attempt.context(ks_err!())?;
+ 
+         let mut new_attest_key_metadata = None;
+-        if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
++        if should_process_attestation_response(&params) {
+             new_attest_key_metadata = maybe_override_certificate_chain_for_uid(
+                 caller_uid,
+                 &params,
+diff --git a/keystore2/src/tee_soft_debug.rs b/keystore2/src/tee_soft_debug.rs
+index 1cbd0c6..feaf35c 100644
+--- a/keystore2/src/tee_soft_debug.rs
++++ b/keystore2/src/tee_soft_debug.rs
+@@ -287,6 +287,12 @@ fn is_attest_key_request(params: &[KeyParameter]) -> bool {
+     })
+ }
+ 
++/// ATTEST_KEY creation commonly omits ATTESTATION_CHALLENGE, but its returned certificate and
++/// signer state still have to enter the same virtualized chain lifecycle as challenged keys.
++pub(crate) fn should_process_attestation_response(params: &[KeyParameter]) -> bool {
++    has_attestation_challenge(params) || is_attest_key_request(params)
++}
++
+ fn has_attestation_challenge(params: &[KeyParameter]) -> bool {
+     params.iter().any(|p| p.tag == Tag::ATTESTATION_CHALLENGE)
+ }
+@@ -1248,6 +1254,41 @@ fn select_best_chain(
+     None
+ }
+ 
++/// Select a complete native keybox identity for an ATTEST_KEY whose original self-signed
++/// certificate has no attestation extension. Such a certificate cannot be passed through the
++/// normal RootOfTrust patch-and-resign candidate path, but the virtual ATTEST_KEY response will be
++/// replaced by this native chain and its matching private signer material.
++fn select_native_attest_key_chain(
++    original_leaf: &[u8],
++    materials: &[KeyboxMaterial],
++    forced_algorithm_family: Option<&'static str>,
++) -> Option<(Vec<Vec<u8>>, Option<String>, Option<String>)> {
++    let preferred_family =
++        forced_algorithm_family.or_else(|| certificate_public_key_family(original_leaf));
++    let (_, score, chain, algorithm, material_id) = materials
++        .iter()
++        .filter(|material| !material.certs.is_empty() && material.signing_key.is_some())
++        .filter_map(|material| {
++            let chain = material.certs.clone();
++            validate_chain_for_keyattestation(&chain).ok()?;
++            validate_chain_in_keyattestation_view(&chain).ok()?;
++            let family = normalize_algorithm_family(material.algorithm.as_deref());
++            Some((
++                preferred_family.is_some() && preferred_family == family,
++                chain_transition_score(&chain),
++                chain,
++                material.algorithm.clone(),
++                Some(material_id(material)),
++            ))
++        })
++        .min_by_key(|(family_match, score, ..)| (!*family_match, *score))?;
++    info!(
++        "tee soft debug: selected native ATTEST_KEY identity score={}, preferred_family={:?}, algorithm={:?}",
++        score, preferred_family, algorithm
++    );
++    Some((chain, algorithm, material_id))
++}
++
+ fn parse_keybox_material_legacy(xml: &str) -> Result<KeyboxMaterial> {
+     let mut certs = Vec::new();
+     for cert_text in extract_tag_values(xml, "Certificate") {
+@@ -1444,6 +1485,10 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             }
+         }
+     }
++    if selected.is_none() && is_attest_key {
++        selected =
++            select_native_attest_key_chain(&original_leaf, &materials, tracked_forced_family);
++    }
+     if uses_tracked_attest_key {
+         if let Some((current_chain, _, _)) = selected.as_ref() {
+             if chain_transition_score(current_chain) > 0 {
+@@ -1654,6 +1699,17 @@ mod tests {
+         assert!(!TeeSoftDebugGenerationPolicy::AutoHardware.bypasses_rkp(false));
+     }
+ 
++    #[test]
++    fn attest_key_without_challenge_still_processes_its_certificate_response() {
++        let params = vec![KeyParameter {
++            tag: Tag::PURPOSE,
++            value: KeyParameterValue::KeyPurpose(KeyPurpose::ATTEST_KEY),
++        }];
++        assert!(should_process_attestation_response(&params));
++        assert!(!has_attestation_challenge(&params));
++        assert!(!should_process_attestation_response(&[]));
++    }
++
+     #[test]
+     fn attest_key_metadata_round_trips_byte_identically() {
+         let state = TeeSoftAttestKeyMetadata {
+-- 
+2.43.0
+

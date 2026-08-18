@@ -1,0 +1,46 @@
+From 081f3937ccd4eb316a4372e893f6b91b844697cb Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Tue, 18 Aug 2026 11:04:43 +0800
+Subject: [PATCH] Neko LineageOS: Mark camera ID 6 as system-only
+
+Camera ID 6 is a vendor virtual camera that requires an input stream and
+cannot be used as a regular standalone camera. Exposing it to third-party
+applications breaks camera selection in legacy Camera API clients.
+
+Mark it as system-only and remove the obsolete per-package auxiliary
+camera workaround.
+
+Change-Id: I13728cae46d026aaf76b630b791c54796a374402
+---
+ properties/system.prop | 3 ---
+ properties/vendor.prop | 3 +++
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/properties/system.prop b/properties/system.prop
+index 53e72bd..5134a0e 100644
+--- a/properties/system.prop
++++ b/properties/system.prop
+@@ -3,6 +3,3 @@ ro.product.mod_device=marble_global
+ 
+ # Bootloader spoof
+ ro.boot.flash.locked=1
+-
+-BHIM UPI QR fix
+-vendor.camera.aux.packageexcludelist=in.org.npci.upiapp
+diff --git a/properties/vendor.prop b/properties/vendor.prop
+index a268327..5dfb614 100644
+--- a/properties/vendor.prop
++++ b/properties/vendor.prop
+@@ -2,6 +2,9 @@
+ vendor.display.idle_time=0
+ vendor.display.override_doze_mode=1
+ 
++# Camera
++ro.camera.systemCameraIds=6
++
+ # Fingerprint
+ persist.vendor.fingerprint.type=side
+ persist.vendor.fingerprint.sensor_location=1080|920|210|local:4630946370515662721,1080|920|210|local:4630946480857061761
+-- 
+2.43.0
+

@@ -1,0 +1,205 @@
+From 3da0a48ff2071dc667000c17bbf7b1dc3832cc4f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 15 Aug 2026 16:35:18 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Drop Strongbox alone in TEE
+ Soft Emu
+
+Change-Id: Ic41edcb446d7c070abb4c8a078403fd3c9049ad8
+---
+ keystore2/src/security_level.rs | 23 ++++++++--
+ keystore2/src/tee_soft_debug.rs | 74 +++++++++++++++++++++++++++++++++
+ 2 files changed, 93 insertions(+), 4 deletions(-)
+
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index e2a6402..1855af7 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -726,6 +726,7 @@ impl KeystoreSecurityLevel {
+                 caller_uid,
+                 params,
+                 attest_key_descriptor.is_some(),
++                self.security_level,
+             );
+         let attestation_key_info = if prefer_local_attest_key_flow {
+             info!(
+@@ -854,9 +855,13 @@ impl KeystoreSecurityLevel {
+                     issuer_subject,
+                     tee_soft_metadata: _,
+                 }) => {
+-                    let (attest_km_dev, attest_km_version) = if let Some(km_uuid) =
+-                        blob_metadata.km_uuid().copied()
+-                    {
++                    let routed_km_uuid =
++                        if self.security_level == SecurityLevel::TRUSTED_ENVIRONMENT {
++                            blob_metadata.km_uuid().copied()
++                        } else {
++                            None
++                        };
++                    let (attest_km_dev, attest_km_version) = if let Some(km_uuid) = routed_km_uuid {
+                         match get_keymint_dev_by_uuid(&km_uuid) {
+                             Ok((dev, hw_info)) => {
+                                 effective_generation_security_level = hw_info.securityLevel;
+@@ -887,6 +892,10 @@ impl KeystoreSecurityLevel {
+                             }
+                         }
+                     } else {
++                        // In particular, never route a StrongBox request to the TEE Soft/software
++                        // device based on an external ATTEST_KEY's persisted UUID. Passing an
++                        // incompatible blob to the genuine StrongBox HAL lets it return its native
++                        // error instead of manufacturing a cross-security-level result.
+                         (self.keymint.clone(), self.hw_info.versionNumber)
+                     };
+ 
+@@ -1042,6 +1051,7 @@ impl KeystoreSecurityLevel {
+                 caller_uid,
+                 &params,
+                 TeeSoftDebugGenerationContext {
++                    security_level: self.security_level,
+                     has_external_attestation_key: has_external_attestation_key
+                         && !has_rkpd_attestation_key,
+                     uses_tracked_attest_key,
+@@ -1052,7 +1062,12 @@ impl KeystoreSecurityLevel {
+                 persisted_attest_key.as_ref(),
+                 &mut creation_result,
+             );
+-            maybe_sync_patchlevel_authorizations_for_uid(caller_uid, &creation_result, &mut params);
++            maybe_sync_patchlevel_authorizations_for_uid(
++                caller_uid,
++                self.security_level,
++                &creation_result,
++                &mut params,
++            );
+         }
+ 
+         if new_attest_key_metadata.is_none()
+diff --git a/keystore2/src/tee_soft_debug.rs b/keystore2/src/tee_soft_debug.rs
+index 96cfc0d..4558dfe 100644
+--- a/keystore2/src/tee_soft_debug.rs
++++ b/keystore2/src/tee_soft_debug.rs
+@@ -71,6 +71,7 @@ pub(crate) enum TeeSoftDebugGenerationPolicy {
+ 
+ #[derive(Clone, Copy, Debug)]
+ pub(crate) struct TeeSoftDebugGenerationContext {
++    pub(crate) security_level: SecurityLevel,
+     pub(crate) has_external_attestation_key: bool,
+     pub(crate) uses_tracked_attest_key: bool,
+     pub(crate) used_software_generation: bool,
+@@ -343,6 +344,12 @@ pub(crate) fn generation_policy_for_uid(
+     creation_params: &[KeyParameter],
+     security_level: SecurityLevel,
+ ) -> TeeSoftDebugGenerationPolicy {
++    // TEE Soft Emu is a TRUSTED_ENVIRONMENT persona. StrongBox must remain on its genuine
++    // hardware path, including its own RKP behavior, errors, characteristics, and attestations.
++    if security_level != SecurityLevel::TRUSTED_ENVIRONMENT {
++        return TeeSoftDebugGenerationPolicy::Unmatched;
++    }
++
+     let cfg = match load_config_for_user(caller_uid.owning_user()) {
+         Ok(cfg) => cfg,
+         Err(e) => {
+@@ -418,7 +425,11 @@ pub(crate) fn should_prefer_local_attest_key_flow_for_uid(
+     caller_uid: AppUid,
+     creation_params: &[KeyParameter],
+     attest_key_descriptor_present: bool,
++    security_level: SecurityLevel,
+ ) -> bool {
++    if security_level != SecurityLevel::TRUSTED_ENVIRONMENT {
++        return false;
++    }
+     if !is_attest_key_request(creation_params) || attest_key_descriptor_present {
+         return false;
+     }
+@@ -497,9 +508,13 @@ fn remove_key_param(params: &mut Vec<KeyParameter>, tag: Tag) {
+ 
+ pub(crate) fn maybe_sync_patchlevel_authorizations_for_uid(
+     caller_uid: AppUid,
++    security_level: SecurityLevel,
+     creation_result: &KeyCreationResult,
+     key_params_for_metadata: &mut Vec<KeyParameter>,
+ ) {
++    if security_level != SecurityLevel::TRUSTED_ENVIRONMENT {
++        return;
++    }
+     let user = caller_uid.owning_user();
+     let cfg = match load_config_for_user(user) {
+         Ok(cfg) => cfg,
+@@ -1266,10 +1281,14 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     creation_result: &mut KeyCreationResult,
+ ) -> Option<TeeSoftAttestKeyMetadata> {
+     let TeeSoftDebugGenerationContext {
++        security_level,
+         has_external_attestation_key,
+         uses_tracked_attest_key,
+         used_software_generation,
+     } = generation_context;
++    if security_level != SecurityLevel::TRUSTED_ENVIRONMENT {
++        return None;
++    }
+     let user = caller_uid.owning_user();
+     let cfg = match load_config_for_user(user) {
+         Ok(cfg) => cfg,
+@@ -1566,6 +1585,61 @@ mod tests {
+         assert!(!is_rsa_oaep_non_default_mgf1_request(&params));
+     }
+ 
++    #[test]
++    fn strongbox_is_excluded_before_config_or_package_lookup() {
++        let uid = AppUid(12345);
++        assert_eq!(
++            generation_policy_for_uid(uid, &[], SecurityLevel::STRONGBOX),
++            TeeSoftDebugGenerationPolicy::Unmatched
++        );
++        assert!(!should_prefer_local_attest_key_flow_for_uid(
++            uid,
++            &[],
++            false,
++            SecurityLevel::STRONGBOX,
++        ));
++    }
++
++    #[test]
++    fn strongbox_certificate_and_metadata_are_left_untouched() {
++        let uid = AppUid(12345);
++        let original = vec![Certificate { encodedCertificate: vec![1, 2, 3] }];
++        let mut result = KeyCreationResult {
++            keyBlob: vec![4, 5, 6],
++            keyCharacteristics: vec![],
++            certificateChain: original.clone(),
++        };
++        let metadata = maybe_override_certificate_chain_for_uid(
++            uid,
++            &[],
++            TeeSoftDebugGenerationContext {
++                security_level: SecurityLevel::STRONGBOX,
++                has_external_attestation_key: false,
++                uses_tracked_attest_key: false,
++                used_software_generation: false,
++            },
++            Some("strongbox-key"),
++            None,
++            None,
++            &mut result,
++        );
++        assert!(metadata.is_none());
++        assert_eq!(result.certificateChain, original);
++
++        let mut params = vec![KeyParameter {
++            tag: Tag::OS_PATCHLEVEL,
++            value: KeyParameterValue::Integer(202601),
++        }];
++        let original_params = params.clone();
++        maybe_sync_patchlevel_authorizations_for_uid(
++            uid,
++            SecurityLevel::STRONGBOX,
++            &result,
++            &mut params,
++        );
++        assert_eq!(params, original_params);
++    }
++
+     #[test]
+     fn attest_key_metadata_round_trips_byte_identically() {
+         let state = TeeSoftAttestKeyMetadata {
+-- 
+2.43.0
+

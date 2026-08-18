@@ -1,0 +1,1398 @@
+From 3854ab5dbfcb4c53ac223a7eaf50083c4a5868b9 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 15 Aug 2026 14:14:30 +0800
+Subject: [PATCH] =?UTF-8?q?Neko=20LineageOS:=20[Anti=20Detection]=20lifecy?=
+ =?UTF-8?q?cle=20coherence=20for=20TEE=20Soft=20Emu=EF=BC=9Aimport/delete/?=
+ =?UTF-8?q?update/grant/namespace/migration?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Change-Id: Ibcb17fffe170e170b32f30e56e210ed55629d0a0
+---
+ keystore2/src/attestation_key_utils.rs |  18 +-
+ keystore2/src/database.rs              |  77 +++-
+ keystore2/src/database/tests.rs        | 122 ++++++
+ keystore2/src/security_level.rs        | 126 +++---
+ keystore2/src/service.rs               |  15 +-
+ keystore2/src/tee_soft_debug.rs        | 523 +++++++++----------------
+ 6 files changed, 498 insertions(+), 383 deletions(-)
+
+diff --git a/keystore2/src/attestation_key_utils.rs b/keystore2/src/attestation_key_utils.rs
+index d684b47..0b1f226 100644
+--- a/keystore2/src/attestation_key_utils.rs
++++ b/keystore2/src/attestation_key_utils.rs
+@@ -21,6 +21,7 @@ use crate::error::{Error, ErrorCode};
+ use crate::ks_err;
+ use crate::permission::KeyPerm;
+ use crate::remote_provisioning::RemProvState;
++use crate::tee_soft_debug::TeeSoftAttestKeyMetadata;
+ use crate::utils::{check_key_permission, AppUid};
+ use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+     AttestationKey::AttestationKey, KeyParameter::KeyParameter, Tag::Tag,
+@@ -45,6 +46,7 @@ pub enum AttestationKeyInfo {
+         blob: Vec<u8>,
+         blob_metadata: BlobMetaData,
+         issuer_subject: Vec<u8>,
++        tee_soft_metadata: Option<TeeSoftAttestKeyMetadata>,
+     },
+ }
+ 
+@@ -84,21 +86,27 @@ fn get_user_generated_attestation_key(
+     caller_uid: AppUid,
+     db: &mut KeystoreDB,
+ ) -> Result<AttestationKeyInfo> {
+-    let (key_id_guard, blob, cert, blob_metadata) =
++    let (key_id_guard, blob, cert, blob_metadata, tee_soft_metadata) =
+         load_attest_key_blob_and_cert(key, caller_uid, db)
+             .context(ks_err!("Failed to load blob and cert"))?;
+ 
+     let issuer_subject: Vec<u8> = parse_subject_from_certificate(&cert)
+         .context(ks_err!("Failed to parse subject from certificate"))?;
+ 
+-    Ok(AttestationKeyInfo::UserGenerated { key_id_guard, blob, issuer_subject, blob_metadata })
++    Ok(AttestationKeyInfo::UserGenerated {
++        key_id_guard,
++        blob,
++        issuer_subject,
++        blob_metadata,
++        tee_soft_metadata,
++    })
+ }
+ 
+ fn load_attest_key_blob_and_cert(
+     key: &KeyDescriptor,
+     caller_uid: AppUid,
+     db: &mut KeystoreDB,
+-) -> Result<(KeyIdGuard, Vec<u8>, Vec<u8>, BlobMetaData)> {
++) -> Result<(KeyIdGuard, Vec<u8>, Vec<u8>, BlobMetaData, Option<TeeSoftAttestKeyMetadata>)> {
+     match key.domain {
+         Domain::BLOB => Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
+             .context(ks_err!("Domain::BLOB attestation keys not supported")),
+@@ -121,7 +129,9 @@ fn load_attest_key_blob_and_cert(
+                 .take_cert()
+                 .ok_or(Error::Rc(ResponseCode::INVALID_ARGUMENT))
+                 .context(ks_err!("Successfully loaded key entry, but cert was missing"))?;
+-            Ok((key_id_guard, blob, cert, blob_metadata))
++            let tee_soft_metadata =
++                TeeSoftAttestKeyMetadata::from_key_metadata(key_entry.metadata());
++            Ok((key_id_guard, blob, cert, blob_metadata, tee_soft_metadata))
+         }
+     }
+ }
+diff --git a/keystore2/src/database.rs b/keystore2/src/database.rs
+index 72174e6..a72d125 100644
+--- a/keystore2/src/database.rs
++++ b/keystore2/src/database.rs
+@@ -156,6 +156,18 @@ impl_metadata!(
+         AttestationRawPubKey(Vec<u8>) with accessor attestation_raw_pub_key,
+         /// SEC1 public key for ECDH encryption
+         Sec1PublicKey(Vec<u8>) with accessor sec1_public_key,
++        /// Version of the TEE Soft state attached to a user-generated ATTEST_KEY.
++        TeeSoftAttestKeyVersion(i32) with accessor tee_soft_attest_key_version,
++        /// Generation provenance of the TEE Soft ATTEST_KEY (software or hardware).
++        TeeSoftAttestKeySource(i32) with accessor tee_soft_attest_key_source,
++        /// Exact keybox algorithm label selected for this ATTEST_KEY.
++        TeeSoftAttestKeyAlgorithm(Vec<u8>) with accessor tee_soft_attest_key_algorithm,
++        /// Stable identifier of the exact keybox material selected for this ATTEST_KEY.
++        TeeSoftAttestKeyMaterialId(Vec<u8>) with accessor tee_soft_attest_key_material_id,
++        /// DER certificate of the signer pinned to this ATTEST_KEY.
++        TeeSoftAttestKeySignerCert(Vec<u8>) with accessor tee_soft_attest_key_signer_cert,
++        /// Encoded private signer material pinned to this ATTEST_KEY.
++        TeeSoftAttestKeySignerKey(Vec<u8>) with accessor tee_soft_attest_key_signer_key,
+         //  --- ADD NEW META DATA FIELDS HERE ---
+         // For backwards compatibility add new entries only to
+         // end of this list and above this comment.
+@@ -201,7 +213,9 @@ impl KeyMetaData {
+         let iter = self.data.iter();
+         for (tag, entry) in iter {
+             stmt.insert(params![key_id, tag, entry,]).with_context(|| {
+-                ks_err!("KeyMetaData::store_in_db: Failed to insert {:?}", entry)
++                // Some key metadata is sensitive signer material. Never format the value into
++                // logs on a database error.
++                ks_err!("KeyMetaData::store_in_db: Failed to insert tag {}", tag)
+             })?;
+         }
+         Ok(())
+@@ -1671,6 +1685,44 @@ impl KeystoreDB {
+         .context(ks_err!())
+     }
+ 
++    /// Atomically updates both public certificate components and invalidates TEE Soft ATTEST_KEY
++    /// signer metadata. Once callers replace either public component, retaining the old signer
++    /// selection would make the key's persisted identity internally inconsistent.
++    pub fn set_public_blobs_and_invalidate_tee_soft_attest_key(
++        &mut self,
++        key_id: &KeyIdGuard,
++        public_cert: Option<&[u8]>,
++        certificate_chain: Option<&[u8]>,
++    ) -> Result<()> {
++        let _wp = wd::watch("KeystoreDB::set_public_blobs_and_invalidate_tee_soft_attest_key");
++        self.with_transaction(Immediate("TX_set_public_blobs_invalidate_tee_soft"), |tx| {
++            Self::set_blob_internal(tx, key_id.0, SubComponentType::CERT, public_cert, None)?;
++            Self::set_blob_internal(
++                tx,
++                key_id.0,
++                SubComponentType::CERT_CHAIN,
++                certificate_chain,
++                None,
++            )?;
++            tx.execute(
++                "DELETE FROM persistent.keymetadata
++                 WHERE keyentryid = ? AND tag IN (?, ?, ?, ?, ?, ?);",
++                params![
++                    key_id.0,
++                    KeyMetaData::TeeSoftAttestKeyVersion,
++                    KeyMetaData::TeeSoftAttestKeySource,
++                    KeyMetaData::TeeSoftAttestKeyAlgorithm,
++                    KeyMetaData::TeeSoftAttestKeyMaterialId,
++                    KeyMetaData::TeeSoftAttestKeySignerCert,
++                    KeyMetaData::TeeSoftAttestKeySignerKey,
++                ],
++            )
++            .context("Trying to invalidate TEE Soft ATTEST_KEY metadata.")?;
++            Ok(()).need_gc()
++        })
++        .context(ks_err!())
++    }
++
+     /// Why would we insert a deleted blob? This weird function is for the purpose of legacy
+     /// key migration in the case where we bulk delete all the keys of an app or even a user.
+     /// We use this to insert key blobs into the database which can then be garbage collected
+@@ -1811,6 +1863,29 @@ impl KeystoreDB {
+                     .context(ks_err!("Domain {:?} must be either App or SELinux.", domain));
+             }
+         }
++        // Explicitly invalidate TEE Soft signer material on alias replacement. The old keyentry
++        // becomes unreachable below, but deleting this metadata in the rebind transaction avoids
++        // retaining stale private signer material until a later garbage-collection pass.
++        tx.execute(
++            "DELETE FROM persistent.keymetadata
++             WHERE keyentryid IN (
++                 SELECT id FROM persistent.keyentry
++                 WHERE alias = ? AND domain = ? AND namespace = ? AND key_type = ?
++             ) AND tag IN (?, ?, ?, ?, ?, ?);",
++            params![
++                alias,
++                domain.0 as u32,
++                namespace,
++                key_type,
++                KeyMetaData::TeeSoftAttestKeyVersion,
++                KeyMetaData::TeeSoftAttestKeySource,
++                KeyMetaData::TeeSoftAttestKeyAlgorithm,
++                KeyMetaData::TeeSoftAttestKeyMaterialId,
++                KeyMetaData::TeeSoftAttestKeySignerCert,
++                KeyMetaData::TeeSoftAttestKeySignerKey,
++            ],
++        )
++        .context(ks_err!("Failed to invalidate rebound TEE Soft ATTEST_KEY state."))?;
+         // Mark any existing key for the alias/domain/namespace/key_type as `Unreferenced` (and wipe
+         // its alias/domain/namespace info) so it can be removed in a subsequent GC pass (in
+         // `cleanup_unreferenced()`).
+diff --git a/keystore2/src/database/tests.rs b/keystore2/src/database/tests.rs
+index 6bee24b..c0c4e55 100644
+--- a/keystore2/src/database/tests.rs
++++ b/keystore2/src/database/tests.rs
+@@ -835,6 +835,128 @@ fn test_insert_and_load_full_keyentry_from_grant() -> Result<()> {
+     Ok(())
+ }
+ 
++#[test]
++fn test_tee_soft_attest_metadata_follows_keyentry_lifecycle() -> Result<()> {
++    let temp_dir = TempDir::new("tee_soft_attest_metadata")?;
++    let mut db = KeystoreDB::new(temp_dir.path(), None)?;
++    const OWNER: AppUid = AppUid(41001);
++    const GRANTEE: AppUid = AppUid(41002);
++    const SOURCE_ALIAS: &str = "tee_soft_attest_source";
++    const DEST_ALIAS: &str = "tee_soft_attest_destination";
++
++    let key_guard = make_test_key_entry(&mut db, Domain::APP, OWNER.0, SOURCE_ALIAS, None)?;
++    let mut metadata = KeyMetaData::new();
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeyVersion(1));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeySource(1));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeyAlgorithm(b"rsa".to_vec()));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeyMaterialId(b"material-id".to_vec()));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeySignerCert(vec![1, 2, 3, 4]));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeySignerKey(vec![5, 6, 7, 8]));
++    db.insert_key_metadata(&key_guard, &metadata)?;
++    drop(key_guard);
++    drop(db);
++
++    // Reopen the persistent database to model a keystore2 restart/reboot.
++    let mut db = KeystoreDB::new(temp_dir.path(), None)?;
++
++    let source = KeyDescriptor {
++        domain: Domain::APP,
++        nspace: OWNER.0,
++        alias: Some(SOURCE_ALIAS.to_string()),
++        blob: None,
++    };
++    let grant = db.grant(&source, OWNER, GRANTEE, key_perm_set![KeyPerm::Use], |_k, _av| Ok(()))?;
++    {
++        let (_guard, entry) = db.load_key_entry(
++            &grant,
++            KeyType::Client,
++            KeyEntryLoadBits::BOTH,
++            GRANTEE,
++            |_k, _av| Ok(()),
++        )?;
++        assert_eq!(entry.metadata().tee_soft_attest_key_version(), Some(&1));
++        assert_eq!(
++            entry.metadata().tee_soft_attest_key_material_id(),
++            Some(&b"material-id".to_vec())
++        );
++        assert_eq!(entry.metadata().tee_soft_attest_key_signer_key(), Some(&vec![5, 6, 7, 8]));
++    }
++
++    let (source_guard, _) =
++        db.load_key_entry(&source, KeyType::Client, KeyEntryLoadBits::NONE, OWNER, |_k, _av| {
++            Ok(())
++        })?;
++    let destination = KeyDescriptor {
++        domain: Domain::APP,
++        nspace: OWNER.0,
++        alias: Some(DEST_ALIAS.to_string()),
++        blob: None,
++    };
++    db.migrate_key_namespace(source_guard, &destination, OWNER, |_k| Ok(()))?;
++
++    let (destination_guard, entry) = db.load_key_entry(
++        &destination,
++        KeyType::Client,
++        KeyEntryLoadBits::BOTH,
++        OWNER,
++        |_k, _av| Ok(()),
++    )?;
++    assert_eq!(entry.metadata().tee_soft_attest_key_signer_cert(), Some(&vec![1, 2, 3, 4]));
++
++    db.set_public_blobs_and_invalidate_tee_soft_attest_key(
++        &destination_guard,
++        Some(b"replacement-cert"),
++        Some(b"replacement-chain"),
++    )?;
++    drop(destination_guard);
++    let (_guard, entry) = db.load_key_entry(
++        &destination,
++        KeyType::Client,
++        KeyEntryLoadBits::BOTH,
++        OWNER,
++        |_k, _av| Ok(()),
++    )?;
++    assert_eq!(entry.metadata().tee_soft_attest_key_version(), None);
++    assert_eq!(entry.metadata().tee_soft_attest_key_signer_key(), None);
++    Ok(())
++}
++
++#[test]
++fn test_rebind_explicitly_invalidates_old_tee_soft_attest_metadata() -> Result<()> {
++    let mut db = new_test_db()?;
++    const OWNER: AppUid = AppUid(42001);
++    const ALIAS: &str = "tee_soft_attest_rebind";
++
++    let old_guard = make_test_key_entry(&mut db, Domain::APP, OWNER.0, ALIAS, None)?;
++    let old_id = old_guard.id();
++    let mut metadata = KeyMetaData::new();
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeyVersion(1));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeySource(2));
++    metadata.add(KeyMetaEntry::TeeSoftAttestKeySignerKey(vec![9, 8, 7]));
++    db.insert_key_metadata(&old_guard, &metadata)?;
++    drop(old_guard);
++
++    // Both generate and import replace aliases through store_new_key/rebind_alias.
++    let replacement = make_test_key_entry(&mut db, Domain::APP, OWNER.0, ALIAS, None)?;
++    drop(replacement);
++    let stale_rows: i64 = db.conn.query_row(
++        "SELECT COUNT(*) FROM persistent.keymetadata
++         WHERE keyentryid = ? AND tag IN (?, ?, ?, ?, ?, ?);",
++        params![
++            old_id,
++            KeyMetaData::TeeSoftAttestKeyVersion,
++            KeyMetaData::TeeSoftAttestKeySource,
++            KeyMetaData::TeeSoftAttestKeyAlgorithm,
++            KeyMetaData::TeeSoftAttestKeyMaterialId,
++            KeyMetaData::TeeSoftAttestKeySignerCert,
++            KeyMetaData::TeeSoftAttestKeySignerKey,
++        ],
++        |row| row.get(0),
++    )?;
++    assert_eq!(stale_rows, 0);
++    Ok(())
++}
++
+ // This test attempts to load a key by key id while the caller is not the owner
+ // but a grant exists for the given key and the caller.
+ #[test]
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index f2284f2..e2a6402 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -33,9 +33,8 @@ use crate::remote_provisioning::RemProvState;
+ use crate::super_key::{KeyBlob, SuperKeyManager};
+ use crate::tee_soft_debug::{
+     generation_policy_for_uid, mark_auto_security_level_unavailable,
+-    mark_generated_attest_key_for_uid, maybe_override_certificate_chain_for_uid,
+-    maybe_sync_patchlevel_authorizations_for_uid, should_prefer_local_attest_key_flow_for_uid,
+-    should_treat_external_attest_key_as_softdebug_for_uid, uses_tracked_attest_key_for_uid,
++    maybe_override_certificate_chain_for_uid, maybe_sync_patchlevel_authorizations_for_uid,
++    should_prefer_local_attest_key_flow_for_uid, TeeSoftAttestKeyMetadata,
+     TeeSoftDebugGenerationContext, TeeSoftDebugGenerationPolicy,
+ };
+ use crate::utils::{
+@@ -54,14 +53,17 @@ use crate::{
+     operation::OperationDb,
+     permission::KeyPerm,
+ };
+-use crate::{globals::{get_keymint_dev_by_uuid, get_keymint_device}, id_rotation::IdRotationState};
++use crate::{
++    globals::{get_keymint_dev_by_uuid, get_keymint_device},
++    id_rotation::IdRotationState,
++};
+ use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+     Algorithm::Algorithm, AttestationKey::AttestationKey, Certificate::Certificate,
+-    EcCurve::EcCurve,
+-    HardwareAuthenticatorType::HardwareAuthenticatorType, IKeyMintDevice::IKeyMintDevice,
+-    KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat,
++    EcCurve::EcCurve, HardwareAuthenticatorType::HardwareAuthenticatorType,
++    IKeyMintDevice::IKeyMintDevice, KeyCreationResult::KeyCreationResult, KeyFormat::KeyFormat,
+     KeyMintHardwareInfo::KeyMintHardwareInfo, KeyParameter::KeyParameter,
+-    KeyParameterValue::KeyParameterValue, SecurityLevel::SecurityLevel, Tag::Tag,
++    KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, SecurityLevel::SecurityLevel,
++    Tag::Tag,
+ };
+ use android_hardware_security_keymint::binder::{BinderFeatures, Strong, ThreadState};
+ use android_system_keystore2::aidl::android::system::keystore2::{
+@@ -90,13 +92,19 @@ pub struct KeystoreSecurityLevel {
+     id_rotation_state: IdRotationState,
+ }
+ 
++struct KeyStorageContext<'a> {
++    security_level: SecurityLevel,
++    km_uuid: Uuid,
++    tee_soft_attest_key_metadata: Option<&'a TeeSoftAttestKeyMetadata>,
++}
++
+ // Blob of 32 zeroes used as empty masking key.
+ static ZERO_BLOB_32: &[u8] = &[0; 32];
+ static DEFAULT_CERT_SUBJECT_DER: &[u8] = &[
+     // Name ::= SEQUENCE { RDNSequence }, CN=Android Keystore Key
+-    0x30, 0x1f, 0x31, 0x1d, 0x30, 0x1b, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x14, 0x41, 0x6e,
+-    0x64, 0x72, 0x6f, 0x69, 0x64, 0x20, 0x4b, 0x65, 0x79, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x20,
+-    0x4b, 0x65, 0x79,
++    0x30, 0x1f, 0x31, 0x1d, 0x30, 0x1b, 0x06, 0x03, 0x55, 0x04, 0x03, 0x0c, 0x14, 0x41, 0x6e, 0x64,
++    0x72, 0x6f, 0x69, 0x64, 0x20, 0x4b, 0x65, 0x79, 0x73, 0x74, 0x6f, 0x72, 0x65, 0x20, 0x4b, 0x65,
++    0x79,
+ ];
+ 
+ fn derive_ec_key_size_from_curve(params: &[KeyParameter]) -> Option<i32> {
+@@ -188,8 +196,11 @@ impl KeystoreSecurityLevel {
+             creation_result,
+             user,
+             flags,
+-            self.security_level,
+-            self.km_uuid,
++            KeyStorageContext {
++                security_level: self.security_level,
++                km_uuid: self.km_uuid,
++                tee_soft_attest_key_metadata: None,
++            },
+         )
+     }
+ 
+@@ -199,8 +210,7 @@ impl KeystoreSecurityLevel {
+         creation_result: KeyCreationResult,
+         user: AndroidUserId,
+         flags: Option<i32>,
+-        stored_sec_level: SecurityLevel,
+-        stored_km_uuid: Uuid,
++        storage: KeyStorageContext<'_>,
+     ) -> Result<KeyMetadata> {
+         let KeyCreationResult {
+             keyBlob: key_blob,
+@@ -268,7 +278,10 @@ impl KeystoreSecurityLevel {
+ 
+                     let mut key_metadata = KeyMetaData::new();
+                     key_metadata.add(KeyMetaEntry::CreationDate(creation_date));
+-                    blob_metadata.add(BlobMetaEntry::KmUuid(stored_km_uuid));
++                    if let Some(tee_soft_metadata) = storage.tee_soft_attest_key_metadata {
++                        tee_soft_metadata.add_to_key_metadata(&mut key_metadata);
++                    }
++                    blob_metadata.add(BlobMetaEntry::KmUuid(storage.km_uuid));
+ 
+                     let key_id = db
+                         .store_new_key(
+@@ -278,7 +291,7 @@ impl KeystoreSecurityLevel {
+                             &BlobInfo::new(&key_blob, &blob_metadata),
+                             &cert_info,
+                             &key_metadata,
+-                            &stored_km_uuid,
++                            &storage.km_uuid,
+                         )
+                         .context(ks_err!())?;
+                     Ok(KeyDescriptor {
+@@ -292,7 +305,7 @@ impl KeystoreSecurityLevel {
+ 
+         Ok(KeyMetadata {
+             key,
+-            keySecurityLevel: stored_sec_level,
++            keySecurityLevel: storage.security_level,
+             certificate: cert_info.take_cert(),
+             certificateChain: cert_info.take_cert_chain(),
+             authorizations: crate::utils::key_parameters_to_authorizations(key_parameters),
+@@ -311,7 +324,8 @@ impl KeystoreSecurityLevel {
+         // so that we can use it by reference like the blob provided by the key descriptor.
+         // Otherwise, we would have to clone the blob from the key descriptor.
+         let scoping_blob: Vec<u8>;
+-        let (km_blob, key_properties, key_id_guard, loaded_descriptor, blob_metadata) = match key.domain {
++        let (km_blob, key_properties, key_id_guard, loaded_descriptor, blob_metadata) =
++            match key.domain {
+                 Domain::BLOB => {
+                     check_key_permission(KeyPerm::Use, key, &None)
+                         .context(ks_err!("checking use permission for Domain::BLOB."))?;
+@@ -360,8 +374,8 @@ impl KeystoreSecurityLevel {
+                         })
+                         .context(ks_err!("Failed to load key blob."))?;
+ 
+-                let loaded_descriptor =
+-                    DB.with(|db| db.borrow_mut().load_key_descriptor(key_id_guard.id()))
++                    let loaded_descriptor = DB
++                        .with(|db| db.borrow_mut().load_key_descriptor(key_id_guard.id()))
+                         .context(ks_err!("Failed to resolve key descriptor for debug routing."))?;
+ 
+                     let (blob, blob_metadata) =
+@@ -412,21 +426,29 @@ impl KeystoreSecurityLevel {
+             .unwrap_key_if_required(&blob_metadata, km_blob)
+             .context(ks_err!("Failed to handle super encryption."))?;
+ 
+-        let (routed_km_dev, routed_km_version, routed_km_uuid, routed_sec_level) =
+-            if let Some(km_uuid) = blob_metadata.km_uuid().copied() {
+-                match get_keymint_dev_by_uuid(&km_uuid) {
+-                    Ok((dev, hw_info)) => (dev, hw_info.versionNumber, km_uuid, hw_info.securityLevel),
+-                    Err(e) => {
+-                        warn!(
++        let (routed_km_dev, routed_km_version, routed_km_uuid, routed_sec_level) = if let Some(
++            km_uuid,
++        ) =
++            blob_metadata.km_uuid().copied()
++        {
++            match get_keymint_dev_by_uuid(&km_uuid) {
++                Ok((dev, hw_info)) => (dev, hw_info.versionNumber, km_uuid, hw_info.securityLevel),
++                Err(e) => {
++                    warn!(
+                             "tee soft debug: failed to resolve routed KeyMint device by uuid {:?}, falling back to current binder device: {:?}",
+                             km_uuid, e
+                         );
+-                        (self.keymint.clone(), self.hw_info.versionNumber, self.km_uuid, self.security_level)
+-                    }
++                    (
++                        self.keymint.clone(),
++                        self.hw_info.versionNumber,
++                        self.km_uuid,
++                        self.security_level,
++                    )
+                 }
+-            } else {
+-                (self.keymint.clone(), self.hw_info.versionNumber, self.km_uuid, self.security_level)
+-            };
++            }
++        } else {
++            (self.keymint.clone(), self.hw_info.versionNumber, self.km_uuid, self.security_level)
++        };
+         info!(
+             "tee soft debug: create_operation routing key={:?}, caller_uid={:?}, loaded_descriptor={:?}, km_uuid={:?}, routed_sec_level={:?}, forced={}, purpose={:?}",
+             key,
+@@ -438,8 +460,7 @@ impl KeystoreSecurityLevel {
+             purpose
+         );
+ 
+-        let routed_km_ctx =
+-            KeymintUpgradeCtx { dev: &*routed_km_dev, version: routed_km_version };
++        let routed_km_ctx = KeymintUpgradeCtx { dev: &*routed_km_dev, version: routed_km_version };
+         let (begin_result, upgraded_blob) = self
+             .upgrade_keyblob_if_required_with_dev(
+                 routed_km_ctx,
+@@ -736,13 +757,13 @@ impl KeystoreSecurityLevel {
+         let has_external_attestation_key = attestation_key_info.is_some();
+         let has_rkpd_attestation_key =
+             matches!(&attestation_key_info, Some(AttestationKeyInfo::RkpdProvisioned { .. }));
+-        let uses_tracked_attest_key =
+-            uses_tracked_attest_key_for_uid(caller_uid, attest_key_descriptor)
+-                || should_treat_external_attest_key_as_softdebug_for_uid(
+-                    caller_uid,
+-                    &params,
+-                    attest_key_descriptor,
+-                );
++        let persisted_attest_key = match &attestation_key_info {
++            Some(AttestationKeyInfo::UserGenerated { tee_soft_metadata, .. }) => {
++                tee_soft_metadata.clone()
++            }
++            _ => None,
++        };
++        let uses_tracked_attest_key = persisted_attest_key.is_some();
+         let requested_software_generation = generation_policy.requests_software();
+         let use_software_generation = generation_policy.auto_requests_software()
+             || (generation_policy == TeeSoftDebugGenerationPolicy::Generate
+@@ -831,6 +852,7 @@ impl KeystoreSecurityLevel {
+                     blob,
+                     blob_metadata,
+                     issuer_subject,
++                    tee_soft_metadata: _,
+                 }) => {
+                     let (attest_km_dev, attest_km_version) = if let Some(km_uuid) =
+                         blob_metadata.km_uuid().copied()
+@@ -1014,8 +1036,9 @@ impl KeystoreSecurityLevel {
+ 
+         let mut creation_result = creation_attempt.context(ks_err!())?;
+ 
++        let mut new_attest_key_metadata = None;
+         if params.iter().any(|kp| kp.tag == Tag::ATTESTATION_CHALLENGE) {
+-            maybe_override_certificate_chain_for_uid(
++            new_attest_key_metadata = maybe_override_certificate_chain_for_uid(
+                 caller_uid,
+                 &params,
+                 TeeSoftDebugGenerationContext {
+@@ -1026,12 +1049,22 @@ impl KeystoreSecurityLevel {
+                 },
+                 key.alias.as_deref(),
+                 attest_key_descriptor,
++                persisted_attest_key.as_ref(),
+                 &mut creation_result,
+             );
+             maybe_sync_patchlevel_authorizations_for_uid(caller_uid, &creation_result, &mut params);
+         }
+ 
+-        mark_generated_attest_key_for_uid(caller_uid, &key, &params, used_software_generation);
++        if new_attest_key_metadata.is_none()
++            && generation_policy != TeeSoftDebugGenerationPolicy::Unmatched
++            && params.iter().any(|p| {
++                p.tag == Tag::PURPOSE
++                    && matches!(p.value, KeyParameterValue::KeyPurpose(KeyPurpose::ATTEST_KEY))
++            })
++        {
++            new_attest_key_metadata =
++                Some(TeeSoftAttestKeyMetadata::for_generation(used_software_generation));
++        }
+ 
+         let user = caller_uid.owning_user();
+         info!(
+@@ -1046,8 +1079,11 @@ impl KeystoreSecurityLevel {
+             creation_result,
+             user,
+             Some(flags),
+-            effective_generation_security_level,
+-            effective_generation_km_uuid,
++            KeyStorageContext {
++                security_level: effective_generation_security_level,
++                km_uuid: effective_generation_km_uuid,
++                tee_soft_attest_key_metadata: new_attest_key_metadata.as_ref(),
++            },
+         )
+         .context(ks_err!())
+     }
+diff --git a/keystore2/src/service.rs b/keystore2/src/service.rs
+index da6b14b..740c235 100644
+--- a/keystore2/src/service.rs
++++ b/keystore2/src/service.rs
+@@ -34,7 +34,7 @@ use crate::{
+ };
+ use crate::{database::KEYSTORE_UUID, permission};
+ use crate::{
+-    database::{KeyEntryLoadBits, KeyType, SubComponentType},
++    database::{KeyEntryLoadBits, KeyType},
+     error::ResponseCode,
+ };
+ use crate::{
+@@ -317,11 +317,14 @@ impl KeystoreService {
+ 
+             let mut db = db.borrow_mut();
+             if let Some((key_id_guard, _key_entry)) = entry {
+-                db.set_blob(&key_id_guard, SubComponentType::CERT, public_cert, None)
+-                    .context(ks_err!("Failed to update cert subcomponent."))?;
+-
+-                db.set_blob(&key_id_guard, SubComponentType::CERT_CHAIN, certificate_chain, None)
+-                    .context(ks_err!("Failed to update cert chain subcomponent."))?;
++                db.set_public_blobs_and_invalidate_tee_soft_attest_key(
++                    &key_id_guard,
++                    public_cert,
++                    certificate_chain,
++                )
++                .context(ks_err!(
++                    "Failed to update public subcomponents and invalidate TEE Soft state."
++                ))?;
+                 return Ok(());
+             }
+ 
+diff --git a/keystore2/src/tee_soft_debug.rs b/keystore2/src/tee_soft_debug.rs
+index 012cf3a..96cfc0d 100644
+--- a/keystore2/src/tee_soft_debug.rs
++++ b/keystore2/src/tee_soft_debug.rs
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++use crate::database::{KeyMetaData, KeyMetaEntry};
+ use crate::utils::{AndroidUserId, AppUid};
+ use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
+     Algorithm::Algorithm, Certificate::Certificate, Digest::Digest,
+@@ -19,9 +20,7 @@ use android_hardware_security_keymint::aidl::android::hardware::security::keymin
+     KeyParameterValue::KeyParameterValue, KeyPurpose::KeyPurpose, PaddingMode::PaddingMode,
+     SecurityLevel::SecurityLevel, Tag::Tag,
+ };
+-use android_system_keystore2::aidl::android::system::keystore2::{
+-    Domain::Domain, KeyDescriptor::KeyDescriptor,
+-};
++use android_system_keystore2::aidl::android::system::keystore2::KeyDescriptor::KeyDescriptor;
+ use anyhow::{Context, Result};
+ use base64::engine::general_purpose::STANDARD;
+ use base64::Engine;
+@@ -34,28 +33,13 @@ use keystore2_crypto::{
+ };
+ use log::{info, warn};
+ use packagemanager_aidl::aidl::android::content::pm::IPackageManagerNative::IPackageManagerNative;
+-use std::collections::{HashMap, HashSet};
++use std::collections::HashSet;
+ use std::fs;
+ use std::path::Path;
+ use std::sync::{LazyLock, Mutex};
+ 
+ const RUNTIME_CONFIG_PATH: &str = "/data/adbroot/tee_soft_debug/config.conf";
+ 
+-#[derive(Clone, Debug, Eq, PartialEq)]
+-struct GeneratedAttestKeyRecord {
+-    alias: String,
+-    nspace: i64,
+-    source: &'static str,
+-}
+-
+-static GENERATED_ATTEST_KEYS: LazyLock<Mutex<HashMap<i64, Vec<GeneratedAttestKeyRecord>>>> =
+-    LazyLock::new(|| Mutex::new(HashMap::new()));
+-static TRACKED_ATTEST_KEY_ALGORITHM: LazyLock<Mutex<HashMap<String, String>>> =
+-    LazyLock::new(|| Mutex::new(HashMap::new()));
+-static TRACKED_ATTEST_KEY_MATERIAL: LazyLock<Mutex<HashMap<String, String>>> =
+-    LazyLock::new(|| Mutex::new(HashMap::new()));
+-static TRACKED_ATTEST_SIGNERS: LazyLock<Mutex<HashMap<String, TrackedAttestSignerState>>> =
+-    LazyLock::new(|| Mutex::new(HashMap::new()));
+ // A permanent hardware-generation failure is cached only for the lifetime of keystore2.
+ // Restarting the service or rebooting causes Auto to probe the hardware path again.
+ static AUTO_UNAVAILABLE_SECURITY_LEVELS: LazyLock<Mutex<HashSet<i32>>> =
+@@ -117,13 +101,97 @@ struct KeyboxMaterial {
+     algorithm: Option<String>,
+ }
+ 
+-#[derive(Clone, Debug)]
++#[derive(Clone, Eq, PartialEq)]
+ struct TrackedAttestSignerState {
+     signer_cert: Vec<u8>,
+     signer_key: Vec<u8>,
+     algorithm: Option<String>,
+ }
+ 
++const TEE_SOFT_ATTEST_KEY_METADATA_VERSION: i32 = 1;
++const TEE_SOFT_ATTEST_KEY_SOURCE_SOFTWARE: i32 = 1;
++const TEE_SOFT_ATTEST_KEY_SOURCE_HARDWARE: i32 = 2;
++
++/// Persistent TEE Soft state belonging to one concrete Keystore keyentry. Keeping this state on
++/// the keyentry makes alias rebinding/import replacement invalidate it automatically, while grants
++/// and namespace migration continue to reference the same state.
++#[derive(Clone, Eq, PartialEq)]
++pub(crate) struct TeeSoftAttestKeyMetadata {
++    source: i32,
++    algorithm: Option<String>,
++    material_id: Option<String>,
++    signer: Option<TrackedAttestSignerState>,
++}
++
++impl TeeSoftAttestKeyMetadata {
++    pub(crate) fn for_generation(used_software_generation: bool) -> Self {
++        Self {
++            source: if used_software_generation {
++                TEE_SOFT_ATTEST_KEY_SOURCE_SOFTWARE
++            } else {
++                TEE_SOFT_ATTEST_KEY_SOURCE_HARDWARE
++            },
++            algorithm: None,
++            material_id: None,
++            signer: None,
++        }
++    }
++
++    pub(crate) fn from_key_metadata(metadata: &KeyMetaData) -> Option<Self> {
++        if metadata.tee_soft_attest_key_version().copied()
++            != Some(TEE_SOFT_ATTEST_KEY_METADATA_VERSION)
++        {
++            return None;
++        }
++        let source = metadata.tee_soft_attest_key_source().copied()?;
++        if source != TEE_SOFT_ATTEST_KEY_SOURCE_SOFTWARE
++            && source != TEE_SOFT_ATTEST_KEY_SOURCE_HARDWARE
++        {
++            return None;
++        }
++        let algorithm = metadata
++            .tee_soft_attest_key_algorithm()
++            .and_then(|v| String::from_utf8(v.clone()).ok());
++        let material_id = metadata
++            .tee_soft_attest_key_material_id()
++            .and_then(|v| String::from_utf8(v.clone()).ok());
++        let signer = match (
++            metadata.tee_soft_attest_key_signer_cert(),
++            metadata.tee_soft_attest_key_signer_key(),
++        ) {
++            (Some(cert), Some(key)) if !cert.is_empty() && !key.is_empty() => {
++                Some(TrackedAttestSignerState {
++                    signer_cert: cert.clone(),
++                    signer_key: key.clone(),
++                    algorithm: algorithm.clone(),
++                })
++            }
++            (None, None) => None,
++            _ => return None,
++        };
++        Some(Self { source, algorithm, material_id, signer })
++    }
++
++    pub(crate) fn add_to_key_metadata(&self, metadata: &mut KeyMetaData) {
++        metadata.add(KeyMetaEntry::TeeSoftAttestKeyVersion(TEE_SOFT_ATTEST_KEY_METADATA_VERSION));
++        metadata.add(KeyMetaEntry::TeeSoftAttestKeySource(self.source));
++        if let Some(algorithm) = &self.algorithm {
++            metadata.add(KeyMetaEntry::TeeSoftAttestKeyAlgorithm(algorithm.as_bytes().to_vec()));
++        }
++        if let Some(material_id) = &self.material_id {
++            metadata.add(KeyMetaEntry::TeeSoftAttestKeyMaterialId(material_id.as_bytes().to_vec()));
++        }
++        if let Some(signer) = &self.signer {
++            metadata.add(KeyMetaEntry::TeeSoftAttestKeySignerCert(signer.signer_cert.clone()));
++            metadata.add(KeyMetaEntry::TeeSoftAttestKeySignerKey(signer.signer_key.clone()));
++        }
++    }
++
++    fn signer(&self) -> Option<&TrackedAttestSignerState> {
++        self.signer.as_ref()
++    }
++}
++
+ fn parse_bool_setting(value: Option<String>) -> bool {
+     match value.as_deref() {
+         Some("1") => true,
+@@ -133,12 +201,7 @@ fn parse_bool_setting(value: Option<String>) -> bool {
+ }
+ 
+ fn parse_mode_setting(value: Option<String>) -> TeeSoftDebugMode {
+-    match value
+-        .as_deref()
+-        .map(str::trim)
+-        .map(str::to_ascii_lowercase)
+-        .as_deref()
+-    {
++    match value.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+         Some("generate") => TeeSoftDebugMode::Generate,
+         Some("auto") => TeeSoftDebugMode::Auto,
+         _ => TeeSoftDebugMode::Patch,
+@@ -184,12 +247,7 @@ fn load_config_from_runtime_file() -> Result<TeeSoftDebugConfig> {
+         }
+     }
+ 
+-    Ok(TeeSoftDebugConfig {
+-        enabled,
+-        mode,
+-        keybox_path,
+-        target_packages,
+-    })
++    Ok(TeeSoftDebugConfig { enabled, mode, keybox_path, target_packages })
+ }
+ 
+ fn decide_action(
+@@ -273,117 +331,11 @@ pub(crate) fn mark_auto_security_level_unavailable(security_level: SecurityLevel
+ 
+ fn normalize_alias(alias: Option<&str>) -> Option<String> {
+     let value = alias.unwrap_or_default().trim();
+-    if value.is_empty() { None } else { Some(value.to_string()) }
+-}
+-
+-fn make_uid_alias_key(uid: AppUid, alias: &str) -> String {
+-    format!("{}:{}", uid.0, alias)
+-}
+-
+-pub(crate) fn mark_generated_attest_key_for_uid(
+-    caller_uid: AppUid,
+-    key: &KeyDescriptor,
+-    creation_params: &[KeyParameter],
+-    used_software_generation: bool,
+-) {
+-    if !is_attest_key_request(creation_params) {
+-        return;
+-    }
+-    if key.domain != Domain::APP && key.domain != Domain::SELINUX {
+-        return;
+-    }
+-    let Some(alias) = normalize_alias(key.alias.as_deref()) else {
+-        return;
+-    };
+-
+-    let source = if used_software_generation { "software" } else { "hardware" };
+-    let record = GeneratedAttestKeyRecord { alias: alias.clone(), nspace: key.nspace, source };
+-    let Ok(mut cache) = GENERATED_ATTEST_KEYS.lock() else {
+-        warn!("tee soft debug: failed to lock generated-attest-key cache");
+-        return;
+-    };
+-    let records = cache.entry(caller_uid.0).or_default();
+-    if records.iter().any(|r| r.alias == alias && r.nspace == key.nspace && r.source == source) {
+-        return;
+-    }
+-    records.push(record);
+-    info!(
+-        "tee soft debug: tracked ATTEST_KEY generation for uid={:?}, alias={}, nspace={}, source={}",
+-        caller_uid,
+-        alias,
+-        key.nspace,
+-        source
+-    );
+-}
+-
+-pub(crate) fn uses_tracked_attest_key_for_uid(
+-    caller_uid: AppUid,
+-    attest_key_descriptor: Option<&KeyDescriptor>,
+-) -> bool {
+-    let Some(descriptor) = attest_key_descriptor else {
+-        return false;
+-    };
+-    let Some(alias) = normalize_alias(descriptor.alias.as_deref()) else {
+-        return false;
+-    };
+-
+-    let Ok(cache) = GENERATED_ATTEST_KEYS.lock() else {
+-        warn!("tee soft debug: failed to lock generated-attest-key cache for lookup");
+-        return false;
+-    };
+-    let Some(records) = cache.get(&caller_uid.0) else {
+-        return false;
+-    };
+-
+-    records.iter().any(|r| {
+-        if descriptor.domain == Domain::APP || descriptor.domain == Domain::SELINUX {
+-            r.alias == alias
+-        } else {
+-            r.alias == alias && r.nspace == descriptor.nspace
+-        }
+-    })
+-}
+-
+-pub(crate) fn should_treat_external_attest_key_as_softdebug_for_uid(
+-    caller_uid: AppUid,
+-    creation_params: &[KeyParameter],
+-    attest_key_descriptor: Option<&KeyDescriptor>,
+-) -> bool {
+-    let Some(descriptor) = attest_key_descriptor else {
+-        return false;
+-    };
+-    if !has_attestation_challenge(creation_params) {
+-        return false;
+-    }
+-    if normalize_alias(descriptor.alias.as_deref()).is_none() {
+-        return false;
+-    }
+-
+-    let cfg = match load_config_for_user(caller_uid.owning_user()) {
+-        Ok(cfg) => cfg,
+-        Err(e) => {
+-            warn!(
+-                "tee soft debug: failed to load config while deciding external-attest soft-debug ownership for uid {:?}: {:?}",
+-                caller_uid, e
+-            );
+-            return false;
+-        }
+-    };
+-    if !cfg.enabled || cfg.target_packages.is_empty() {
+-        return false;
++    if value.is_empty() {
++        None
++    } else {
++        Some(value.to_string())
+     }
+-
+-    let uid_packages = match package_names_for_uid(caller_uid) {
+-        Ok(v) => v,
+-        Err(e) => {
+-            warn!(
+-                "tee soft debug: failed to query packages while deciding external-attest soft-debug ownership for uid {:?}: {:?}",
+-                caller_uid, e
+-            );
+-            return false;
+-        }
+-    };
+-    uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg))
+ }
+ 
+ pub(crate) fn generation_policy_for_uid(
+@@ -500,56 +452,10 @@ pub(crate) fn should_prefer_local_attest_key_flow_for_uid(
+     uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg))
+ }
+ 
+-fn track_attest_key_algorithm(uid: AppUid, alias: &str, algorithm: &str) {
+-    let Ok(mut map) = TRACKED_ATTEST_KEY_ALGORITHM.lock() else {
+-        warn!("tee soft debug: failed to lock tracked-attest-key algorithm map");
+-        return;
+-    };
+-    map.insert(make_uid_alias_key(uid, alias), algorithm.to_string());
+-}
+-
+-fn get_tracked_attest_key_algorithm(uid: AppUid, alias: &str) -> Option<String> {
+-    let Ok(map) = TRACKED_ATTEST_KEY_ALGORITHM.lock() else {
+-        warn!("tee soft debug: failed to lock tracked-attest-key algorithm map for lookup");
+-        return None;
+-    };
+-    map.get(&make_uid_alias_key(uid, alias)).cloned()
+-}
+-
+-fn track_attest_key_material(uid: AppUid, alias: &str, material_id: &str) {
+-    let Ok(mut map) = TRACKED_ATTEST_KEY_MATERIAL.lock() else {
+-        warn!("tee soft debug: failed to lock tracked-attest-key material map");
+-        return;
+-    };
+-    map.insert(make_uid_alias_key(uid, alias), material_id.to_string());
+-}
+-
+-fn get_tracked_attest_key_material(uid: AppUid, alias: &str) -> Option<String> {
+-    let Ok(map) = TRACKED_ATTEST_KEY_MATERIAL.lock() else {
+-        warn!("tee soft debug: failed to lock tracked-attest-key material map for lookup");
+-        return None;
+-    };
+-    map.get(&make_uid_alias_key(uid, alias)).cloned()
+-}
+-
+-fn track_attest_signer_state(uid: AppUid, alias: &str, state: TrackedAttestSignerState) {
+-    let Ok(mut map) = TRACKED_ATTEST_SIGNERS.lock() else {
+-        warn!("tee soft debug: failed to lock tracked-attest signer map");
+-        return;
+-    };
+-    map.insert(make_uid_alias_key(uid, alias), state);
+-}
+-
+-fn get_tracked_attest_signer_state(uid: AppUid, alias: &str) -> Option<TrackedAttestSignerState> {
+-    let Ok(map) = TRACKED_ATTEST_SIGNERS.lock() else {
+-        warn!("tee soft debug: failed to lock tracked-attest signer map for lookup");
+-        return None;
+-    };
+-    map.get(&make_uid_alias_key(uid, alias)).cloned()
+-}
+-
+ fn signer_state_from_material(material: &KeyboxMaterial) -> Option<TrackedAttestSignerState> {
+-    let (Some(signer_cert), Some(signer_key)) = (material.certs.first(), material.signing_key.as_ref()) else {
++    let (Some(signer_cert), Some(signer_key)) =
++        (material.certs.first(), material.signing_key.as_ref())
++    else {
+         return None;
+     };
+     Some(TrackedAttestSignerState {
+@@ -559,65 +465,6 @@ fn signer_state_from_material(material: &KeyboxMaterial) -> Option<TrackedAttest
+     })
+ }
+ 
+-fn load_or_init_tracked_attest_signer_state(
+-    uid: AppUid,
+-    alias: &str,
+-    cfg: &TeeSoftDebugConfig,
+-) -> Option<TrackedAttestSignerState> {
+-    if let Some(state) = get_tracked_attest_signer_state(uid, alias) {
+-        return Some(state);
+-    }
+-    if cfg.keybox_path.trim().is_empty() {
+-        return None;
+-    }
+-
+-    let keybox_path = Path::new(cfg.keybox_path.trim());
+-    let materials = match load_keybox_material(keybox_path) {
+-        Ok(v) => v,
+-        Err(e) => {
+-            warn!(
+-                "tee soft debug: failed to load keybox while lazily initializing tracked signer state: {}: {:?}",
+-                keybox_path.display(),
+-                e
+-            );
+-            return None;
+-        }
+-    };
+-
+-    let tracked_material = get_tracked_attest_key_material(uid, alias);
+-    let tracked_family = get_tracked_attest_key_algorithm(uid, alias)
+-        .as_deref()
+-        .and_then(|algo| normalize_algorithm_family(Some(algo)));
+-
+-    let selected = tracked_material
+-        .as_deref()
+-        .and_then(|mid| materials.iter().find(|m| material_id(m) == mid))
+-        .and_then(signer_state_from_material)
+-        .or_else(|| {
+-            tracked_family.and_then(|family| {
+-                materials
+-                    .iter()
+-                    .filter(|m| {
+-                        normalize_algorithm_family(m.algorithm.as_deref()) == Some(family)
+-                    })
+-                    .find_map(signer_state_from_material)
+-            })
+-        })
+-        .or_else(|| {
+-            materials
+-                .iter()
+-                .filter(|m| normalize_algorithm_family(m.algorithm.as_deref()) == Some("rsa"))
+-                .find_map(signer_state_from_material)
+-        })
+-        .or_else(|| materials.iter().find_map(signer_state_from_material));
+-
+-    if let Some(state) = selected {
+-        track_attest_signer_state(uid, alias, state.clone());
+-        return Some(state);
+-    }
+-    None
+-}
+-
+ fn package_names_for_uid(uid: AppUid) -> Result<Vec<String>> {
+     let pm: Strong<dyn IPackageManagerNative> =
+         binder::get_interface("package_native").context("connect package_native")?;
+@@ -826,7 +673,11 @@ fn parse_key_algorithm(block: &str) -> Option<String> {
+     let remain = &head[start..];
+     let end = remain.find('"')?;
+     let value = remain[..end].trim();
+-    if value.is_empty() { None } else { Some(value.to_ascii_lowercase()) }
++    if value.is_empty() {
++        None
++    } else {
++        Some(value.to_ascii_lowercase())
++    }
+ }
+ 
+ fn normalize_algorithm_family(algorithm: Option<&str>) -> Option<&'static str> {
+@@ -1068,7 +919,8 @@ fn reorder_chain_like_keyattestation(chain: &[Vec<u8>]) -> Vec<Vec<u8>> {
+ 
+     let mut new_indices = Vec::new();
+     for (i, name) in names.iter().enumerate() {
+-        let found = names.iter().enumerate().any(|(j, other)| j != i && other.issuer == name.subject);
++        let found =
++            names.iter().enumerate().any(|(j, other)| j != i && other.issuer == name.subject);
+         if !found {
+             new_indices.push(i);
+         }
+@@ -1173,13 +1025,10 @@ fn linearize_chain_by_signature(chain: &[Vec<u8>]) -> Vec<Vec<u8>> {
+             });
+         }
+ 
+-        let Some(parent_idx) = candidates
+-            .into_iter()
+-            .find(|idx| {
+-                signature_family_compatible(child, &chain[*idx])
+-                    && verify_certificate_signed_by(child, &chain[*idx])
+-            })
+-        else {
++        let Some(parent_idx) = candidates.into_iter().find(|idx| {
++            signature_family_compatible(child, &chain[*idx])
++                && verify_certificate_signed_by(child, &chain[*idx])
++        }) else {
+             break;
+         };
+         used[parent_idx] = true;
+@@ -1236,7 +1085,8 @@ fn select_best_chain(
+     materials: &[KeyboxMaterial],
+     forced_algorithm_family: Option<&'static str>,
+ ) -> Option<(Vec<Vec<u8>>, Option<String>, Option<String>)> {
+-    let preferred_family = forced_algorithm_family.or_else(|| certificate_signature_key_family(original_leaf));
++    let preferred_family =
++        forced_algorithm_family.or_else(|| certificate_signature_key_family(original_leaf));
+     if preferred_family.is_none() {
+         warn!("tee soft debug: unable to derive original leaf signature key family");
+     }
+@@ -1389,9 +1239,8 @@ fn parse_keybox_material_legacy(xml: &str) -> Result<KeyboxMaterial> {
+         anyhow::bail!("no decodable <Certificate> entries in keybox xml");
+     }
+ 
+-    let signing_key = extract_tag_values(xml, "PrivateKey")
+-        .into_iter()
+-        .find_map(parse_private_key_material);
++    let signing_key =
++        extract_tag_values(xml, "PrivateKey").into_iter().find_map(parse_private_key_material);
+ 
+     let algorithm = certs
+         .first()
+@@ -1401,8 +1250,10 @@ fn parse_keybox_material_legacy(xml: &str) -> Result<KeyboxMaterial> {
+ }
+ 
+ fn load_keybox_material(path: &Path) -> Result<Vec<KeyboxMaterial>> {
+-    let xml = fs::read_to_string(path).with_context(|| format!("read keybox xml: {}", path.display()))?;
+-    parse_keybox_material_from_xml(&xml).or_else(|_| parse_keybox_material_legacy(&xml).map(|m| vec![m]))
++    let xml =
++        fs::read_to_string(path).with_context(|| format!("read keybox xml: {}", path.display()))?;
++    parse_keybox_material_from_xml(&xml)
++        .or_else(|_| parse_keybox_material_legacy(&xml).map(|m| vec![m]))
+ }
+ 
+ pub(crate) fn maybe_override_certificate_chain_for_uid(
+@@ -1411,8 +1262,9 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     generation_context: TeeSoftDebugGenerationContext,
+     current_key_alias: Option<&str>,
+     attest_key_descriptor: Option<&KeyDescriptor>,
++    persisted_attest_key: Option<&TeeSoftAttestKeyMetadata>,
+     creation_result: &mut KeyCreationResult,
+-) {
++) -> Option<TeeSoftAttestKeyMetadata> {
+     let TeeSoftDebugGenerationContext {
+         has_external_attestation_key,
+         uses_tracked_attest_key,
+@@ -1423,25 +1275,25 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         Ok(cfg) => cfg,
+         Err(e) => {
+             warn!("tee soft debug: failed to load config for user {:?}: {:?}", user, e);
+-            return;
++            return None;
+         }
+     };
+ 
+     if !cfg.enabled || cfg.target_packages.is_empty() {
+-        return;
++        return None;
+     }
+ 
+     let uid_packages = match package_names_for_uid(caller_uid) {
+         Ok(v) => v,
+         Err(e) => {
+             warn!("tee soft debug: failed to query packages for uid {:?}: {:?}", caller_uid, e);
+-            return;
++            return None;
+         }
+     };
+ 
+     let matched = uid_packages.iter().any(|pkg| cfg.target_packages.contains(pkg));
+     if !matched {
+-        return;
++        return None;
+     }
+ 
+     if has_external_attestation_key && !uses_tracked_attest_key {
+@@ -1449,7 +1301,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             "tee soft debug: skip override because key generation used an external attestation key, uid={:?}",
+             caller_uid
+         );
+-        return;
++        return None;
+     }
+ 
+     if has_external_attestation_key && uses_tracked_attest_key && used_software_generation {
+@@ -1460,7 +1312,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         // instead, breaking the app-attestation-key chain contract (and potentially crossing
+         // RSA/EC families).
+         if creation_result.certificateChain.is_empty() {
+-            return;
++            return None;
+         }
+         creation_result.certificateChain.truncate(1);
+         info!(
+@@ -1468,27 +1320,25 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             caller_uid,
+             attest_key_descriptor.and_then(|d| d.alias.as_deref())
+         );
+-        return;
++        return None;
+     }
+ 
+     if has_external_attestation_key && uses_tracked_attest_key {
+-        let alias = attest_key_descriptor.and_then(|d| normalize_alias(d.alias.as_deref()));
+-        let Some(alias) = alias else {
+-            info!(
+-                "tee soft debug: external attestation key tracked but alias unavailable; skip override for uid={:?}",
+-                caller_uid
+-            );
+-            return;
+-        };
+-        let Some(state) = load_or_init_tracked_attest_signer_state(caller_uid, &alias, &cfg) else {
++        let attest_key_label = attest_key_descriptor
++            .and_then(|d| normalize_alias(d.alias.as_deref()))
++            .or_else(|| {
++                attest_key_descriptor.map(|d| format!("keyref:{}:{}", d.domain.0, d.nspace))
++            })
++            .unwrap_or_else(|| "keyref:unknown".to_string());
++        let Some(state) = persisted_attest_key.and_then(TeeSoftAttestKeyMetadata::signer) else {
+             info!(
+-                "tee soft debug: external attestation key tracked but signer state missing for alias={}; skip override for uid={:?}",
+-                alias, caller_uid
++                "tee soft debug: external attestation key metadata has no complete signer for alias={}; skip override for uid={:?}",
++                attest_key_label, caller_uid
+             );
+-            return;
++            return None;
+         };
+         if creation_result.certificateChain.is_empty() {
+-            return;
++            return None;
+         }
+         let original_leaf = creation_result.certificateChain[0].encodedCertificate.clone();
+         let resigned_leaf = match resign_leaf_certificate(
+@@ -1500,24 +1350,24 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             Err(e) => {
+                 warn!(
+                     "tee soft debug: tracked external attest signer failed to resign leaf for uid={:?}, alias={}, algorithm={:?}: {:?}",
+-                    caller_uid, alias, state.algorithm, e
++                    caller_uid, attest_key_label, state.algorithm, e
+                 );
+-                return;
++                return None;
+             }
+         };
+         if !verify_certificate_signed_by(&resigned_leaf, &state.signer_cert) {
+             warn!(
+                 "tee soft debug: tracked external attest signer produced unverifiable leaf for uid={:?}, alias={}; skip override",
+-                caller_uid, alias
++                caller_uid, attest_key_label
+             );
+-            return;
++            return None;
+         }
+         creation_result.certificateChain = vec![Certificate { encodedCertificate: resigned_leaf }];
+         info!(
+             "tee soft debug: external attestation key tracked; replaced leaf only using tracked signer for uid={:?}, alias={}, algorithm={:?}",
+-            caller_uid, alias, state.algorithm
++            caller_uid, attest_key_label, state.algorithm
+         );
+-        return;
++        return None;
+     }
+ 
+     let has_original_chain = !creation_result.certificateChain.is_empty();
+@@ -1525,7 +1375,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+ 
+     let action = decide_action(&cfg, is_attest_key, has_original_chain, used_software_generation);
+     match action {
+-        TeeSoftDebugAction::Skip => return,
++        TeeSoftDebugAction::Skip => return None,
+         TeeSoftDebugAction::GenerateSoftwareChain => {
+             info!(
+                 "tee soft debug: software generation action requested (mode={:?}, is_attest_key={}, uid={:?}); continue with patch flow after generation",
+@@ -1540,7 +1390,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+             "tee soft debug: enabled and package matched, but no keybox configured; skip override for uid {:?}",
+             caller_uid
+         );
+-        return;
++        return None;
+     }
+ 
+     let keybox_path = Path::new(cfg.keybox_path.trim());
+@@ -1548,19 +1398,15 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         Ok(materials) => materials,
+         Err(e) => {
+             warn!("tee soft debug: failed to parse keybox {}: {:?}", keybox_path.display(), e);
+-            return;
++            return None;
+         }
+     };
+ 
+     let original_leaf = creation_result.certificateChain[0].encodedCertificate.clone();
+-    let tracked_forced_family = attest_key_descriptor
+-        .and_then(|d| normalize_alias(d.alias.as_deref()))
+-        .and_then(|alias| get_tracked_attest_key_algorithm(caller_uid, &alias))
+-        .as_deref()
++    let tracked_forced_family = persisted_attest_key
++        .and_then(|state| state.algorithm.as_deref())
+         .and_then(|algo| normalize_algorithm_family(Some(algo)));
+-    let tracked_forced_material = attest_key_descriptor
+-        .and_then(|d| normalize_alias(d.alias.as_deref()))
+-        .and_then(|alias| get_tracked_attest_key_material(caller_uid, &alias));
++    let tracked_forced_material = persisted_attest_key.and_then(|state| state.material_id.clone());
+     let mut selected = select_best_chain(&original_leaf, &materials, tracked_forced_family);
+     if let Some(forced_mid) = tracked_forced_material.as_deref() {
+         let pinned_materials: Vec<KeyboxMaterial> =
+@@ -1603,35 +1449,27 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+     }
+     let Some((mut output_chain, selected_algorithm, selected_material)) = selected else {
+         warn!("tee soft debug: no usable keybox chain selected for {}", cfg.keybox_path);
+-        return;
++        return None;
+     };
+ 
++    let mut new_attest_key_metadata = None;
+     if is_attest_key {
+-        if let (Some(alias), Some(algo)) =
+-            (normalize_alias(current_key_alias), selected_algorithm.as_deref())
+-        {
+-            track_attest_key_algorithm(caller_uid, &alias, algo);
+-            if let Some(mid) = selected_material.as_deref() {
+-                track_attest_key_material(caller_uid, &alias, mid);
+-                if let Some(material) = materials.iter().find(|m| material_id(m) == mid) {
+-                    if let (Some(signer_cert), Some(signer_key)) =
+-                        (material.certs.first(), material.signing_key.as_ref())
+-                    {
+-                        track_attest_signer_state(
+-                            caller_uid,
+-                            &alias,
+-                            TrackedAttestSignerState {
+-                                signer_cert: signer_cert.clone(),
+-                                signer_key: signer_key.clone(),
+-                                algorithm: material.algorithm.clone(),
+-                            },
+-                        );
+-                    }
+-                }
+-            }
++        let mut metadata = TeeSoftAttestKeyMetadata::for_generation(used_software_generation);
++        metadata.algorithm = selected_algorithm.clone();
++        metadata.material_id = selected_material.clone();
++        metadata.signer = selected_material
++            .as_deref()
++            .and_then(|mid| materials.iter().find(|m| material_id(m) == mid))
++            .and_then(signer_state_from_material);
++        new_attest_key_metadata = Some(metadata);
++        if let Some(alias) = normalize_alias(current_key_alias) {
+             info!(
+-                "tee soft debug: tracked ATTEST_KEY chain state for uid={:?}, alias={}, algorithm={:?}, material={:?}",
+-                caller_uid, alias, selected_algorithm, selected_material
++                "tee soft debug: prepared persistent ATTEST_KEY state for uid={:?}, alias={}, algorithm={:?}, material={:?}, signer_complete={}",
++                caller_uid,
++                alias,
++                selected_algorithm,
++                selected_material,
++                new_attest_key_metadata.as_ref().and_then(|state| state.signer()).is_some()
+             );
+         }
+ 
+@@ -1681,6 +1519,7 @@ pub(crate) fn maybe_override_certificate_chain_for_uid(
+         chain_name_summary,
+         keyattestation_steps
+     );
++    new_attest_key_metadata
+ }
+ 
+ #[cfg(test)]
+@@ -1726,4 +1565,34 @@ mod tests {
+         params.retain(|param| param.tag != Tag::PADDING);
+         assert!(!is_rsa_oaep_non_default_mgf1_request(&params));
+     }
++
++    #[test]
++    fn attest_key_metadata_round_trips_byte_identically() {
++        let state = TeeSoftAttestKeyMetadata {
++            source: TEE_SOFT_ATTEST_KEY_SOURCE_SOFTWARE,
++            algorithm: Some("rsa".to_string()),
++            material_id: Some("material-42".to_string()),
++            signer: Some(TrackedAttestSignerState {
++                signer_cert: vec![0x30, 0x01, 0x02, 0x03],
++                signer_key: vec![0x30, 0x04, 0x05, 0x06],
++                algorithm: Some("rsa".to_string()),
++            }),
++        };
++        let mut metadata = KeyMetaData::new();
++        state.add_to_key_metadata(&mut metadata);
++
++        let restored = TeeSoftAttestKeyMetadata::from_key_metadata(&metadata).unwrap();
++        assert!(restored == state);
++        assert_eq!(restored.signer().unwrap().signer_cert, vec![0x30, 0x01, 0x02, 0x03]);
++        assert_eq!(restored.signer().unwrap().signer_key, vec![0x30, 0x04, 0x05, 0x06]);
++    }
++
++    #[test]
++    fn attest_key_metadata_rejects_partial_signer_state() {
++        let mut metadata = KeyMetaData::new();
++        metadata.add(KeyMetaEntry::TeeSoftAttestKeyVersion(TEE_SOFT_ATTEST_KEY_METADATA_VERSION));
++        metadata.add(KeyMetaEntry::TeeSoftAttestKeySource(TEE_SOFT_ATTEST_KEY_SOURCE_HARDWARE));
++        metadata.add(KeyMetaEntry::TeeSoftAttestKeySignerCert(vec![1, 2, 3]));
++        assert!(TeeSoftAttestKeyMetadata::from_key_metadata(&metadata).is_none());
++    }
+ }
+-- 
+2.43.0
+

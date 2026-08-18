@@ -1,0 +1,28 @@
+From f76b2a1b4ac486a35373869d4e36bf2e79442f08 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Tue, 18 Aug 2026 11:16:58 +0800
+Subject: [PATCH] sepolicy: Label system camera ID override property
+
+Label ro.camera.systemCameraIds as camera_config_prop so cameraserver can
+read the device-specific system camera ID list.
+
+Change-Id: I0114d8f374915a89c2b29dbf3208f1b5fb9625a7
+---
+ private/property_contexts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/private/property_contexts b/private/property_contexts
+index b325c2f..e981d53 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -529,6 +529,7 @@ ro.camera.enableVirtualCamera      u:object_r:camera_config_prop:s0 exact bool
+ ro.camera.disableHeicUltraHDR u:object_r:camera_config_prop:s0 exact bool
+ ro.camera.enableSWHEVC        u:object_r:camera_config_prop:s0 exact bool
+ ro.camera.resultFmqSize             u:object_r:camera_config_prop:s0 exact int
++ro.camera.systemCameraIds           u:object_r:camera_config_prop:s0 exact string
+ 
+ ro.camerax.extensions.enabled u:object_r:camerax_extensions_prop:s0 exact bool
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,61 @@
+From 0d4bb5e2c2c1e5866106d91c7737f6181ca59420 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 15 Aug 2026 11:02:06 +0800
+Subject: [PATCH] Neko LineageOS: [Anti-Detection] [Misc] Fix Up! TEE Soft Emu
+ issue for Privacy Space/Work Profile
+
+Change-Id: I999d74da9540eeedcf23205f4aada281f91b5626
+---
+ .../server/pm/PackageManagerNative.java       | 22 ++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/java/com/android/server/pm/PackageManagerNative.java b/services/core/java/com/android/server/pm/PackageManagerNative.java
+index 2252e6fb5..04d353fd8 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerNative.java
++++ b/services/core/java/com/android/server/pm/PackageManagerNative.java
+@@ -77,6 +77,24 @@ final class PackageManagerNative extends IPackageManagerNative.Stub {
+     public PackageInfoNative getPackageInfoWithSigningInfo(String packageName, int userId) {
+         PackageInfo pInfo = mPm.snapshotComputer().getPackageInfo(packageName,
+                 PackageManager.GET_SIGNING_CERTIFICATES, userId);
++        return toPackageInfoNative(packageName, pInfo);
++    }
++
++    private PackageInfoNative getPackageInfoWithSigningInfoForUid(String packageName, int userId,
++            int filterCallingUid) {
++        final long token = Binder.clearCallingIdentity();
++        final PackageInfo pInfo;
++        try {
++            pInfo = mPm.snapshotComputer().getPackageInfoInternal(packageName,
++                    PackageManager.VERSION_CODE_HIGHEST,
++                    PackageManager.GET_SIGNING_CERTIFICATES, filterCallingUid, userId);
++        } finally {
++            Binder.restoreCallingIdentity(token);
++        }
++        return toPackageInfoNative(packageName, pInfo);
++    }
++
++    private static PackageInfoNative toPackageInfoNative(String packageName, PackageInfo pInfo) {
+         if (pInfo == null)  {
+             return null;
+         }
+@@ -112,6 +130,7 @@ final class PackageManagerNative extends IPackageManagerNative.Stub {
+ 
+     @Override
+     public PackageInfoNative[] getPackageInfoWithSigningInfoForUid(int uid) throws RemoteException {
++        final int callingUid = Binder.getCallingUid();
+         String[] packageNames = mPm.snapshotComputer().getPackagesForUid(uid);
+         if (packageNames == null) {
+             return null;
+@@ -120,7 +139,8 @@ final class PackageManagerNative extends IPackageManagerNative.Stub {
+         int userId = UserHandle.getUserId(uid);
+         PackageInfoNative[] result = new PackageInfoNative[packageNames.length];
+         for (int i = 0; i < packageNames.length; i++) {
+-            result[i] = getPackageInfoWithSigningInfo(packageNames[i], userId);
++            result[i] = getPackageInfoWithSigningInfoForUid(
++                    packageNames[i], userId, callingUid);
+         }
+         return result;
+     }
+-- 
+2.43.0
+

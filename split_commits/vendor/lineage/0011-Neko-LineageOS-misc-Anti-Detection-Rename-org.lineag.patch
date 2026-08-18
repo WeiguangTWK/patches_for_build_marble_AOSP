@@ -1,0 +1,70 @@
+From e45e1761d9a1a22e227d138cfc493f5d0624bbfa Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 7 Aug 2026 15:06:33 +0800
+Subject: [PATCH] Neko LineageOS: [misc][Anti-Detection] Rename
+ org.lineageos.push.xml file
+
+Change-Id: Ib4ac331075c486817ba751d7f2a14c3826d891ce
+---
+ config/lineage_sdk_common.mk                  |  2 +-
+ config/permissions/com.android.pushbroker.xml |  4 ++++
+ config/permissions/org.lineageos.push.xml     | 23 -------------------
+ 3 files changed, 5 insertions(+), 24 deletions(-)
+ create mode 100644 config/permissions/com.android.pushbroker.xml
+ delete mode 100644 config/permissions/org.lineageos.push.xml
+
+diff --git a/config/lineage_sdk_common.mk b/config/lineage_sdk_common.mk
+index d476bde..eb9a82f 100644
+--- a/config/lineage_sdk_common.mk
++++ b/config/lineage_sdk_common.mk
+@@ -4,7 +4,7 @@ PRODUCT_COPY_FILES += \
+     vendor/lineage/config/permissions/org.lineageos.hardware.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.hardware.xml \
+     vendor/lineage/config/permissions/org.lineageos.health.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.health.xml \
+     vendor/lineage/config/permissions/org.lineageos.livedisplay.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.livedisplay.xml \
+-    vendor/lineage/config/permissions/org.lineageos.push.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.push.xml \
++    vendor/lineage/config/permissions/com.android.pushbroker.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/com.android.pushbroker.xml \
+     vendor/lineage/config/permissions/org.lineageos.profiles.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.profiles.xml \
+     vendor/lineage/config/permissions/org.lineageos.settings.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.settings.xml \
+     vendor/lineage/config/permissions/org.lineageos.trust.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.trust.xml
+diff --git a/config/permissions/com.android.pushbroker.xml b/config/permissions/com.android.pushbroker.xml
+new file mode 100644
+index 0000000..2be7bf9
+--- /dev/null
++++ b/config/permissions/com.android.pushbroker.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<permissions>
++    <feature name="com.android.pushbroker" />
++</permissions>
+diff --git a/config/permissions/org.lineageos.push.xml b/config/permissions/org.lineageos.push.xml
+deleted file mode 100644
+index 3b66ea0..0000000
+--- a/config/permissions/org.lineageos.push.xml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2026 Neko-LineageOS
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<permissions>
+-    <!-- The feature listed here coincides with the PushBrokerService declared as
+-        part of the external lineage service init in SystemServer. If this xml isn't present
+-        on the device, the service will not be published as a binder service.
+-    -->
+-    <feature name="org.lineageos.push" />
+-</permissions>
+-- 
+2.43.0
+
