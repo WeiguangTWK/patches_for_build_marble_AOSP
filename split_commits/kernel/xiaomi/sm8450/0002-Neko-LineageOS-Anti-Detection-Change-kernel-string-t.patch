@@ -1,0 +1,25 @@
+From 9115e0fdd59ee3c8290f665667277edadefda4d2 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 19 Aug 2026 16:28:11 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Change kernel string to
+ match standard KMI version
+
+Change-Id: I3f03f2c20c9111e428e51fc6a7805dac9a8e61a8
+---
+ arch/arm64/configs/vendor/marble_GKI.config | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/arm64/configs/vendor/marble_GKI.config b/arch/arm64/configs/vendor/marble_GKI.config
+index 26e768e51..c49524cbd 100644
+--- a/arch/arm64/configs/vendor/marble_GKI.config
++++ b/arch/arm64/configs/vendor/marble_GKI.config
+@@ -7,3 +7,6 @@
+ # Power
+ CONFIG_BQ_FG_UPDATE=y
+ CONFIG_HAVE_CHARGE_TEMP=y
++
++CONFIG_LOCALVERSION="-android12-9-00003-gfb24cf99ad97-ab14313284"
++# CONFIG_LOCALVERSION_AUTO is not set
+-- 
+2.43.0
+

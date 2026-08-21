@@ -1,0 +1,25 @@
+From 65d436ae3503a0b5800b60d55bca1bd3c065df95 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 19 Aug 2026 16:21:06 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Override LOCALVERSION
+
+After changing Kernel Version string, we need to clear localversion to avoid a plus char appear in the string
+
+Change-Id: Iaab28a6ca8983e12fcffb64d6e9b29d238ddd02f
+---
+ BoardConfig.mk | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index df6be69..8792748 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -28,3 +28,5 @@ TARGET_VENDOR_PROP += $(DEVICE_PATH)/properties/vendor.prop
+ 
+ # Screen density
+ TARGET_SCREEN_DENSITY := 440
++
++TARGET_KERNEL_ADDITIONAL_FLAGS += LOCALVERSION=
+-- 
+2.43.0
+
