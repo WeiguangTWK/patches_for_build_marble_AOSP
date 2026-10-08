@@ -1,0 +1,706 @@
+From 1db0359d85ba51dead83ed296ef3c8f96b94b257 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:17:59 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add INFRA to tell fasd if foreground
+ app is GAME
+
+It recognize game according CATEGORY_GAME of certain app.
+The game dev forgot to tag itself as game? Don't worry you can enable fasd manually through UI
+
+Fasd code is located in system/core/, go there to see what's the difference from fas-rs
+
+Change-Id: Ib9d3742136dfe4802c6acf10a86373c560ddd041
+---
+ .../android/server/fas/FasManagerService.java | 638 ++++++++++++++++++
+ ...id_server_wm_TaskFpsCallbackController.cpp |   6 +
+ .../java/com/android/server/SystemServer.java |   5 +
+ 3 files changed, 649 insertions(+)
+ create mode 100644 services/core/java/com/android/server/fas/FasManagerService.java
+
+diff --git a/services/core/java/com/android/server/fas/FasManagerService.java b/services/core/java/com/android/server/fas/FasManagerService.java
+new file mode 100644
+index 000000000..565c76484
+--- /dev/null
++++ b/services/core/java/com/android/server/fas/FasManagerService.java
+@@ -0,0 +1,638 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.fas;
++
++import android.app.ActivityManager;
++import android.app.ActivityManager.RunningAppProcessInfo;
++import android.app.ActivityManager.RunningTaskInfo;
++import android.app.ActivityManagerInternal;
++import android.app.ActivityTaskManager;
++import android.app.GameManager;
++import android.app.GameModeConfiguration;
++import android.app.GameModeInfo;
++import android.app.IActivityManager;
++import android.app.IActivityTaskManager;
++import android.app.IGameManagerService;
++import android.app.IGameModeListener;
++import android.app.IProcessObserver;
++import android.app.TaskStackListener;
++import android.app.UidObserver;
++import android.app.WindowConfiguration;
++import android.content.ComponentName;
++import android.content.Context;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageManager;
++import android.hardware.display.DisplayManager;
++import android.net.LocalSocket;
++import android.net.LocalSocketAddress;
++import android.os.Process;
++import android.os.RemoteException;
++import android.os.ServiceManager;
++import android.os.UserHandle;
++import android.util.Slog;
++import android.view.Display;
++import android.view.WindowManager;
++import android.window.TaskFpsCallback;
++import com.android.internal.os.BackgroundThread;
++import com.android.server.LocalServices;
++import com.android.server.SystemService;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.Locale;
++import java.util.Objects;
++
++/** Observes foreground games and emits dry-run diagnostics without applying performance policy. */
++public final class FasManagerService extends SystemService {
++  private static final String TAG = "FasManagerService";
++  private static final long REFRESH_DEBOUNCE_MILLIS = 100;
++  private static final long FASD_RETRY_MILLIS = 1_000;
++  private static final long FASD_HEARTBEAT_MILLIS = 5_000;
++  private static final String FASD_SOCKET = "fasd";
++  private static final int INVALID_TASK_ID = -1;
++
++  private final Context mContext;
++  private final PackageManager mPackageManager;
++  private final DisplayManager mDisplayManager;
++  private final WindowManager mWindowManager;
++  private final IActivityManager mActivityManager;
++  private final IActivityTaskManager mActivityTaskManager;
++  private final ActivityManagerInternal mActivityManagerInternal;
++  private final Runnable mRefreshRunnable = this::refresh;
++  private final Runnable mFasdHeartbeatRunnable =
++      () -> {
++        mLastFasdSession = null;
++        scheduleRefresh();
++      };
++
++  private volatile int mObservedUid = Process.INVALID_UID;
++  private volatile String mObservedPackage;
++  private String mLastSnapshot;
++  private int mFpsTaskId = INVALID_TASK_ID;
++  private ObservedTaskFpsCallback mTaskFpsCallback;
++  private String mLastFasdSession;
++  private boolean mFasdRetryScheduled;
++
++  private final TaskStackListener mTaskStackListener =
++      new TaskStackListener() {
++        @Override
++        public void onTaskStackChanged() {
++          scheduleRefresh();
++        }
++
++        @Override
++        public void onTaskMovedToFront(RunningTaskInfo taskInfo) {
++          scheduleRefresh();
++        }
++
++        @Override
++        public void onTaskFocusChanged(int taskId, boolean focused) {
++          scheduleRefresh();
++        }
++
++        @Override
++        public void onTaskDisplayChanged(int taskId, int newDisplayId) {
++          scheduleRefresh();
++        }
++
++        @Override
++        public void onTaskRemoved(int taskId) {
++          scheduleRefresh();
++        }
++      };
++
++  private final IProcessObserver mProcessObserver =
++      new IProcessObserver.Stub() {
++        @Override
++        public void onForegroundActivitiesChanged(int pid, int uid, boolean foregroundActivities) {
++          if (uid == mObservedUid) {
++            scheduleRefresh();
++          }
++        }
++
++        @Override
++        public void onProcessDied(int pid, int uid) {
++          if (uid == mObservedUid) {
++            scheduleRefresh();
++          }
++        }
++
++        @Override
++        public void onProcessStarted(
++            int pid, int processUid, int packageUid, String packageName, String processName) {
++          if (packageUid == mObservedUid || Objects.equals(packageName, mObservedPackage)) {
++            scheduleRefresh();
++          }
++        }
++
++        @Override
++        public void onForegroundServicesChanged(int pid, int uid, int serviceTypes) {}
++      };
++
++  private final UidObserver mUidObserver =
++      new UidObserver() {
++        @Override
++        public void onUidGone(int uid, boolean disabled) {
++          if (uid == mObservedUid) {
++            scheduleRefresh();
++          }
++        }
++
++        @Override
++        public void onUidStateChanged(int uid, int procState, long procStateSeq, int capability) {
++          if (uid == mObservedUid) {
++            scheduleRefresh();
++          }
++        }
++      };
++
++  private final DisplayManager.DisplayListener mDisplayListener =
++      new DisplayManager.DisplayListener() {
++        @Override
++        public void onDisplayAdded(int displayId) {
++          scheduleRefresh();
++        }
++
++        @Override
++        public void onDisplayRemoved(int displayId) {
++          scheduleRefresh();
++        }
++
++        @Override
++        public void onDisplayChanged(int displayId) {
++          scheduleRefresh();
++        }
++      };
++
++  private final IGameModeListener mGameModeListener =
++      new IGameModeListener.Stub() {
++        @Override
++        public void onGameModeChanged(
++            String packageName, int gameModeFrom, int gameModeTo, int userId) {
++          if (Objects.equals(packageName, mObservedPackage)) {
++            scheduleRefresh();
++          }
++        }
++      };
++
++  public FasManagerService(Context context) {
++    super(context);
++    mContext = context;
++    mPackageManager = context.getPackageManager();
++    mDisplayManager = context.getSystemService(DisplayManager.class);
++    mWindowManager = context.getSystemService(WindowManager.class);
++    mActivityManager = ActivityManager.getService();
++    mActivityTaskManager = ActivityTaskManager.getService();
++    mActivityManagerInternal = LocalServices.getService(ActivityManagerInternal.class);
++  }
++
++  @Override
++  public void onStart() {
++    registerObservers();
++    Slog.i(TAG, "FAS observer started; QTI controls are delegated to fasqtid (shadow by default)");
++    scheduleRefresh();
++  }
++
++  @Override
++  public void onUserSwitching(TargetUser from, TargetUser to) {
++    scheduleRefresh();
++  }
++
++  private void registerObservers() {
++    try {
++      mActivityTaskManager.registerTaskStackListener(mTaskStackListener);
++    } catch (RemoteException e) {
++      Slog.w(TAG, "Unable to register task observer", e);
++    }
++    try {
++      mActivityManager.registerProcessObserver(mProcessObserver);
++    } catch (RemoteException e) {
++      Slog.w(TAG, "Unable to register process observer", e);
++    }
++    try {
++      mActivityManager.registerUidObserver(
++          mUidObserver,
++          ActivityManager.UID_OBSERVER_PROCSTATE | ActivityManager.UID_OBSERVER_GONE,
++          ActivityManager.PROCESS_STATE_UNKNOWN,
++          null);
++    } catch (RemoteException e) {
++      Slog.w(TAG, "Unable to register UID observer", e);
++    }
++
++    if (mDisplayManager != null) {
++      mDisplayManager.registerDisplayListener(mDisplayListener, BackgroundThread.getHandler());
++    }
++
++    final IGameManagerService gameManagerService =
++        IGameManagerService.Stub.asInterface(ServiceManager.checkService(Context.GAME_SERVICE));
++    if (gameManagerService != null) {
++      try {
++        gameManagerService.addGameModeListener(mGameModeListener);
++      } catch (RemoteException | SecurityException e) {
++        Slog.w(TAG, "Unable to register game mode observer", e);
++      }
++    } else {
++      Slog.w(TAG, "Game manager unavailable; game mode will be unsupported");
++    }
++  }
++
++  private void scheduleRefresh() {
++    BackgroundThread.getHandler().removeCallbacks(mRefreshRunnable);
++    BackgroundThread.getHandler().postDelayed(mRefreshRunnable, REFRESH_DEBOUNCE_MILLIS);
++  }
++
++  private void refresh() {
++    final List<RunningTaskInfo> focusedTasks = getFocusedTasks();
++    if (focusedTasks.isEmpty()) {
++      clearObservedApp();
++      logSnapshot("state=IDLE reason=no_focused_task fpsActual=not_tracked");
++      return;
++    }
++
++    final RunningTaskInfo task = selectFocusedTask(focusedTasks);
++    final ComponentName component = task.topActivity != null ? task.topActivity : task.baseActivity;
++    if (component == null) {
++      clearObservedApp();
++      logSnapshot(
++          "state=UNKNOWN reason=focused_task_has_no_component"
++              + " taskId="
++              + task.taskId
++              + " displayId="
++              + task.displayId
++              + " windowMode="
++              + windowModeToString(task.getWindowingMode())
++              + " fpsActual=not_tracked");
++      return;
++    }
++
++    final String packageName = component.getPackageName();
++    final int userId = task.userId;
++    final ApplicationInfo applicationInfo;
++    try {
++      applicationInfo =
++          mPackageManager.getApplicationInfoAsUser(packageName, PackageManager.MATCH_ALL, userId);
++    } catch (PackageManager.NameNotFoundException e) {
++      clearObservedApp();
++      logSnapshot(
++          "state=UNKNOWN reason=package_not_found package="
++              + packageName
++              + " userId="
++              + userId
++              + " taskId="
++              + task.taskId
++              + " fpsActual=not_tracked");
++      return;
++    }
++
++    final int uid = applicationInfo.uid;
++    mObservedUid = uid;
++    mObservedPackage = packageName;
++
++    // Deliberately the only game-identification predicate; there is no built-in game list.
++    final boolean isGame = applicationInfo.category == ApplicationInfo.CATEGORY_GAME;
++    final List<Integer> pids = getPackagePids(packageName, uid);
++    final int uidProcessState = mActivityManagerInternal.getUidProcessState(uid);
++    final GameData gameData =
++        isGame
++            ? getGameData(packageName, userId, task.displayId)
++            : GameData.unsupported(getDisplayRefreshRate(task.displayId));
++
++    syncTaskFpsCallback(isGame, task.taskId, packageName, uid);
++    syncFasd(isGame, task.taskId, packageName, uid, gameData);
++
++    logSnapshot(
++        "state="
++            + (isGame ? "GAME" : "NON_GAME")
++            + " isGame="
++            + isGame
++            + " package="
++            + packageName
++            + " userId="
++            + userId
++            + " uid="
++            + uid
++            + " pids="
++            + pids
++            + " taskId="
++            + task.taskId
++            + " displayId="
++            + task.displayId
++            + " focusedTaskCount="
++            + focusedTasks.size()
++            + " windowMode="
++            + windowModeToString(task.getWindowingMode())
++            + " uidState="
++            + ActivityManager.procStateToString(uidProcessState)
++            + " gameMode="
++            + gameModeToString(gameData.gameMode)
++            + " fpsTargetAdvertised="
++            + formatFps(gameData.fpsTarget)
++            + " fpsTargetSource="
++            + gameData.fpsTargetSource
++            + " fpsOverride="
++            + gameData.fpsOverride
++            + " displayRefreshRate="
++            + formatFps(gameData.displayRefreshRate)
++            + " fpsActual="
++            + (isGame ? "reported_async_by_surfaceflinger" : "not_tracked"));
++  }
++
++  private List<RunningTaskInfo> getFocusedTasks() {
++    final List<RunningTaskInfo> tasks;
++    try {
++      tasks =
++          mActivityTaskManager.getTasks(Integer.MAX_VALUE, false, false, Display.INVALID_DISPLAY);
++    } catch (RemoteException e) {
++      Slog.w(TAG, "Failed to query running tasks", e);
++      return Collections.emptyList();
++    }
++
++    final List<RunningTaskInfo> focusedTasks = new ArrayList<>();
++    for (RunningTaskInfo task : tasks) {
++      if (task.isFocused) {
++        focusedTasks.add(task);
++      }
++    }
++    return focusedTasks;
++  }
++
++  private static RunningTaskInfo selectFocusedTask(List<RunningTaskInfo> focusedTasks) {
++    for (RunningTaskInfo task : focusedTasks) {
++      if (task.displayId == Display.DEFAULT_DISPLAY) {
++        return task;
++      }
++    }
++    return focusedTasks.get(0);
++  }
++
++  private List<Integer> getPackagePids(String packageName, int uid) {
++    final List<RunningAppProcessInfo> processes;
++    try {
++      processes = mActivityManager.getRunningAppProcesses();
++    } catch (RemoteException e) {
++      Slog.w(TAG, "Failed to query running app processes", e);
++      return Collections.emptyList();
++    }
++    if (processes == null) {
++      return Collections.emptyList();
++    }
++
++    final List<Integer> pids = new ArrayList<>();
++    for (RunningAppProcessInfo process : processes) {
++      if (process.uid == uid && containsPackage(process.pkgList, packageName)) {
++        pids.add(process.pid);
++      }
++    }
++    Collections.sort(pids);
++    return pids;
++  }
++
++  private static boolean containsPackage(String[] packages, String packageName) {
++    if (packages == null) {
++      return false;
++    }
++    for (String candidate : packages) {
++      if (packageName.equals(candidate)) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  private GameData getGameData(String packageName, int userId, int displayId) {
++    final float displayRefreshRate = getDisplayRefreshRate(displayId);
++    try {
++      final Context userContext = mContext.createContextAsUser(UserHandle.of(userId), 0);
++      final GameManager gameManager = userContext.getSystemService(GameManager.class);
++      final GameModeInfo info =
++          gameManager == null ? null : gameManager.getGameModeInfo(packageName);
++      if (info == null) {
++        return GameData.unsupported(displayRefreshRate);
++      }
++
++      final int gameMode = info.getActiveGameMode();
++      final GameModeConfiguration configuration = info.getGameModeConfiguration(gameMode);
++      final int fpsOverride =
++          configuration == null
++              ? GameModeConfiguration.FPS_OVERRIDE_NONE
++              : configuration.getFpsOverride();
++      if (fpsOverride != GameModeConfiguration.FPS_OVERRIDE_NONE) {
++        return new GameData(
++            gameMode, fpsOverride, fpsOverride, "game_mode_override", displayRefreshRate);
++      }
++      return new GameData(
++          gameMode, fpsOverride, displayRefreshRate, "display_mode", displayRefreshRate);
++    } catch (RuntimeException e) {
++      Slog.w(TAG, "Failed to query game mode for " + packageName + " u" + userId, e);
++      return GameData.unsupported(displayRefreshRate);
++    }
++  }
++
++  private float getDisplayRefreshRate(int displayId) {
++    final Display display = mDisplayManager == null ? null : mDisplayManager.getDisplay(displayId);
++    return display == null
++        ? Display.INVALID_DISPLAY_REFRESH_RATE
++        : display.getMode().getRefreshRate();
++  }
++
++  private void clearObservedApp() {
++    mObservedUid = Process.INVALID_UID;
++    mObservedPackage = null;
++    syncTaskFpsCallback(false, INVALID_TASK_ID, null, Process.INVALID_UID);
++    syncFasd(false, INVALID_TASK_ID, null, Process.INVALID_UID, null);
++  }
++
++  private void syncFasd(
++      boolean isGame, int taskId, String packageName, int uid, GameData gameData) {
++    final String session =
++        isGame && gameData != null
++            ? "TRACK\t"
++                + taskId
++                + "\t"
++                + uid
++                + "\t"
++                + Math.round(gameData.displayRefreshRate * 1_000)
++                + "\t"
++                + gameData.fpsOverride
++                + "\t"
++                + packageName
++            : "STOP";
++    if (session.equals(mLastFasdSession)) {
++      return;
++    }
++
++    try (LocalSocket socket = new LocalSocket(LocalSocket.SOCKET_SEQPACKET)) {
++      socket.connect(new LocalSocketAddress(FASD_SOCKET, LocalSocketAddress.Namespace.RESERVED));
++      socket.getOutputStream().write(session.getBytes(StandardCharsets.UTF_8));
++      mLastFasdSession = session;
++      mFasdRetryScheduled = false;
++      BackgroundThread.getHandler().removeCallbacks(mFasdHeartbeatRunnable);
++      if (isGame) {
++        BackgroundThread.getHandler()
++            .postDelayed(mFasdHeartbeatRunnable, FASD_HEARTBEAT_MILLIS);
++      }
++    } catch (IOException e) {
++      if (!mFasdRetryScheduled) {
++        Slog.w(TAG, "Unable to update fasd session; retrying", e);
++        mFasdRetryScheduled = true;
++        BackgroundThread.getHandler()
++            .postDelayed(
++                () -> {
++                  mFasdRetryScheduled = false;
++                  scheduleRefresh();
++                },
++                FASD_RETRY_MILLIS);
++      }
++    }
++  }
++
++  private void syncTaskFpsCallback(boolean isGame, int taskId, String packageName, int uid) {
++    if (isGame && taskId == mFpsTaskId && mTaskFpsCallback != null) {
++      return;
++    }
++
++    if (mTaskFpsCallback != null) {
++      final ObservedTaskFpsCallback oldCallback = mTaskFpsCallback;
++      mTaskFpsCallback = null;
++      mFpsTaskId = INVALID_TASK_ID;
++      try {
++        mWindowManager.unregisterTaskFpsCallback(oldCallback);
++      } catch (RuntimeException e) {
++        Slog.w(TAG, "Unable to unregister task FPS observer", e);
++      }
++    }
++
++    if (!isGame || mWindowManager == null) {
++      return;
++    }
++
++    final ObservedTaskFpsCallback callback = new ObservedTaskFpsCallback(taskId, packageName, uid);
++    mTaskFpsCallback = callback;
++    mFpsTaskId = taskId;
++    try {
++      mWindowManager.registerTaskFpsCallback(taskId, BackgroundThread.getExecutor(), callback);
++      Slog.i(
++          TAG,
++          "observing presented FPS package="
++              + packageName
++              + " uid="
++              + uid
++              + " taskId="
++              + taskId
++              + " source=surfaceflinger_frame_timeline");
++    } catch (RuntimeException e) {
++      if (mTaskFpsCallback == callback) {
++        mTaskFpsCallback = null;
++        mFpsTaskId = INVALID_TASK_ID;
++      }
++      Slog.w(TAG, "Unable to register task FPS observer for taskId=" + taskId, e);
++    }
++  }
++
++  private final class ObservedTaskFpsCallback extends TaskFpsCallback {
++    private final int mTaskId;
++    private final String mPackageName;
++    private final int mUid;
++
++    ObservedTaskFpsCallback(int taskId, String packageName, int uid) {
++      mTaskId = taskId;
++      mPackageName = packageName;
++      mUid = uid;
++    }
++
++    @Override
++    public void onFpsReported(float fps) {
++      if (mTaskFpsCallback != this || mFpsTaskId != mTaskId) {
++        return;
++      }
++      Slog.i(
++          TAG,
++          "presented package="
++              + mPackageName
++              + " uid="
++              + mUid
++              + " taskId="
++              + mTaskId
++              + " fpsActual="
++              + formatFps(fps)
++              + " fpsActualSource=surfaceflinger_frame_timeline"
++              + " frequencyControls=external_backend");
++    }
++  }
++
++  private void logSnapshot(String snapshot) {
++    if (!snapshot.equals(mLastSnapshot)) {
++      mLastSnapshot = snapshot;
++      Slog.i(TAG, "dry-run " + snapshot);
++    }
++  }
++
++  private static String windowModeToString(int mode) {
++    return WindowConfiguration.windowingModeToString(mode);
++  }
++
++  private static String gameModeToString(int mode) {
++    switch (mode) {
++      case GameManager.GAME_MODE_STANDARD:
++        return "STANDARD";
++      case GameManager.GAME_MODE_PERFORMANCE:
++        return "PERFORMANCE";
++      case GameManager.GAME_MODE_BATTERY:
++        return "BATTERY";
++      case GameManager.GAME_MODE_CUSTOM:
++        return "CUSTOM";
++      default:
++        return "UNSUPPORTED";
++    }
++  }
++
++  private static String formatFps(float fps) {
++    return String.format(Locale.US, "%.2f", fps);
++  }
++
++  private static final class GameData {
++    final int gameMode;
++    final int fpsOverride;
++    final float fpsTarget;
++    final String fpsTargetSource;
++    final float displayRefreshRate;
++
++    GameData(
++        int gameMode,
++        int fpsOverride,
++        float fpsTarget,
++        String fpsTargetSource,
++        float displayRefreshRate) {
++      this.gameMode = gameMode;
++      this.fpsOverride = fpsOverride;
++      this.fpsTarget = fpsTarget;
++      this.fpsTargetSource = fpsTargetSource;
++      this.displayRefreshRate = displayRefreshRate;
++    }
++
++    static GameData unsupported(float displayRefreshRate) {
++      return new GameData(
++          GameManager.GAME_MODE_UNSUPPORTED,
++          GameModeConfiguration.FPS_OVERRIDE_NONE,
++          displayRefreshRate,
++          "display_mode",
++          displayRefreshRate);
++    }
++  }
++}
+diff --git a/services/core/jni/com_android_server_wm_TaskFpsCallbackController.cpp b/services/core/jni/com_android_server_wm_TaskFpsCallbackController.cpp
+index 0a60e0df1..bfe4cf511 100644
+--- a/services/core/jni/com_android_server_wm_TaskFpsCallbackController.cpp
++++ b/services/core/jni/com_android_server_wm_TaskFpsCallbackController.cpp
+@@ -62,6 +62,12 @@ struct TaskFpsCallback : public gui::BnFpsListener {
+         return binder::Status::ok();
+     }
+ 
++    binder::Status onFrameTimesReported(const std::vector<int64_t>&, int32_t) override {
++        // The public TaskFpsCallback API intentionally exposes only aggregate FPS. FAS uses a
++        // separate native listener in its standalone daemon.
++        return binder::Status::ok();
++    }
++
+ protected:
+     virtual ~TaskFpsCallback() {
+         JNIEnv* env = AndroidRuntime::getJNIEnv();
+diff --git a/services/java/com/android/server/SystemServer.java b/services/java/com/android/server/SystemServer.java
+index f3045dd50..97db090d3 100644
+--- a/services/java/com/android/server/SystemServer.java
++++ b/services/java/com/android/server/SystemServer.java
+@@ -177,6 +177,7 @@ import com.android.server.display.DisplayManagerService;
+ import com.android.server.display.color.ColorDisplayService;
+ import com.android.server.dreams.DreamManagerService;
+ import com.android.server.emergency.EmergencyAffordanceService;
++import com.android.server.fas.FasManagerService;
+ import com.android.server.flags.FeatureFlagsService;
+ import com.android.server.gpu.GpuService;
+ import com.android.server.grammaticalinflection.GrammaticalInflectionService;
+@@ -3279,6 +3280,10 @@ public final class SystemServer implements Dumpable {
+             t.traceBegin("GameManagerService");
+             mSystemServiceManager.startService(GameManagerService.Lifecycle.class);
+             t.traceEnd();
++
++            t.traceBegin("FasManagerService");
++            mSystemServiceManager.startService(FasManagerService.class);
++            t.traceEnd();
+         } else {
+             Slog.d(TAG, "Not starting GameManagerService");
+         }
+-- 
+2.43.0
+

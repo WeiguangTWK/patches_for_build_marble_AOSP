@@ -1,0 +1,277 @@
+From fcc500eea1bdbc7ecd25e172e5f0299b5115af6f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:36:42 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add AIDL infra allow fasd to apply
+ recommended policy from fasd
+
+Change-Id: I3d3c776837ca87b9095878ebd54384141f55cd61
+---
+ .../compatibility_matrix.system.xml           |  9 ++++++
+ fas/aidl/Android.bp                           | 31 +++++++++++++++++++
+ .../aidl_api/vendor.performance.fas/1/.hash   |  1 +
+ .../vendor/performance/fas/CpuPolicyVote.aidl | 30 ++++++++++++++++++
+ .../1/vendor/performance/fas/IFasBackend.aidl | 29 +++++++++++++++++
+ .../vendor/performance/fas/CpuPolicyVote.aidl | 30 ++++++++++++++++++
+ .../vendor/performance/fas/IFasBackend.aidl   | 29 +++++++++++++++++
+ .../vendor/performance/fas/CpuPolicyVote.aidl | 14 +++++++++
+ .../vendor/performance/fas/IFasBackend.aidl   | 15 +++++++++
+ 9 files changed, 188 insertions(+)
+ create mode 100644 fas/aidl/Android.bp
+ create mode 100644 fas/aidl/aidl_api/vendor.performance.fas/1/.hash
+ create mode 100644 fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/CpuPolicyVote.aidl
+ create mode 100644 fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/IFasBackend.aidl
+ create mode 100644 fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/CpuPolicyVote.aidl
+ create mode 100644 fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/IFasBackend.aidl
+ create mode 100644 fas/aidl/vendor/performance/fas/CpuPolicyVote.aidl
+ create mode 100644 fas/aidl/vendor/performance/fas/IFasBackend.aidl
+
+diff --git a/compatibility_matrices/compatibility_matrix.system.xml b/compatibility_matrices/compatibility_matrix.system.xml
+index 2bf3be2..73fd76e 100644
+--- a/compatibility_matrices/compatibility_matrix.system.xml
++++ b/compatibility_matrices/compatibility_matrix.system.xml
+@@ -37,6 +37,15 @@
+             <instance>default</instance>
+         </interface>
+     </hal>
++    <!-- Frame-aware scheduling -->
++    <hal format="aidl" optional="true">
++        <name>vendor.performance.fas</name>
++        <version>1</version>
++        <interface>
++            <name>IFasBackend</name>
++            <instance>default</instance>
++        </interface>
++    </hal>
+     <!-- Display -->
+     <hal format="aidl" optional="true">
+         <name>vendor.lineage.livedisplay</name>
+diff --git a/fas/aidl/Android.bp b/fas/aidl/Android.bp
+new file mode 100644
+index 0000000..cfd164b
+--- /dev/null
++++ b/fas/aidl/Android.bp
+@@ -0,0 +1,31 @@
++//
++// Copyright (C) 2026 The LineageOS Project
++//
++// SPDX-License-Identifier: Apache-2.0
++//
++
++aidl_interface {
++    name: "vendor.performance.fas",
++    srcs: ["vendor/performance/fas/*.aidl"],
++    stability: "vintf",
++    vendor_available: true,
++
++    backend: {
++        java: {
++            enabled: false,
++        },
++        ndk: {
++            enabled: true,
++        },
++        cpp: {
++            enabled: false,
++        },
++    },
++    frozen: true,
++    versions_with_info: [
++        {
++            version: "1",
++            imports: [],
++        },
++    ],
++}
+diff --git a/fas/aidl/aidl_api/vendor.performance.fas/1/.hash b/fas/aidl/aidl_api/vendor.performance.fas/1/.hash
+new file mode 100644
+index 0000000..15ebdf7
+--- /dev/null
++++ b/fas/aidl/aidl_api/vendor.performance.fas/1/.hash
+@@ -0,0 +1 @@
++cee6625378067bc41ed9f786f9371a86c6aa8034
+diff --git a/fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/CpuPolicyVote.aidl b/fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/CpuPolicyVote.aidl
+new file mode 100644
+index 0000000..f9b8d54
+--- /dev/null
++++ b/fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/CpuPolicyVote.aidl
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++///////////////////////////////////////////////////////////////////////////////
++// THIS FILE IS IMMUTABLE. DO NOT EDIT IN ANY CASE.                          //
++///////////////////////////////////////////////////////////////////////////////
++
++// This file is a snapshot of an AIDL file. Do not edit it manually. There are
++// two cases:
++// 1). this is a frozen version file - do not edit this in any case.
++// 2). this is a 'current' file. If you make a backwards compatible change to
++//     the interface (from the latest frozen version), the build system will
++//     prompt you to update this file with `m <name>-update-api`.
++//
++// You must not make a backward incompatible change to any AIDL file built
++// with the aidl_interface module type with versions property set. The module
++// type is used to build AIDL files in a way that they can be used across
++// independently updatable components of the system. If a device is shipped
++// with such a backward incompatible change, it has a high risk of breaking
++// later when a module using the interface is updated, e.g., Mainline modules.
++
++package vendor.performance.fas;
++@VintfStability
++parcelable CpuPolicyVote {
++  int policyId;
++  int minimumKhz;
++  int maximumKhz;
++}
+diff --git a/fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/IFasBackend.aidl b/fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/IFasBackend.aidl
+new file mode 100644
+index 0000000..7c038c9
+--- /dev/null
++++ b/fas/aidl/aidl_api/vendor.performance.fas/1/vendor/performance/fas/IFasBackend.aidl
+@@ -0,0 +1,29 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++///////////////////////////////////////////////////////////////////////////////
++// THIS FILE IS IMMUTABLE. DO NOT EDIT IN ANY CASE.                          //
++///////////////////////////////////////////////////////////////////////////////
++
++// This file is a snapshot of an AIDL file. Do not edit it manually. There are
++// two cases:
++// 1). this is a frozen version file - do not edit this in any case.
++// 2). this is a 'current' file. If you make a backwards compatible change to
++//     the interface (from the latest frozen version), the build system will
++//     prompt you to update this file with `m <name>-update-api`.
++//
++// You must not make a backward incompatible change to any AIDL file built
++// with the aidl_interface module type with versions property set. The module
++// type is used to build AIDL files in a way that they can be used across
++// independently updatable components of the system. If a device is shipped
++// with such a backward incompatible change, it has a high risk of breaking
++// later when a module using the interface is updated, e.g., Mainline modules.
++
++package vendor.performance.fas;
++@VintfStability
++interface IFasBackend {
++  void updateCpuVotes(long generation, long sequence, int ttlMillis, in vendor.performance.fas.CpuPolicyVote[] votes);
++  void releaseCpuVotes(long generation, long sequence);
++}
+diff --git a/fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/CpuPolicyVote.aidl b/fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/CpuPolicyVote.aidl
+new file mode 100644
+index 0000000..f9b8d54
+--- /dev/null
++++ b/fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/CpuPolicyVote.aidl
+@@ -0,0 +1,30 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++///////////////////////////////////////////////////////////////////////////////
++// THIS FILE IS IMMUTABLE. DO NOT EDIT IN ANY CASE.                          //
++///////////////////////////////////////////////////////////////////////////////
++
++// This file is a snapshot of an AIDL file. Do not edit it manually. There are
++// two cases:
++// 1). this is a frozen version file - do not edit this in any case.
++// 2). this is a 'current' file. If you make a backwards compatible change to
++//     the interface (from the latest frozen version), the build system will
++//     prompt you to update this file with `m <name>-update-api`.
++//
++// You must not make a backward incompatible change to any AIDL file built
++// with the aidl_interface module type with versions property set. The module
++// type is used to build AIDL files in a way that they can be used across
++// independently updatable components of the system. If a device is shipped
++// with such a backward incompatible change, it has a high risk of breaking
++// later when a module using the interface is updated, e.g., Mainline modules.
++
++package vendor.performance.fas;
++@VintfStability
++parcelable CpuPolicyVote {
++  int policyId;
++  int minimumKhz;
++  int maximumKhz;
++}
+diff --git a/fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/IFasBackend.aidl b/fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/IFasBackend.aidl
+new file mode 100644
+index 0000000..7c038c9
+--- /dev/null
++++ b/fas/aidl/aidl_api/vendor.performance.fas/current/vendor/performance/fas/IFasBackend.aidl
+@@ -0,0 +1,29 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++///////////////////////////////////////////////////////////////////////////////
++// THIS FILE IS IMMUTABLE. DO NOT EDIT IN ANY CASE.                          //
++///////////////////////////////////////////////////////////////////////////////
++
++// This file is a snapshot of an AIDL file. Do not edit it manually. There are
++// two cases:
++// 1). this is a frozen version file - do not edit this in any case.
++// 2). this is a 'current' file. If you make a backwards compatible change to
++//     the interface (from the latest frozen version), the build system will
++//     prompt you to update this file with `m <name>-update-api`.
++//
++// You must not make a backward incompatible change to any AIDL file built
++// with the aidl_interface module type with versions property set. The module
++// type is used to build AIDL files in a way that they can be used across
++// independently updatable components of the system. If a device is shipped
++// with such a backward incompatible change, it has a high risk of breaking
++// later when a module using the interface is updated, e.g., Mainline modules.
++
++package vendor.performance.fas;
++@VintfStability
++interface IFasBackend {
++  void updateCpuVotes(long generation, long sequence, int ttlMillis, in vendor.performance.fas.CpuPolicyVote[] votes);
++  void releaseCpuVotes(long generation, long sequence);
++}
+diff --git a/fas/aidl/vendor/performance/fas/CpuPolicyVote.aidl b/fas/aidl/vendor/performance/fas/CpuPolicyVote.aidl
+new file mode 100644
+index 0000000..4c5dc38
+--- /dev/null
++++ b/fas/aidl/vendor/performance/fas/CpuPolicyVote.aidl
+@@ -0,0 +1,14 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package vendor.performance.fas;
++
++@VintfStability
++parcelable CpuPolicyVote {
++    int policyId;
++    int minimumKhz;
++    int maximumKhz;
++}
+diff --git a/fas/aidl/vendor/performance/fas/IFasBackend.aidl b/fas/aidl/vendor/performance/fas/IFasBackend.aidl
+new file mode 100644
+index 0000000..787ab73
+--- /dev/null
++++ b/fas/aidl/vendor/performance/fas/IFasBackend.aidl
+@@ -0,0 +1,15 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package vendor.performance.fas;
++
++import vendor.performance.fas.CpuPolicyVote;
++
++@VintfStability
++interface IFasBackend {
++    void updateCpuVotes(long generation, long sequence, int ttlMillis, in CpuPolicyVote[] votes);
++    void releaseCpuVotes(long generation, long sequence);
++}
+-- 
+2.43.0
+

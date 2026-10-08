@@ -1,0 +1,972 @@
+From 912ce7dc8a0f3dd6da79e296aa326cc555adcfa4 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:10:30 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add QTI-vote based FAS support
+
+Change-Id: Iba151ee10ca18da35921a80ccd0decaef012fc41
+---
+ fasqtid/Android.bp                         |  31 +
+ fasqtid/fasqtid.cpp                        | 782 +++++++++++++++++++++
+ fasqtid/fasqtid.rc                         |  25 +
+ fasqtid/vendor.performance.fas-service.xml |  12 +
+ sepolicy/vendor/fasqtid.te                 |  23 +
+ sepolicy/vendor/file_contexts              |   3 +
+ sepolicy/vendor/property.te                |   4 +
+ sepolicy/vendor/property_contexts          |   4 +
+ 8 files changed, 884 insertions(+)
+ create mode 100644 fasqtid/Android.bp
+ create mode 100644 fasqtid/fasqtid.cpp
+ create mode 100644 fasqtid/fasqtid.rc
+ create mode 100644 fasqtid/vendor.performance.fas-service.xml
+ create mode 100644 sepolicy/vendor/fasqtid.te
+
+diff --git a/fasqtid/Android.bp b/fasqtid/Android.bp
+new file mode 100644
+index 0000000..160aea7
+--- /dev/null
++++ b/fasqtid/Android.bp
+@@ -0,0 +1,31 @@
++//
++// Copyright (C) 2026 The LineageOS Project
++//
++// SPDX-License-Identifier: Apache-2.0
++//
++
++package {
++    default_applicable_licenses: ["Android-Apache-2.0"],
++}
++
++cc_binary {
++    name: "fasqtid",
++    vendor: true,
++    cpp_std: "gnu++20",
++    srcs: ["fasqtid.cpp"],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    shared_libs: [
++        "android.hardware.thermal-V1-ndk",
++        "libbase",
++        "libbinder_ndk",
++        "libdl",
++        "liblog",
++        "vendor.performance.fas-V1-ndk",
++    ],
++    init_rc: ["fasqtid.rc"],
++    vintf_fragments: ["vendor.performance.fas-service.xml"],
++}
+diff --git a/fasqtid/fasqtid.cpp b/fasqtid/fasqtid.cpp
+new file mode 100644
+index 0000000..22d7b09
+--- /dev/null
++++ b/fasqtid/fasqtid.cpp
+@@ -0,0 +1,782 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#define LOG_TAG "fasqtid"
++
++#include <aidl/android/hardware/thermal/IThermal.h>
++#include <aidl/android/hardware/thermal/Temperature.h>
++#include <aidl/android/hardware/thermal/ThrottlingSeverity.h>
++#include <aidl/vendor/performance/fas/BnFasBackend.h>
++#include <aidl/vendor/performance/fas/CpuPolicyVote.h>
++#include <android-base/properties.h>
++#include <android/binder_ibinder.h>
++#include <android/binder_manager.h>
++#include <android/binder_process.h>
++#include <log/log.h>
++
++#include <dlfcn.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdlib>
++#include <fstream>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <optional>
++#include <sstream>
++#include <string>
++#include <thread>
++#include <unordered_set>
++#include <utility>
++#include <vector>
++
++namespace android::fas::qti {
++namespace {
++
++using aidl::android::hardware::thermal::IThermal;
++using aidl::android::hardware::thermal::Temperature;
++using aidl::android::hardware::thermal::ThrottlingSeverity;
++using aidl::vendor::performance::fas::BnFasBackend;
++using aidl::vendor::performance::fas::CpuPolicyVote;
++using namespace std::chrono_literals;
++
++constexpr char kPerfLibrary[] = "libqti-perfd-client.so";
++constexpr char kEnabledProperty[] = "persist.vendor.fas.qti.enabled";
++constexpr char kPrepareProperty[] = "vendor.fas.qti.prepare";
++constexpr char kMinimumFrequencyNode[] = "/sys/kernel/msm_performance/parameters/cpu_min_freq";
++constexpr char kMaximumFrequencyNode[] = "/sys/kernel/msm_performance/parameters/cpu_max_freq";
++constexpr std::chrono::milliseconds kThermalPollInterval = 500ms;
++constexpr std::chrono::seconds kThermalRecoveryTime = 5s;
++constexpr std::chrono::seconds kLogInterval = 1s;
++constexpr size_t kExternalCeilingEnterSamples = 2;
++constexpr size_t kExternalCeilingRaiseSamples = 2;
++constexpr size_t kExternalCeilingReleaseSamples = 5;
++constexpr size_t kMaximumPolicyCount = 8;
++constexpr int32_t kMinimumTtlMillis = 250;
++constexpr int32_t kMaximumTtlMillis = 5000;
++constexpr int32_t kMaximumFrequencyKhz = 10000000;
++constexpr int kNewPerfLockHandle = 0;
++constexpr uid_t kSystemUid = 1000;
++
++// MPCTLV3 resources used by taro's own powerhint.xml. Values are expressed in MHz.
++constexpr int kBigMinimumFrequency = 0x40800000;
++constexpr int kBigMaximumFrequency = 0x40804000;
++constexpr int kLittleMinimumFrequency = 0x40800100;
++constexpr int kLittleMaximumFrequency = 0x40804100;
++constexpr int kPrimeMinimumFrequency = 0x40800200;
++constexpr int kPrimeMaximumFrequency = 0x40804200;
++
++using Clock = std::chrono::steady_clock;
++using TimePoint = Clock::time_point;
++
++struct PerfResources {
++    int minimum;
++    int maximum;
++};
++
++struct VoteRequest {
++    int64_t generation = 0;
++    int64_t sequence = 0;
++    int32_t ttlMillis = 0;
++    std::vector<CpuPolicyVote> policies;
++};
++
++std::optional<int32_t> readPolicyMaximumKhz(int32_t policyId) {
++    const std::string path = "/sys/devices/system/cpu/cpufreq/policy" + std::to_string(policyId) +
++                             "/scaling_max_freq";
++    std::ifstream stream(path);
++    int64_t value = 0;
++    if (!(stream >> value) || value <= 0 || value > INT32_MAX) return std::nullopt;
++    return static_cast<int32_t>(value);
++}
++
++class ExternalCeilingTracker {
++  public:
++    VoteRequest reconcile(const VoteRequest& requested) {
++        VoteRequest submitted = requested;
++        mObservedMaximums.clear();
++        for (CpuPolicyVote& vote : submitted.policies) {
++            const std::optional<int32_t> observed = readPolicyMaximumKhz(vote.policyId);
++            mObservedMaximums[vote.policyId] = observed;
++            auto& state = mPolicies[vote.policyId];
++            // The old finite perf lock is still effective here. Comparing sysfs with the last
++            // successfully requested maximum separates an outside cap from the new FAS vote.
++            observe(vote.policyId, state, observed);
++            if (state.ceilingKhz && vote.maximumKhz > *state.ceilingKhz) {
++                // Preserve the desired maximum as a recovery probe. Only prevent FAS' minimum
++                // from fighting an effective maximum imposed by another client.
++                vote.minimumKhz = std::min(vote.minimumKhz, *state.ceilingKhz);
++            }
++        }
++        return submitted;
++    }
++
++    void recordApplied(const VoteRequest& requested) {
++        for (const CpuPolicyVote& vote : requested.policies) {
++            mPolicies[vote.policyId].lastDesiredMaximumKhz = vote.maximumKhz;
++        }
++    }
++
++    void reset() {
++        mPolicies.clear();
++        mObservedMaximums.clear();
++    }
++
++    const char* state() const {
++        bool observing = false;
++        for (const auto& [unused, policy] : mPolicies) {
++            (void)unused;
++            if (policy.active) return "active";
++            observing |= policy.ceilingKhz.has_value();
++        }
++        return observing ? "observing" : "none";
++    }
++
++    std::string observedMaximums() const {
++        std::ostringstream output;
++        output << '{';
++        bool first = true;
++        for (const auto& [policyId, maximum] : mObservedMaximums) {
++            if (!first) output << ',';
++            first = false;
++            output << policyId << ':';
++            if (maximum) {
++                output << *maximum;
++            } else {
++                output << "unknown";
++            }
++        }
++        output << '}';
++        return output.str();
++    }
++
++    std::string ceilings() const {
++        std::ostringstream output;
++        output << '{';
++        bool first = true;
++        for (const auto& [policyId, state] : mPolicies) {
++            if (!state.ceilingKhz) continue;
++            if (!first) output << ',';
++            first = false;
++            output << policyId << ':' << *state.ceilingKhz;
++        }
++        output << '}';
++        return output.str();
++    }
++
++  private:
++    struct PolicyState {
++        std::optional<int32_t> lastDesiredMaximumKhz;
++        std::optional<int32_t> ceilingKhz;
++        std::optional<int32_t> pendingHigherCeilingKhz;
++        size_t mismatchSamples = 0;
++        size_t higherCeilingSamples = 0;
++        size_t releaseSamples = 0;
++        bool active = false;
++    };
++
++    static void clearPendingRaise(PolicyState& state) {
++        state.pendingHigherCeilingKhz.reset();
++        state.higherCeilingSamples = 0;
++    }
++
++    static void observe(int32_t policyId, PolicyState& state,
++                        const std::optional<int32_t>& observed) {
++        if (!state.lastDesiredMaximumKhz) return;
++        if (!observed) {
++            // A missing sample must break all consecutive-sample confirmations, but an already
++            // active envelope remains fail-safe until readable evidence clears it.
++            state.mismatchSamples = 0;
++            state.releaseSamples = 0;
++            clearPendingRaise(state);
++            return;
++        }
++
++        const int32_t desired = *state.lastDesiredMaximumKhz;
++        if (*observed < desired) {
++            state.releaseSamples = 0;
++            state.mismatchSamples =
++                    std::min(state.mismatchSamples + 1, kExternalCeilingEnterSamples);
++
++            if (!state.ceilingKhz || *observed < *state.ceilingKhz) {
++                state.ceilingKhz = *observed;
++                clearPendingRaise(state);
++            } else if (*observed > *state.ceilingKhz) {
++                if (state.pendingHigherCeilingKhz != observed) {
++                    state.pendingHigherCeilingKhz = observed;
++                    state.higherCeilingSamples = 1;
++                } else {
++                    state.higherCeilingSamples =
++                            std::min(state.higherCeilingSamples + 1, kExternalCeilingRaiseSamples);
++                }
++                if (state.higherCeilingSamples >= kExternalCeilingRaiseSamples) {
++                    state.ceilingKhz = observed;
++                    clearPendingRaise(state);
++                }
++            } else {
++                clearPendingRaise(state);
++            }
++
++            if (!state.active && state.mismatchSamples >= kExternalCeilingEnterSamples) {
++                state.active = true;
++                ALOGI("external ceiling detected policy=%d effectiveMaxKhz=%d desiredMaxKhz=%d",
++                      policyId, *observed, desired);
++            }
++            return;
++        }
++
++        state.mismatchSamples = 0;
++        clearPendingRaise(state);
++        if (!state.active) {
++            state.ceilingKhz.reset();
++            return;
++        }
++
++        // A request below the remembered ceiling cannot prove that the external constraint has
++        // gone away. Keep the envelope until FAS again asks for at least that frequency.
++        if (desired < *state.ceilingKhz) {
++            state.releaseSamples = 0;
++            return;
++        }
++        state.releaseSamples = std::min(state.releaseSamples + 1, kExternalCeilingReleaseSamples);
++        if (state.releaseSamples >= kExternalCeilingReleaseSamples) {
++            ALOGI("external ceiling cleared policy=%d effectiveMaxKhz=%d desiredMaxKhz=%d",
++                  policyId, *observed, desired);
++            state = {};
++        }
++    }
++
++    std::map<int32_t, PolicyState> mPolicies;
++    std::map<int32_t, std::optional<int32_t>> mObservedMaximums;
++};
++
++class NodePreparer {
++  public:
++    bool readyForNewHandle() {
++        if (nodesWritable()) {
++            if (mState != State::READY) ALOGI("QTI perf frequency nodes are writable");
++            mState = State::READY;
++            return true;
++        }
++
++        if (mState == State::UNPREPARED) requestPreparation();
++        return false;
++    }
++
++    void invalidate() { mState = State::UNPREPARED; }
++
++    const char* state() const {
++        switch (mState) {
++            case State::UNPREPARED:
++                return "unprepared";
++            case State::PREPARING:
++                return "preparing";
++            case State::READY:
++                return "ready";
++        }
++        return "unknown";
++    }
++
++  private:
++    enum class State { UNPREPARED, PREPARING, READY };
++
++    static bool nodeWritable(const char* path) {
++        struct stat status = {};
++        return stat(path, &status) == 0 && status.st_uid == 0 && (status.st_mode & S_IWUSR) != 0;
++    }
++
++    static bool nodesWritable() {
++        return nodeWritable(kMinimumFrequencyNode) && nodeWritable(kMaximumFrequencyNode);
++    }
++
++    void requestPreparation() {
++        int request = android::base::GetIntProperty(kPrepareProperty, 0);
++        request = request >= INT32_MAX ? 1 : request + 1;
++        // One request is enough for this handle acquisition. A failed property or init action is
++        // reported but never retried by the 2 Hz vote stream; the next release starts a new
++        // attempt.
++        mState = State::PREPARING;
++        if (!android::base::SetProperty(kPrepareProperty, std::to_string(request))) {
++            ALOGE("unable to request QTI perf node preparation");
++            return;
++        }
++        ALOGI("requested QTI perf node preparation request=%d", request);
++    }
++
++    State mState = State::UNPREPARED;
++};
++
++std::optional<PerfResources> resourcesForPolicy(int32_t policyId) {
++    switch (policyId) {
++        case 0:
++            return PerfResources{kLittleMinimumFrequency, kLittleMaximumFrequency};
++        case 4:
++            return PerfResources{kBigMinimumFrequency, kBigMaximumFrequency};
++        case 7:
++            return PerfResources{kPrimeMinimumFrequency, kPrimeMaximumFrequency};
++        default:
++            return std::nullopt;
++    }
++}
++
++class ThermalGate {
++  public:
++    void refresh(TimePoint now) {
++        if (mLastPoll != TimePoint{} && now - mLastPoll < kThermalPollInterval) return;
++        mLastPoll = now;
++
++        if (mThermal == nullptr && !connect()) {
++            markUnavailable();
++            return;
++        }
++
++        std::vector<Temperature> temperatures;
++        const ndk::ScopedAStatus status = mThermal->getTemperatures(&temperatures);
++        if (!status.isOk() || temperatures.empty()) {
++            ALOGW("thermal status unavailable: %s", status.getMessage());
++            mThermal.reset();
++            markUnavailable();
++            return;
++        }
++
++        ThrottlingSeverity maximum = ThrottlingSeverity::NONE;
++        for (const Temperature& temperature : temperatures) {
++            if (static_cast<int32_t>(temperature.throttlingStatus) >
++                static_cast<int32_t>(maximum)) {
++                maximum = temperature.throttlingStatus;
++            }
++        }
++        mAvailable = true;
++        mSeverity = maximum;
++
++        if (static_cast<int32_t>(maximum) >= static_cast<int32_t>(ThrottlingSeverity::SEVERE)) {
++            if (!mBlocked)
++                ALOGW("thermal gate blocked votes at severity=%d", static_cast<int32_t>(maximum));
++            mBlocked = true;
++            mRecoverySince.reset();
++            return;
++        }
++
++        if (!mBlocked) return;
++        if (static_cast<int32_t>(maximum) >= static_cast<int32_t>(ThrottlingSeverity::MODERATE)) {
++            mRecoverySince.reset();
++            return;
++        }
++        if (!mRecoverySince) {
++            mRecoverySince = now;
++            ALOGI("thermal recovery started at severity=%d", static_cast<int32_t>(maximum));
++            return;
++        }
++        if (now - *mRecoverySince >= kThermalRecoveryTime) {
++            mBlocked = false;
++            mRecoverySince.reset();
++            ALOGI("thermal gate reopened after %lld ms below MODERATE",
++                  static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
++                                                 kThermalRecoveryTime)
++                                                 .count()));
++        }
++    }
++
++    bool allowed() const { return mAvailable && !mBlocked; }
++
++    const char* state() const {
++        if (!mAvailable) return "unavailable";
++        if (mBlocked && mRecoverySince) return "recovering";
++        return mBlocked ? "blocked" : "ready";
++    }
++
++    int32_t severity() const { return static_cast<int32_t>(mSeverity); }
++
++  private:
++    bool connect() {
++        const std::string serviceName = std::string(IThermal::descriptor) + "/default";
++        if (!AServiceManager_isDeclared(serviceName.c_str())) return false;
++        ndk::SpAIBinder binder(AServiceManager_checkService(serviceName.c_str()));
++        if (binder.get() == nullptr) return false;
++        mThermal = IThermal::fromBinder(binder);
++        if (mThermal != nullptr) ALOGI("connected to AIDL thermal HAL");
++        return mThermal != nullptr;
++    }
++
++    void markUnavailable() {
++        if (mAvailable) ALOGW("thermal gate became unavailable; releasing votes fail-safe");
++        mAvailable = false;
++        mBlocked = true;
++        mRecoverySince.reset();
++        mSeverity = ThrottlingSeverity::NONE;
++    }
++
++    std::shared_ptr<IThermal> mThermal;
++    TimePoint mLastPoll{};
++    std::optional<TimePoint> mRecoverySince;
++    ThrottlingSeverity mSeverity = ThrottlingSeverity::NONE;
++    bool mAvailable = false;
++    bool mBlocked = true;
++};
++
++class PerfClient {
++  public:
++    ~PerfClient() {
++        release();
++        if (mLibrary != nullptr) dlclose(mLibrary);
++    }
++
++    bool apply(const VoteRequest& request) {
++        if (!load()) return false;
++
++        std::vector<int> arguments;
++        arguments.reserve(request.policies.size() * 4);
++        for (const CpuPolicyVote& vote : request.policies) {
++            const auto resources = resourcesForPolicy(vote.policyId);
++            if (!resources) continue;
++            const int minimumMhz = std::max(1, vote.minimumKhz / 1000);
++            const int maximumMhz = std::max(minimumMhz, vote.maximumKhz / 1000);
++            arguments.push_back(resources->minimum);
++            arguments.push_back(minimumMhz);
++            arguments.push_back(resources->maximum);
++            arguments.push_back(maximumMhz);
++        }
++        if (arguments.empty()) {
++            ALOGE("no taro CPU policies in backend request");
++            release();
++            return false;
++        }
++
++        const int oldHandle = mHandle;
++        // Keep the vendor lock finite for process-death safety, but do not depend on renewal of an
++        // existing handle. Some proprietary perf stacks can lose renewed resources when another
++        // client updates the shared resource queue. Acquire the replacement first so there is no
++        // gap between votes, then retire the previous handle.
++        const int newHandle = mAcquire(kNewPerfLockHandle, request.ttlMillis, arguments.data(),
++                                       static_cast<int>(arguments.size()));
++        if (newHandle <= 0) {
++            ALOGE("perf_lock_acq failed: result=%d", newHandle);
++            mPreviousHandle = -1;
++            return false;
++        }
++        mHandle = newHandle;
++        mPreviousHandle = oldHandle;
++        if (oldHandle > 0 && oldHandle != newHandle) {
++            const int result = mRelease(oldHandle);
++            if (result < 0) {
++                ALOGW("unable to retire previous QTI perf vote handle=%d result=%d", oldHandle,
++                      result);
++            }
++        }
++        return true;
++    }
++
++    void release() {
++        if (mHandle > 0 && mRelease != nullptr) {
++            const int result = mRelease(mHandle);
++            ALOGI("released QTI perf vote handle=%d result=%d", mHandle, result);
++        }
++        mHandle = -1;
++        mPreviousHandle = -1;
++    }
++
++    int handle() const { return mHandle; }
++    int previousHandle() const { return mPreviousHandle; }
++
++  private:
++    using Acquire = int (*)(int, int, int*, int);
++    using Release = int (*)(int);
++
++    bool load() {
++        if (mAcquire != nullptr && mRelease != nullptr) return true;
++        mLibrary = dlopen(kPerfLibrary, RTLD_NOW | RTLD_LOCAL);
++        if (mLibrary == nullptr) {
++            ALOGE("unable to load %s: %s", kPerfLibrary, dlerror());
++            return false;
++        }
++        mAcquire = reinterpret_cast<Acquire>(dlsym(mLibrary, "perf_lock_acq"));
++        mRelease = reinterpret_cast<Release>(dlsym(mLibrary, "perf_lock_rel"));
++        if (mAcquire == nullptr || mRelease == nullptr) {
++            ALOGE("QTI perf client is missing perf_lock_acq/perf_lock_rel");
++            dlclose(mLibrary);
++            mLibrary = nullptr;
++            mAcquire = nullptr;
++            mRelease = nullptr;
++            return false;
++        }
++        ALOGI("loaded QTI perf client");
++        return true;
++    }
++
++    void* mLibrary = nullptr;
++    Acquire mAcquire = nullptr;
++    Release mRelease = nullptr;
++    int mHandle = -1;
++    int mPreviousHandle = -1;
++};
++
++bool validateRequest(const VoteRequest& request) {
++    if (request.generation < 0 || request.sequence <= 0 || request.policies.empty() ||
++        request.policies.size() > kMaximumPolicyCount || request.ttlMillis < kMinimumTtlMillis ||
++        request.ttlMillis > kMaximumTtlMillis) {
++        return false;
++    }
++
++    std::unordered_set<int32_t> policyIds;
++    for (const CpuPolicyVote& vote : request.policies) {
++        if (!resourcesForPolicy(vote.policyId) || !policyIds.insert(vote.policyId).second ||
++            vote.minimumKhz <= 0 || vote.maximumKhz < vote.minimumKhz ||
++            vote.maximumKhz > kMaximumFrequencyKhz) {
++            return false;
++        }
++    }
++    return true;
++}
++
++std::string formatPolicies(const VoteRequest& request) {
++    std::ostringstream output;
++    output << '{';
++    for (size_t i = 0; i < request.policies.size(); ++i) {
++        if (i != 0) output << ',';
++        const CpuPolicyVote& vote = request.policies[i];
++        output << vote.policyId << ':' << vote.minimumKhz << '-' << vote.maximumKhz;
++    }
++    output << '}';
++    return output.str();
++}
++
++std::string formatPolicies(const std::optional<VoteRequest>& request) {
++    return request ? formatPolicies(*request) : "{}";
++}
++
++class Backend final : public BnFasBackend {
++  public:
++    ~Backend() override {
++        mRunning = false;
++        if (mWorker.joinable()) mWorker.join();
++    }
++
++    void start() {
++        mWorker = std::thread([this] { watchdogLoop(); });
++        ALOGI("VINTF AIDL backend ready; QTI votes default to shadow mode (%s=false)",
++              kEnabledProperty);
++    }
++
++    ndk::ScopedAStatus updateCpuVotes(int64_t generation, int64_t sequence, int32_t ttlMillis,
++                                      const std::vector<CpuPolicyVote>& votes) override {
++        const uid_t callerUid = AIBinder_getCallingUid();
++        const pid_t callerPid = AIBinder_getCallingPid();
++        if (callerUid != kSystemUid) {
++            ALOGW("rejected backend caller pid=%d uid=%u", callerPid, callerUid);
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        }
++
++        VoteRequest request{.generation = generation,
++                            .sequence = sequence,
++                            .ttlMillis = ttlMillis,
++                            .policies = votes};
++        if (!validateRequest(request)) {
++            ALOGW("rejected malformed vote request generation=%lld sequence=%lld policies=%zu",
++                  static_cast<long long>(generation), static_cast<long long>(sequence),
++                  votes.size());
++            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++        }
++
++        std::scoped_lock lock(mMutex);
++        prepareCallerLocked(callerPid, callerUid);
++        if (isStaleLocked(generation, sequence)) {
++            ALOGW("ignored stale vote request generation=%lld sequence=%lld",
++                  static_cast<long long>(generation), static_cast<long long>(sequence));
++            return ndk::ScopedAStatus::ok();
++        }
++        mGeneration = generation;
++        mLastSequence = sequence;
++        mLatest = std::move(request);
++        mLastUpdate = Clock::now();
++
++        const bool thermalWasAllowed = mThermal.allowed();
++        mThermal.refresh(mLastUpdate);
++        const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, false);
++        handleSafetyTransitionsLocked(mLastUpdate, thermalWasAllowed, actualEnabled, false);
++
++        bool applied = false;
++        if (actualEnabled && mThermal.allowed()) applied = applyLocked(*mLatest);
++        logUpdateLocked(*mLatest, actualEnabled, applied);
++        return ndk::ScopedAStatus::ok();
++    }
++
++    ndk::ScopedAStatus releaseCpuVotes(int64_t generation, int64_t sequence) override {
++        const uid_t callerUid = AIBinder_getCallingUid();
++        const pid_t callerPid = AIBinder_getCallingPid();
++        if (callerUid != kSystemUid) {
++            ALOGW("rejected backend caller pid=%d uid=%u", callerPid, callerUid);
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        }
++        if (generation < 0 || sequence <= 0) {
++            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_ARGUMENT);
++        }
++
++        std::scoped_lock lock(mMutex);
++        prepareCallerLocked(callerPid, callerUid);
++        if (isStaleLocked(generation, sequence)) return ndk::ScopedAStatus::ok();
++        mGeneration = generation;
++        mLastSequence = sequence;
++        mLatest.reset();
++        mPerf.release();
++        mNodes.invalidate();
++        resetCeilingStateLocked();
++        ALOGI("release generation=%lld sequence=%lld", static_cast<long long>(generation),
++              static_cast<long long>(sequence));
++        return ndk::ScopedAStatus::ok();
++    }
++
++  private:
++    void watchdogLoop() {
++        while (mRunning) {
++            std::this_thread::sleep_for(250ms);
++            std::scoped_lock lock(mMutex);
++            const TimePoint now = Clock::now();
++            const bool thermalWasAllowed = mThermal.allowed();
++            mThermal.refresh(now);
++            const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, false);
++            expireStaleVoteLocked(now);
++            handleSafetyTransitionsLocked(now, thermalWasAllowed, actualEnabled, true);
++        }
++    }
++
++    void prepareCallerLocked(pid_t callerPid, uid_t callerUid) {
++        if (mClientPid == callerPid) return;
++        if (mClientPid > 0) mPerf.release();
++        mNodes.invalidate();
++        resetCeilingStateLocked();
++        mLatest.reset();
++        mGeneration = 0;
++        mLastSequence = 0;
++        mClientPid = callerPid;
++        ALOGI("accepted fasd Binder peer pid=%d uid=%u", callerPid, callerUid);
++    }
++
++    bool isStaleLocked(int64_t generation, int64_t sequence) const {
++        return generation < mGeneration || (generation == mGeneration && sequence <= mLastSequence);
++    }
++
++    void handleSafetyTransitionsLocked(TimePoint now, bool thermalWasAllowed, bool actualEnabled,
++                                       bool allowReapply) {
++        if (actualEnabled != mActualEnabled) {
++            ALOGI("backend mode changed to %s", actualEnabled ? "actual" : "shadow");
++        }
++
++        const bool shouldReapply =
++                actualEnabled && mLatest && !isExpiredLocked(now) &&
++                ((!thermalWasAllowed && mThermal.allowed()) || (!mActualEnabled && actualEnabled));
++        if (!actualEnabled || !mThermal.allowed()) {
++            mPerf.release();
++            mNodes.invalidate();
++            resetCeilingStateLocked();
++        } else if (allowReapply && shouldReapply) {
++            (void)applyLocked(*mLatest);
++        }
++        mActualEnabled = actualEnabled;
++    }
++
++    void expireStaleVoteLocked(TimePoint now) {
++        if (!mLatest || !isExpiredLocked(now)) return;
++        ALOGW("vote watchdog expired generation=%lld after %d ms",
++              static_cast<long long>(mLatest->generation), mLatest->ttlMillis);
++        mLatest.reset();
++        mPerf.release();
++        mNodes.invalidate();
++        resetCeilingStateLocked();
++    }
++
++    bool applyLocked(const VoteRequest& request) {
++        mLastSubmitted.reset();
++        if (mPerf.handle() <= 0 && !mNodes.readyForNewHandle()) return false;
++        VoteRequest submitted = mExternalCeiling.reconcile(request);
++        mLastSubmitted = submitted;
++        const bool applied = mPerf.apply(submitted);
++        if (applied) mExternalCeiling.recordApplied(request);
++        if (!applied) mNodes.invalidate();
++        return applied;
++    }
++
++    void resetCeilingStateLocked() {
++        mExternalCeiling.reset();
++        mLastSubmitted.reset();
++    }
++
++    bool isExpiredLocked(TimePoint now) const {
++        return mLatest && now - mLastUpdate >= std::chrono::milliseconds(mLatest->ttlMillis);
++    }
++
++    void logUpdateLocked(const VoteRequest& request, bool actualEnabled, bool applied) {
++        const TimePoint now = Clock::now();
++        if (mLastLog != TimePoint{} && now - mLastLog < kLogInterval) return;
++        mLastLog = now;
++        const std::string policies = formatPolicies(request);
++        const std::string submittedPolicies = formatPolicies(mLastSubmitted);
++        const std::string effectiveMaximums = mExternalCeiling.observedMaximums();
++        const std::string externalCeilings = mExternalCeiling.ceilings();
++        ALOGI("vote generation=%lld sequence=%lld transport=aidl mode=%s thermal=%s severity=%d "
++              "nodes=%s policiesKhz=%s effectiveMaxKhz=%s submittedPoliciesKhz=%s "
++              "externalCeilingKhz=%s ceilingState=%s applied=%s handle=%d previousHandle=%d "
++              "ttlMs=%d",
++              static_cast<long long>(request.generation), static_cast<long long>(request.sequence),
++              actualEnabled ? "actual" : "shadow", mThermal.state(), mThermal.severity(),
++              mNodes.state(), policies.c_str(), effectiveMaximums.c_str(),
++              submittedPolicies.c_str(), externalCeilings.c_str(), mExternalCeiling.state(),
++              applied ? "true" : "false", mPerf.handle(), mPerf.previousHandle(),
++              request.ttlMillis);
++    }
++
++    std::mutex mMutex;
++    std::atomic<bool> mRunning = true;
++    std::thread mWorker;
++    pid_t mClientPid = -1;
++    int64_t mGeneration = 0;
++    int64_t mLastSequence = 0;
++    std::optional<VoteRequest> mLatest;
++    TimePoint mLastUpdate{};
++    TimePoint mLastLog{};
++    ThermalGate mThermal;
++    PerfClient mPerf;
++    NodePreparer mNodes;
++    ExternalCeilingTracker mExternalCeiling;
++    std::optional<VoteRequest> mLastSubmitted;
++    bool mActualEnabled = false;
++};
++
++}  // namespace
++}  // namespace android::fas::qti
++
++int main() {
++    ABinderProcess_setThreadPoolMaxThreadCount(2);
++    std::shared_ptr<android::fas::qti::Backend> backend =
++            ndk::SharedRefBase::make<android::fas::qti::Backend>();
++    backend->start();
++
++    const std::string instance =
++            std::string(aidl::vendor::performance::fas::IFasBackend::descriptor) + "/default";
++    const binder_status_t status =
++            AServiceManager_addService(backend->asBinder().get(), instance.c_str());
++    if (status != STATUS_OK) {
++        ALOGE("unable to register %s: status=%d", instance.c_str(), status);
++        return EXIT_FAILURE;
++    }
++
++    ABinderProcess_joinThreadPool();
++    return EXIT_FAILURE;
++}
+diff --git a/fasqtid/fasqtid.rc b/fasqtid/fasqtid.rc
+new file mode 100644
+index 0000000..42c379f
+--- /dev/null
++++ b/fasqtid/fasqtid.rc
+@@ -0,0 +1,25 @@
++on boot
++    # QTI perf opcodes 0x40800x00/0x40804x00 require these freq_qos-backed nodes.
++    # Some compatible kernels expose the store callbacks with read-only DAC modes.
++    chown root root /sys/kernel/msm_performance/parameters/cpu_min_freq
++    chmod 0644 /sys/kernel/msm_performance/parameters/cpu_min_freq
++    chown root root /sys/kernel/msm_performance/parameters/cpu_max_freq
++    chmod 0644 /sys/kernel/msm_performance/parameters/cpu_max_freq
++    start fasqtid
++
++on property:vendor.fas.qti.prepare=*
++    # The proprietary perf stack can restore the kernel-declared read-only modes while releasing
++    # screen-off resources. Repair them only when fasqtid is about to acquire a new actual vote.
++    chown root root /sys/kernel/msm_performance/parameters/cpu_min_freq
++    chmod 0644 /sys/kernel/msm_performance/parameters/cpu_min_freq
++    chown root root /sys/kernel/msm_performance/parameters/cpu_max_freq
++    chmod 0644 /sys/kernel/msm_performance/parameters/cpu_max_freq
++
++service fasqtid /vendor/bin/fasqtid
++    class hal
++    disabled
++    user system
++    group system
++    interface aidl vendor.performance.fas.IFasBackend/default
++    shutdown critical
++    restart_period 5
+diff --git a/fasqtid/vendor.performance.fas-service.xml b/fasqtid/vendor.performance.fas-service.xml
+new file mode 100644
+index 0000000..97f1352
+--- /dev/null
++++ b/fasqtid/vendor.performance.fas-service.xml
+@@ -0,0 +1,12 @@
++<!--
++     Copyright (C) 2026 The LineageOS Project
++
++     SPDX-License-Identifier: Apache-2.0
++-->
++<manifest version="1.0" type="device">
++    <hal format="aidl">
++        <name>vendor.performance.fas</name>
++        <version>1</version>
++        <fqname>IFasBackend/default</fqname>
++    </hal>
++</manifest>
+diff --git a/sepolicy/vendor/fasqtid.te b/sepolicy/vendor/fasqtid.te
+new file mode 100644
+index 0000000..a1befbd
+--- /dev/null
++++ b/sepolicy/vendor/fasqtid.te
+@@ -0,0 +1,23 @@
++# Isolated vendor bridge between the GPL system-side FAS algorithm and the proprietary QTI perf
++# client. The bridge is also a thermal HAL client and refuses actual votes without thermal state.
++type fasqtid, domain;
++type fasqtid_exec, exec_type, vendor_file_type, file_type;
++
++init_daemon_domain(fasqtid)
++binder_use(fasqtid)
++hwbinder_use(fasqtid)
++hal_server_domain(fasqtid, hal_power)
++hal_client_domain(fasqtid, hal_thermal)
++
++# libqti-perfd-client.so communicates with vendor.qti.hardware.perf@2.3.
++hal_client_domain(fasqtid, vendor_hal_perf)
++
++# The proprietary perf HAL resolves perf-lock clients through /proc/<pid> before applying
++# MPCTLV3 resources. Permit it to identify this isolated bridge just as it identifies app clients.
++r_dir_file(vendor_hal_perf_default, fasqtid)
++
++get_prop(fasqtid, vendor_fas_config_prop)
++set_prop(fasqtid, vendor_fas_prepare_prop)
++
++# Inspect only ownership and mode bits before asking vendor init to repair the QTI perf nodes.
++allow fasqtid vendor_sysfs_msm_perf:file getattr;
+diff --git a/sepolicy/vendor/file_contexts b/sepolicy/vendor/file_contexts
+index 84fcab7..ee4b496 100644
+--- a/sepolicy/vendor/file_contexts
++++ b/sepolicy/vendor/file_contexts
+@@ -47,6 +47,9 @@
+ /mnt/vendor/persist/goodix(/.*)? u:object_r:vendor_fingerprint_data_file:s0
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.biometrics\.fingerprint-service\.xiaomi u:object_r:hal_fingerprint_default_exec:s0
+ 
++# Frame-aware scheduling
++/(vendor|system/vendor)/bin/fasqtid u:object_r:fasqtid_exec:s0
++
+ # Mac Address
+ /data/vendor/mac_addr(/.*)? u:object_r:vendor_mac_vendor_data_file:s0
+ /vendor/bin/nv_mac u:object_r:vendor_wcnss_service_exec:s0
+diff --git a/sepolicy/vendor/property.te b/sepolicy/vendor/property.te
+index 82b4d0c..0ede2dc 100644
+--- a/sepolicy/vendor/property.te
++++ b/sepolicy/vendor/property.te
+@@ -11,6 +11,10 @@ vendor_public_prop(vendor_cpuid_prop)
+ vendor_restricted_prop(vendor_fp_info_prop)
+ vendor_public_prop(vendor_fp_prop)
+ 
++# Frame-aware scheduling
++vendor_internal_prop(vendor_fas_config_prop)
++vendor_internal_prop(vendor_fas_prepare_prop)
++
+ # Mlipay
+ vendor_public_prop(vendor_payment_security_prop)
+ 
+diff --git a/sepolicy/vendor/property_contexts b/sepolicy/vendor/property_contexts
+index 04bbfdf..6dc4bdc 100644
+--- a/sepolicy/vendor/property_contexts
++++ b/sepolicy/vendor/property_contexts
+@@ -20,6 +20,10 @@ vendor.fps_hal. u:object_r:vendor_fp_prop:s0
+ vendor.panel.display. u:object_r:vendor_fp_prop:s0
+ ro.hardware.fp.udfps u:object_r:vendor_fp_prop:s0
+ 
++# Frame-aware scheduling
++persist.vendor.fas.qti.enabled u:object_r:vendor_fas_config_prop:s0 exact bool
++vendor.fas.qti.prepare u:object_r:vendor_fas_prepare_prop:s0 exact int
++
+ # Panel
+ vendor.panel. u:object_r:vendor_panel_info_prop:s0
+ 
+-- 
+2.43.0
+

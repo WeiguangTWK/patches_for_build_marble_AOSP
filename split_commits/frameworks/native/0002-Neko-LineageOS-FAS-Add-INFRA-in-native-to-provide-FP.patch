@@ -1,0 +1,366 @@
+From 155da7ecbe0859cd2aa19f4c2494d38dd9e52d2a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:27:34 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add INFRA in native to provide FPS
+ Sampling and callback
+
+P.S. When testing this feature I noticed the sampled FPS data is different from one in Scene(com.omarea.vtools) 9.4.11
+ e.g. in Minecraft this sampler reports 120FPS while Scene reports 60
+
+I got in touch with Scene Dev and he claimed that Scene sampled from wrong layer
+
+Change-Id: I112d7bc79ee21554709b0c6e833a08b468c10fad
+---
+ libs/gui/aidl/android/gui/IFpsListener.aidl   |  7 ++-
+ services/surfaceflinger/FpsReporter.cpp       | 30 ++++++++---
+ services/surfaceflinger/FpsReporter.h         |  8 ++-
+ .../Scheduler/FrameTimeline.cpp               | 51 +++++++++++++++++++
+ .../surfaceflinger/Scheduler/FrameTimeline.h  | 12 +++++
+ services/surfaceflinger/SurfaceFlinger.h      |  4 +-
+ .../tests/unittests/FpsReporterTest.cpp       | 43 ++++++++++++++++
+ .../tests/unittests/FrameTimelineTest.cpp     |  4 ++
+ .../tests/unittests/mock/MockFrameTimeline.h  |  2 +
+ 9 files changed, 150 insertions(+), 11 deletions(-)
+
+diff --git a/libs/gui/aidl/android/gui/IFpsListener.aidl b/libs/gui/aidl/android/gui/IFpsListener.aidl
+index 63d333c..2c2aa25 100644
+--- a/libs/gui/aidl/android/gui/IFpsListener.aidl
++++ b/libs/gui/aidl/android/gui/IFpsListener.aidl
+@@ -21,4 +21,9 @@ oneway interface IFpsListener {
+ 
+     // Reports the most recent recorded fps for the tree rooted at this layer
+     void onFpsReported(float fps);
+-}
+\ No newline at end of file
++
++    // Reports newly presented display-frame timestamps for the tree rooted at this task.
++    // The timestamps use the monotonic clock and are ordered from oldest to newest.
++    // ownerPid is the dominant buffer-producing process in this batch, or -1 if unknown.
++    void onFrameTimesReported(in long[] presentTimesNanos, int ownerPid);
++}
+diff --git a/services/surfaceflinger/FpsReporter.cpp b/services/surfaceflinger/FpsReporter.cpp
+index 13cf2d6..a661609 100644
+--- a/services/surfaceflinger/FpsReporter.cpp
++++ b/services/surfaceflinger/FpsReporter.cpp
+@@ -31,9 +31,10 @@ FpsReporter::FpsReporter(scheduler::FrameTimeline& frameTimeline, std::unique_pt
+ 
+ void FpsReporter::dispatchLayerFps(const frontend::LayerHierarchy& layerHierarchy) {
+     const auto now = mClock->now();
+-    if (now - mLastDispatch < kMinDispatchDuration) {
++    if (now - mLastFrameDispatch < kMinFrameDispatchDuration) {
+         return;
+     }
++    const bool reportFps = now - mLastFpsDispatch >= kMinFpsDispatchDuration;
+ 
+     std::vector<TrackedListener> localListeners;
+     {
+@@ -62,13 +63,14 @@ void FpsReporter::dispatchLayerFps(const frontend::LayerHierarchy& layerHierarch
+             int32_t taskId = metadata.getInt32(gui::METADATA_TASK_ID, 0);
+             if (seenTasks.count(taskId) == 0) {
+                 // localListeners is expected to be tiny
++                bool foundListener = false;
+                 for (TrackedListener& listener : localListeners) {
+                     if (listener.taskId == taskId) {
+-                        seenTasks.insert(taskId);
+                         listenersAndLayersToReport.push_back({listener, &hierarchy});
+-                        break;
++                        foundListener = true;
+                     }
+                 }
++                if (foundListener) seenTasks.insert(taskId);
+             }
+         }
+         return true;
+@@ -86,10 +88,26 @@ void FpsReporter::dispatchLayerFps(const frontend::LayerHierarchy& layerHierarch
+             return true;
+         });
+ 
+-        listener.listener->onFpsReported(mFrameTimeline.computeFps(layerIds));
++        const auto frameTimes =
++                mFrameTimeline.getFrameTimes(layerIds, listener.lastReportedPresentTime);
++        if (!frameTimes.presentTimes.empty()) {
++            listener.listener->onFrameTimesReported(frameTimes.presentTimes,
++                                                    frameTimes.dominantOwnerPid);
++            const auto listenerBinder = wp<IBinder>(IInterface::asBinder(listener.listener));
++            std::scoped_lock lock(mMutex);
++            if (const auto found = mListeners.find(listenerBinder); found != mListeners.end()) {
++                found->second.lastReportedPresentTime = frameTimes.presentTimes.back();
++            }
++        }
++        if (reportFps) {
++            listener.listener->onFpsReported(mFrameTimeline.computeFps(layerIds));
++        }
+     }
+ 
+-    mLastDispatch = now;
++    mLastFrameDispatch = now;
++    if (reportFps) {
++        mLastFpsDispatch = now;
++    }
+ }
+ 
+ void FpsReporter::binderDied(const wp<IBinder>& who) {
+@@ -101,7 +119,7 @@ void FpsReporter::addListener(const sp<gui::IFpsListener>& listener, int32_t tas
+     sp<IBinder> asBinder = IInterface::asBinder(listener);
+     asBinder->linkToDeath(sp<DeathRecipient>::fromExisting(this));
+     std::lock_guard lock(mMutex);
+-    mListeners.emplace(wp<IBinder>(asBinder), TrackedListener{listener, taskId});
++    mListeners.emplace(wp<IBinder>(asBinder), TrackedListener{listener, taskId, 0});
+ }
+ 
+ void FpsReporter::removeListener(const sp<gui::IFpsListener>& listener) {
+diff --git a/services/surfaceflinger/FpsReporter.h b/services/surfaceflinger/FpsReporter.h
+index 48b3b97..780bd3b 100644
+--- a/services/surfaceflinger/FpsReporter.h
++++ b/services/surfaceflinger/FpsReporter.h
+@@ -56,13 +56,17 @@ private:
+     struct TrackedListener {
+         sp<gui::IFpsListener> listener;
+         int32_t taskId;
++        nsecs_t lastReportedPresentTime = 0;
+     };
+ 
+     scheduler::FrameTimeline& mFrameTimeline;
+-    static const constexpr std::chrono::steady_clock::duration kMinDispatchDuration =
++    static const constexpr std::chrono::steady_clock::duration kMinFpsDispatchDuration =
+             std::chrono::milliseconds(500);
++    static const constexpr std::chrono::steady_clock::duration kMinFrameDispatchDuration =
++            std::chrono::milliseconds(100);
+     std::unique_ptr<Clock> mClock;
+-    std::chrono::steady_clock::time_point mLastDispatch;
++    std::chrono::steady_clock::time_point mLastFpsDispatch;
++    std::chrono::steady_clock::time_point mLastFrameDispatch;
+     std::unordered_map<wp<IBinder>, TrackedListener, WpHash> mListeners GUARDED_BY(mMutex);
+ };
+ 
+diff --git a/services/surfaceflinger/Scheduler/FrameTimeline.cpp b/services/surfaceflinger/Scheduler/FrameTimeline.cpp
+index 114c76d..908d581 100644
+--- a/services/surfaceflinger/Scheduler/FrameTimeline.cpp
++++ b/services/surfaceflinger/Scheduler/FrameTimeline.cpp
+@@ -1471,6 +1471,57 @@ float FrameTimeline::computeFps(const std::unordered_set<int32_t>& layerIds) {
+             static_cast<float>(totalPresentToPresentWalls);
+ }
+ 
++FrameTimeline::FrameTimes FrameTimeline::getFrameTimes(const std::unordered_set<int32_t>& layerIds,
++                                                       nsecs_t presentTimeExclusive) {
++    FrameTimes result;
++    if (layerIds.empty()) {
++        return result;
++    }
++
++    std::unordered_map<pid_t, size_t> bufferOwnerCounts;
++    std::unordered_map<pid_t, size_t> ownerCounts;
++    {
++        std::scoped_lock lock(mMutex);
++        result.presentTimes.reserve(mDisplayFrames.size());
++        for (const auto& displayFrame : mDisplayFrames) {
++            const nsecs_t presentTime = displayFrame->getActuals().presentTime;
++            if (presentTime <= presentTimeExclusive) {
++                continue;
++            }
++
++            bool matched = false;
++            for (const auto& surfaceFrame : displayFrame->getSurfaceFrames()) {
++                if (surfaceFrame->getPresentState() != SurfaceFrame::PresentState::Presented ||
++                    layerIds.count(surfaceFrame->getLayerId()) == 0) {
++                    continue;
++                }
++
++                matched = true;
++                const pid_t ownerPid = surfaceFrame->getOwnerPid();
++                if (ownerPid > 0) {
++                    ++ownerCounts[ownerPid];
++                    if (surfaceFrame->getIsBuffer()) {
++                        ++bufferOwnerCounts[ownerPid];
++                    }
++                }
++            }
++            if (matched) {
++                result.presentTimes.push_back(presentTime);
++            }
++        }
++    }
++
++    const auto& preferredCounts = bufferOwnerCounts.empty() ? ownerCounts : bufferOwnerCounts;
++    for (const auto& [ownerPid, count] : preferredCounts) {
++        const size_t currentCount =
++                result.dominantOwnerPid > 0 ? preferredCounts.at(result.dominantOwnerPid) : 0;
++        if (count > currentCount) {
++            result.dominantOwnerPid = ownerPid;
++        }
++    }
++    return result;
++}
++
+ void FrameTimeline::generateFrameStats(int32_t layer, size_t count, FrameStats* outStats) const {
+     std::scoped_lock lock(mMutex);
+ 
+diff --git a/services/surfaceflinger/Scheduler/FrameTimeline.h b/services/surfaceflinger/Scheduler/FrameTimeline.h
+index 8507594..73e8550 100644
+--- a/services/surfaceflinger/Scheduler/FrameTimeline.h
++++ b/services/surfaceflinger/Scheduler/FrameTimeline.h
+@@ -308,6 +308,11 @@ private:
+  */
+ class FrameTimeline {
+ public:
++    struct FrameTimes {
++        std::vector<nsecs_t> presentTimes;
++        pid_t dominantOwnerPid = -1;
++    };
++
+     virtual ~FrameTimeline() = default;
+     virtual TokenManager* getTokenManager() = 0;
+ 
+@@ -356,6 +361,11 @@ public:
+     // containing at least one layer ID.
+     virtual float computeFps(const std::unordered_set<int32_t>& layerIds) = 0;
+ 
++    // Returns display-frame present timestamps newer than |presentTimeExclusive| for frames that
++    // contain at least one presented layer in |layerIds|. A display frame is returned at most once.
++    virtual FrameTimes getFrameTimes(const std::unordered_set<int32_t>& layerIds,
++                                     nsecs_t presentTimeExclusive) = 0;
++
+     // Supports the legacy FrameStats interface
+     virtual void generateFrameStats(int32_t layer, size_t count, FrameStats* outStats) const = 0;
+ 
+@@ -519,6 +529,8 @@ public:
+     void parseArgs(const Vector<String16>& args, std::string& result) override;
+     void setMaxDisplayFrames(uint32_t size) override;
+     float computeFps(const std::unordered_set<int32_t>& layerIds) override;
++    FrameTimes getFrameTimes(const std::unordered_set<int32_t>& layerIds,
++                             nsecs_t presentTimeExclusive) override;
+     void generateFrameStats(int32_t layer, size_t count, FrameStats* outStats) const override;
+     void reset() override;
+ 
+diff --git a/services/surfaceflinger/SurfaceFlinger.h b/services/surfaceflinger/SurfaceFlinger.h
+index e148e41..e13bcbe 100644
+--- a/services/surfaceflinger/SurfaceFlinger.h
++++ b/services/surfaceflinger/SurfaceFlinger.h
+@@ -1234,7 +1234,7 @@ private:
+     // Virtual display lifecycle for ID generation and HAL allocation.
+     std::optional<VirtualDisplayIdVariant> acquireVirtualDisplay(
+             ui::Size, ui::PixelFormat, const std::string& uniqueId,
+-            compositionengine::DisplayCreationArgsBuilder&, bool canAllocateHwcDisplayIdForVDS)
++            compositionengine::DisplayCreationArgsBuilder&, bool canAllocateHwcDisplayIdForVDS = true)
+             REQUIRES(mStateLock);
+ 
+     template <typename ID>
+@@ -1894,4 +1894,4 @@ private:
+     const sp<SurfaceFlinger> mFlinger;
+ };
+ 
+-} // namespace android
+\ No newline at end of file
++} // namespace android
+diff --git a/services/surfaceflinger/tests/unittests/FpsReporterTest.cpp b/services/surfaceflinger/tests/unittests/FpsReporterTest.cpp
+index 43535de..de9a70d 100644
+--- a/services/surfaceflinger/tests/unittests/FpsReporterTest.cpp
++++ b/services/surfaceflinger/tests/unittests/FpsReporterTest.cpp
+@@ -60,6 +60,16 @@ struct TestableFpsListener : public gui::BnFpsListener {
+         lastReportedFps = fps;
+         return binder::Status::ok();
+     }
++
++    binder::Status onFrameTimesReported(const std::vector<int64_t>& presentTimesNanos,
++                                        int32_t ownerPid) override {
++        lastReportedFrameTimes = presentTimesNanos;
++        lastReportedOwnerPid = ownerPid;
++        return binder::Status::ok();
++    }
++
++    std::vector<int64_t> lastReportedFrameTimes;
++    int32_t lastReportedOwnerPid = -1;
+ };
+ 
+ /**
+@@ -162,6 +172,10 @@ TEST_F(FpsReporterTest, callsListeners) {
+ 
+     float expectedFps = 44.0;
+ 
++    scheduler::FrameTimeline::FrameTimes expectedFrameTimes{
++            .presentTimes = {100, 200}, .dominantOwnerPid = 1234};
++    EXPECT_CALL(mFrameTimeline, getFrameTimes(UnorderedElementsAre(1, 11, 111), 0))
++            .WillOnce(Return(expectedFrameTimes));
+     EXPECT_CALL(mFrameTimeline, computeFps(UnorderedElementsAre(1, 11, 111)))
+             .WillOnce(Return(expectedFps));
+ 
+@@ -169,6 +183,8 @@ TEST_F(FpsReporterTest, callsListeners) {
+     mClock->advanceTime(600ms);
+     mFpsReporter->dispatchLayerFps(hierarchyBuilder.getHierarchy());
+     EXPECT_EQ(expectedFps, mFpsListener->lastReportedFps);
++    EXPECT_EQ(expectedFrameTimes.presentTimes, mFpsListener->lastReportedFrameTimes);
++    EXPECT_EQ(expectedFrameTimes.dominantOwnerPid, mFpsListener->lastReportedOwnerPid);
+     mFpsReporter->removeListener(mFpsListener);
+     Mock::VerifyAndClearExpectations(&mFrameTimeline);
+ 
+@@ -192,6 +208,7 @@ TEST_F(FpsReporterTest, rateLimits) {
+     EXPECT_CALL(mFrameTimeline, computeFps(UnorderedElementsAre(11)))
+             .WillOnce(Return(firstFps))
+             .WillOnce(Return(secondFps));
++    EXPECT_CALL(mFrameTimeline, getFrameTimes(UnorderedElementsAre(11), _)).Times(4);
+ 
+     mFpsReporter->addListener(mFpsListener, kTaskId);
+     mClock->advanceTime(600ms);
+@@ -208,5 +225,31 @@ TEST_F(FpsReporterTest, rateLimits) {
+     EXPECT_EQ(secondFps, mFpsListener->lastReportedFps);
+ }
+ 
++TEST_F(FpsReporterTest, reportsToMultipleListenersForSameTask) {
++    constexpr int32_t kTaskId = 12;
++    LayerMetadata targetMetadata;
++    targetMetadata.setInt32(gui::METADATA_TASK_ID, kTaskId);
++    createRootLayer(1, targetMetadata);
++
++    frontend::LayerHierarchyBuilder hierarchyBuilder;
++    hierarchyBuilder.update(mLifecycleManager);
++
++    const sp<TestableFpsListener> secondListener = sp<TestableFpsListener>::make();
++    EXPECT_CALL(mFrameTimeline, getFrameTimes(UnorderedElementsAre(1), 0)).Times(2);
++    EXPECT_CALL(mFrameTimeline, computeFps(UnorderedElementsAre(1)))
++            .Times(2)
++            .WillRepeatedly(Return(60.0f));
++
++    mFpsReporter->addListener(mFpsListener, kTaskId);
++    mFpsReporter->addListener(secondListener, kTaskId);
++    mClock->advanceTime(600ms);
++    mFpsReporter->dispatchLayerFps(hierarchyBuilder.getHierarchy());
++
++    EXPECT_EQ(60.0f, mFpsListener->lastReportedFps);
++    EXPECT_EQ(60.0f, secondListener->lastReportedFps);
++    mFpsReporter->removeListener(mFpsListener);
++    mFpsReporter->removeListener(secondListener);
++}
++
+ } // namespace
+ } // namespace android
+diff --git a/services/surfaceflinger/tests/unittests/FrameTimelineTest.cpp b/services/surfaceflinger/tests/unittests/FrameTimelineTest.cpp
+index 866171c..a596487 100644
+--- a/services/surfaceflinger/tests/unittests/FrameTimelineTest.cpp
++++ b/services/surfaceflinger/tests/unittests/FrameTimelineTest.cpp
+@@ -2732,6 +2732,10 @@ TEST_F(FrameTimelineTest, computeFps_twoDisplayFrames_oneLayer) {
+     mFrameTimeline->setSfPresent(twoHundredMs, presentFence2);
+ 
+     EXPECT_EQ(mFrameTimeline->computeFps({sLayerIdOne}), 10.0);
++
++    const auto frameTimes = mFrameTimeline->getFrameTimes({sLayerIdOne}, oneHundredMs);
++    EXPECT_EQ(frameTimes.presentTimes, std::vector<nsecs_t>({twoHundredMs}));
++    EXPECT_EQ(frameTimes.dominantOwnerPid, sPidOne);
+ }
+ 
+ TEST_F(FrameTimelineTest, computeFps_twoDisplayFrames_twoLayers) {
+diff --git a/services/surfaceflinger/tests/unittests/mock/MockFrameTimeline.h b/services/surfaceflinger/tests/unittests/mock/MockFrameTimeline.h
+index c25e69c..a5dbb0e 100644
+--- a/services/surfaceflinger/tests/unittests/mock/MockFrameTimeline.h
++++ b/services/surfaceflinger/tests/unittests/mock/MockFrameTimeline.h
+@@ -36,6 +36,8 @@ public:
+                  void(nsecs_t, const std::shared_ptr<FenceTime>&,
+                       const std::shared_ptr<FenceTime>&));
+     MOCK_METHOD1(computeFps, float(const std::unordered_set<int32_t>&));
++    MOCK_METHOD2(getFrameTimes,
++                 scheduler::FrameTimeline::FrameTimes(const std::unordered_set<int32_t>&, nsecs_t));
+ };
+ 
+ } // namespace android::mock
+-- 
+2.43.0
+

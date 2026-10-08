@@ -1,0 +1,349 @@
+From 6c38070b4921fb238c28b6b0b175f9397024e543 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:47:55 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add test unit
+
+To run the test:
+
+fas_test_dir=$(mktemp -d /tmp/fas-upshift-tests.XXXXXX)
+clang++ -std=c++20 -Wall -Wextra -Werror -pthread \
+  -Isystem/core/fasd \
+  -Iexternal/googletest/googletest/include \
+  -Iexternal/googletest/googletest \
+  system/core/fasd/UpshiftProbe_test.cpp \
+  external/googletest/googletest/src/gtest-all.cc \
+  external/googletest/googletest/src/gtest_main.cc \
+  -o "$fas_test_dir/fasd_upshift_probe_test"
+"$fas_test_dir/fasd_upshift_probe_test"
+
+Change-Id: I8dfb687d60e9ea37f660755dac93bd003ea71b6c
+---
+ fasd/Android.bp            |   7 +
+ fasd/TEST_MAPPING          |   8 ++
+ fasd/UpshiftProbe_test.cpp | 284 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 299 insertions(+)
+ create mode 100644 fasd/TEST_MAPPING
+ create mode 100644 fasd/UpshiftProbe_test.cpp
+
+diff --git a/fasd/Android.bp b/fasd/Android.bp
+index 501d8f6..e13d100 100644
+--- a/fasd/Android.bp
++++ b/fasd/Android.bp
+@@ -29,3 +29,10 @@ cc_binary {
+     ],
+     init_rc: ["fasd.rc"],
+ }
++
++cc_test_host {
++    name: "fasd_upshift_probe_test",
++    cpp_std: "gnu++20",
++    srcs: ["UpshiftProbe_test.cpp"],
++    cflags: ["-Wall", "-Wextra", "-Werror"],
++}
+diff --git a/fasd/TEST_MAPPING b/fasd/TEST_MAPPING
+new file mode 100644
+index 0000000..776c0df
+--- /dev/null
++++ b/fasd/TEST_MAPPING
+@@ -0,0 +1,8 @@
++{
++  "presubmit": [
++    {
++      "name": "fasd_upshift_probe_test",
++      "host": true
++    }
++  ]
++}
+diff --git a/fasd/UpshiftProbe_test.cpp b/fasd/UpshiftProbe_test.cpp
+new file mode 100644
+index 0000000..18d3788
+--- /dev/null
++++ b/fasd/UpshiftProbe_test.cpp
+@@ -0,0 +1,284 @@
++/*
++ * Copyright 2026 The LineageOS Project
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++
++#include "UpshiftProbe.h"
++
++#include <gtest/gtest.h>
++
++namespace android::fas {
++namespace {
++
++using Event = UpshiftProbe::Event;
++constexpr int64_t ns(int64_t milliseconds) { return milliseconds * 1'000'000; }
++
++class UpshiftProbeTest : public testing::Test {
++  protected:
++    UpshiftProbe::Decision at(int64_t ms, double fps, std::optional<int32_t> next = 120,
++                              int32_t target = 60) {
++        return probe.update(ns(ms), target, next, fps);
++    }
++
++    void enterCooldown() {
++        EXPECT_EQ(at(0, 80).event, Event::None);
++        EXPECT_EQ(at(1000, 80).event, Event::Started);
++        EXPECT_EQ(at(11000, 80).event, Event::TimedOut);
++    }
++
++    UpshiftProbe probe;
++};
++
++TEST_F(UpshiftProbeTest, BelowTriggerDoesNotBoost) {
++    EXPECT_FALSE(at(0, 68.99).forceMaximum);
++    EXPECT_FALSE(at(10000, 68.99).forceMaximum);
++    EXPECT_FALSE(probe.armed());
++}
++
++TEST_F(UpshiftProbeTest, TriggerNeedsFullSecondEvenWhenClockStartsAtZero) {
++    EXPECT_EQ(at(0, 69).event, Event::None);
++    EXPECT_TRUE(probe.armed());
++    EXPECT_EQ(at(999, 69).event, Event::None);
++    const auto start = at(1000, 69);
++    EXPECT_EQ(start.event, Event::Started);
++    EXPECT_TRUE(start.forceMaximum);
++    EXPECT_TRUE(start.refreshVote);
++}
++
++TEST_F(UpshiftProbeTest, BriefDipRestartsTriggerConfirmation) {
++    at(0, 69);
++    at(900, 68.99);
++    EXPECT_FALSE(probe.armed());
++    EXPECT_EQ(at(1000, 69).event, Event::None);
++    EXPECT_EQ(at(1999, 69).event, Event::None);
++    EXPECT_EQ(at(2000, 69).event, Event::Started);
++}
++
++TEST_F(UpshiftProbeTest, TimeoutEndsMaximumPulseAtTenSeconds) {
++    at(0, 80);
++    at(1000, 80);
++    EXPECT_TRUE(at(10999, 80).forceMaximum);
++    const auto timeout = at(11000, 80);
++    EXPECT_EQ(timeout.event, Event::TimedOut);
++    EXPECT_FALSE(timeout.forceMaximum);
++    EXPECT_TRUE(timeout.refreshVote);
++    EXPECT_FALSE(probe.active());
++}
++
++TEST_F(UpshiftProbeTest, CooldownDoesNotRepeatedlyBoostOrRefresh) {
++    enterCooldown();
++    for (int64_t ms = 11100; ms < 31000; ms += 100) {
++        const auto result = at(ms, 80);
++        EXPECT_EQ(result.event, Event::None);
++        EXPECT_FALSE(result.forceMaximum);
++        EXPECT_FALSE(result.refreshVote);
++        EXPECT_FALSE(probe.armed());
++    }
++}
++
++TEST_F(UpshiftProbeTest, RetryRequiresTwentySecondsAndFreshTriggerConfirmation) {
++    enterCooldown();
++    EXPECT_EQ(at(30999, 80).event, Event::None);
++    EXPECT_FALSE(probe.armed());
++    EXPECT_EQ(at(31000, 80).event, Event::None);
++    EXPECT_TRUE(probe.armed());
++    EXPECT_EQ(at(31999, 80).event, Event::None);
++    EXPECT_EQ(at(32000, 80).event, Event::Started);
++}
++
++TEST_F(UpshiftProbeTest, ContinuousThresholdEvidenceConfirmsPassivelyDuringCooldown) {
++    enterCooldown();
++    for (int64_t ms = 12000; ms < 14000; ms += 100) {
++        const auto result = at(ms, 91);
++        EXPECT_EQ(result.event, Event::None);
++        EXPECT_FALSE(result.forceMaximum);
++        EXPECT_TRUE(probe.confirming());
++    }
++    const auto success = at(14000, 91);
++    EXPECT_EQ(success.event, Event::ConfirmedPassive);
++    EXPECT_EQ(success.candidateFps, 120);
++    EXPECT_FALSE(success.forceMaximum);
++    EXPECT_FALSE(probe.confirming());
++}
++
++TEST_F(UpshiftProbeTest, BriefDipBelowThresholdRestartsEntireSuccessConfirmation) {
++    enterCooldown();
++    at(12000, 91);
++    at(13000, 90.99);
++    EXPECT_FALSE(probe.confirming());
++    at(13001, 91);
++    EXPECT_EQ(at(15000, 91).event, Event::None);
++    EXPECT_EQ(at(15001, 91).event, Event::ConfirmedPassive);
++}
++
++TEST_F(UpshiftProbeTest, TimeoutRetainsUninterruptedConfirmationEvidence) {
++    at(0, 80);
++    at(1000, 80);
++    at(10000, 91);
++    EXPECT_EQ(at(11000, 91).event, Event::TimedOut);
++    EXPECT_TRUE(probe.confirming());
++    EXPECT_EQ(at(12000, 91).event, Event::ConfirmedPassive);
++}
++
++TEST_F(UpshiftProbeTest, StartingPulseDoesNotEraseEarlierQualifyingEvidence) {
++    at(0, 91);
++    EXPECT_EQ(at(1000, 91).event, Event::Started);
++    EXPECT_EQ(at(1999, 91).event, Event::None);
++    EXPECT_EQ(at(2000, 91).event, Event::ConfirmedActive);
++}
++
++TEST_F(UpshiftProbeTest, SuccessAtPulseDeadlineTakesPriorityOverTimeout) {
++    at(0, 80);
++    at(1000, 80);
++    at(9000, 91);
++    EXPECT_EQ(at(11000, 91).event, Event::ConfirmedActive);
++}
++
++TEST_F(UpshiftProbeTest, LosingCandidateClearsEvidenceWithoutStartingAnotherPulse) {
++    enterCooldown();
++    at(12000, 91);
++    const auto invalid = at(13000, 119, std::nullopt);
++    EXPECT_EQ(invalid.event, Event::None);
++    EXPECT_FALSE(invalid.forceMaximum);
++    EXPECT_EQ(probe.candidate(), 0);
++    EXPECT_FALSE(probe.confirming());
++    EXPECT_EQ(at(14000, 91).event, Event::None);
++    EXPECT_EQ(at(15999, 91).event, Event::None);
++    EXPECT_EQ(at(16000, 91).event, Event::ConfirmedPassive);
++}
++
++TEST_F(UpshiftProbeTest, CandidateInvalidationCancelsAnActivePulseAndPendingConfirmation) {
++    at(0, 80);
++    at(1000, 80);
++    at(2000, 91);
++    EXPECT_TRUE(probe.active());
++    EXPECT_TRUE(probe.confirming());
++    const auto invalid = at(2100, 119, std::nullopt);
++    EXPECT_EQ(invalid.event, Event::None);
++    EXPECT_FALSE(invalid.forceMaximum);
++    EXPECT_FALSE(probe.active());
++    EXPECT_FALSE(probe.armed());
++    EXPECT_FALSE(probe.confirming());
++    EXPECT_EQ(at(5000, 119, std::nullopt).event, Event::None);
++}
++
++TEST_F(UpshiftProbeTest, ChangingCandidateCannotReuseOldConfirmationTime) {
++    enterCooldown();
++    at(12000, 91);
++    EXPECT_EQ(at(13000, 121, 180).event, Event::None);
++    EXPECT_EQ(at(14999, 121, 180).event, Event::None);
++    const auto success = at(15000, 121, 180);
++    EXPECT_EQ(success.event, Event::ConfirmedPassive);
++    EXPECT_EQ(success.candidateFps, 180);
++}
++
++TEST_F(UpshiftProbeTest, ChangingCurrentTargetCannotReuseOldConfirmationTime) {
++    enterCooldown();
++    at(12000, 91);
++    EXPECT_EQ(at(13000, 100, 120, 30).event, Event::None);
++    EXPECT_EQ(at(14999, 100, 120, 30).event, Event::None);
++    EXPECT_EQ(at(15000, 100, 120, 30).event, Event::ConfirmedPassive);
++}
++
++TEST_F(UpshiftProbeTest, ResetEvidencePreservesRetryCooldown) {
++    enterCooldown();
++    at(12000, 91);
++    probe.resetEvidence();
++    EXPECT_FALSE(probe.active());
++    EXPECT_FALSE(probe.confirming());
++    EXPECT_EQ(at(13000, 80).event, Event::None);
++    EXPECT_FALSE(probe.armed());
++}
++
++TEST_F(UpshiftProbeTest, NewSessionResetClearsCooldownAndConfirmation) {
++    enterCooldown();
++    at(12000, 91);
++    probe.reset();
++    EXPECT_FALSE(probe.confirming());
++    EXPECT_EQ(at(13000, 80).event, Event::None);
++    EXPECT_TRUE(probe.armed());
++    EXPECT_EQ(at(14000, 80).event, Event::Started);
++}
++
++TEST_F(UpshiftProbeTest, NoTargetOrNonHigherCandidateCannotConfirm) {
++    EXPECT_EQ(at(0, 120, 120, 0).event, Event::None);
++    EXPECT_EQ(at(3000, 120, 60, 60).event, Event::None);
++    EXPECT_EQ(at(6000, 120, 30, 60).event, Event::None);
++    EXPECT_FALSE(probe.active());
++    EXPECT_FALSE(probe.confirming());
++}
++
++// A fake only for the transport boundary. It does not simulate QTI or infer a thermal ceiling.
++// Both these tests and Engine call the same production submitBackendVoteIfDue helper.
++struct FakeBackend {
++    bool update(uint64_t generation, int vote) {
++        ++updates;
++        lastGeneration = generation;
++        lastVote = vote;
++        return succeeds;
++    }
++    void release(uint64_t) { ++releases; }
++    bool succeeds = true;
++    int updates = 0;
++    int releases = 0;
++    uint64_t lastGeneration = 0;
++    int lastVote = 0;
++};
++
++TEST_F(UpshiftProbeTest, TimeoutImmediatelySubmitsOrdinaryVoteWithoutRelease) {
++    at(0, 80);
++    at(1000, 80);
++    const auto timeout = at(11000, 80);
++    FakeBackend backend;
++    int64_t lastUpdate = ns(10900); // Normal 500 ms interval is not due yet.
++    bool delivered = true;
++    const int vote = timeout.forceMaximum ? 2918400 : 2000000;
++    EXPECT_TRUE(submitBackendVoteIfDue(ns(11000), ns(500), timeout.refreshVote, 5, vote,
++                                      backend, lastUpdate, delivered));
++    EXPECT_EQ(backend.updates, 1);
++    EXPECT_EQ(backend.releases, 0);
++    EXPECT_EQ(backend.lastGeneration, 5u);
++    EXPECT_EQ(backend.lastVote, 2000000);
++    EXPECT_EQ(lastUpdate, ns(11000));
++    EXPECT_TRUE(delivered);
++}
++
++TEST_F(UpshiftProbeTest, FailedHandoffReportsFailureAndRetriesAtNormalInterval) {
++    enterCooldown();
++    FakeBackend backend;
++    backend.succeeds = false;
++    int64_t lastUpdate = ns(10900);
++    bool delivered = true;
++    EXPECT_TRUE(submitBackendVoteIfDue(ns(11000), ns(500), true, 5, 2000000,
++                                      backend, lastUpdate, delivered));
++    EXPECT_FALSE(delivered);
++    EXPECT_EQ(backend.releases, 0);
++    backend.succeeds = true;
++    EXPECT_FALSE(submitBackendVoteIfDue(ns(11499), ns(500), false, 5, 2000000,
++                                       backend, lastUpdate, delivered));
++    EXPECT_FALSE(delivered);
++    EXPECT_TRUE(submitBackendVoteIfDue(ns(11500), ns(500), false, 5, 2000000,
++                                      backend, lastUpdate, delivered));
++    EXPECT_TRUE(delivered);
++    EXPECT_EQ(backend.updates, 2);
++    EXPECT_EQ(backend.releases, 0);
++}
++
++TEST_F(UpshiftProbeTest, CooldownKeepsOrdinaryVoteRenewalsRunning) {
++    enterCooldown();
++    FakeBackend backend;
++    int64_t lastUpdate = ns(11000);
++    bool delivered = true;
++    for (int64_t ms = 11100; ms <= 13000; ms += 100) {
++        const auto decision = at(ms, 80);
++        EXPECT_FALSE(decision.forceMaximum);
++        submitBackendVoteIfDue(ns(ms), ns(500), decision.refreshVote, 5, 2000000,
++                               backend, lastUpdate, delivered);
++    }
++    EXPECT_EQ(backend.updates, 4);
++    EXPECT_EQ(backend.releases, 0);
++    EXPECT_TRUE(delivered);
++}
++
++} // namespace
++} // namespace android::fas
+-- 
+2.43.0
+

@@ -1,0 +1,2082 @@
+From d2fbdea6206812bba9fde4a7ad3039ac826257f2 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:41:38 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add Frame Aware Schedule as fasd
+
+This feature largely takes [fas-rs](https://github.com/shadow3aaa/fas-rs) as reference, but also added
+target FPS auto-detect feature and thermal-limit aware
+
+Change-Id: I65c1ece06aeba724b9d1ee1449c3c33961e56afb
+---
+ fasd/Android.bp     |   31 +
+ fasd/NOTICE         |   13 +
+ fasd/UpshiftProbe.h |  128 +++
+ fasd/fasd.cpp       | 1850 +++++++++++++++++++++++++++++++++++++++++++
+ fasd/fasd.rc        |    5 +
+ 5 files changed, 2027 insertions(+)
+ create mode 100644 fasd/Android.bp
+ create mode 100644 fasd/NOTICE
+ create mode 100644 fasd/UpshiftProbe.h
+ create mode 100644 fasd/fasd.cpp
+ create mode 100644 fasd/fasd.rc
+
+diff --git a/fasd/Android.bp b/fasd/Android.bp
+new file mode 100644
+index 0000000..501d8f6
+--- /dev/null
++++ b/fasd/Android.bp
+@@ -0,0 +1,31 @@
++package {
++    default_applicable_licenses: ["fasd_license"],
++}
++
++license {
++    name: "fasd_license",
++    visibility: [":__subpackages__"],
++    license_kinds: ["SPDX-license-identifier-GPL-3.0"],
++    license_text: ["NOTICE"],
++}
++
++cc_binary {
++    name: "fasd",
++    cpp_std: "gnu++20",
++    srcs: ["fasd.cpp"],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    shared_libs: [
++        "libbinder",
++        "libbinder_ndk",
++        "libcutils",
++        "libgui",
++        "liblog",
++        "libutils",
++        "vendor.performance.fas-V1-ndk",
++    ],
++    init_rc: ["fasd.rc"],
++}
+diff --git a/fasd/NOTICE b/fasd/NOTICE
+new file mode 100644
+index 0000000..3616659
+--- /dev/null
++++ b/fasd/NOTICE
+@@ -0,0 +1,13 @@
++fasd contains an adaptation of the controller behavior implemented by fas-rs:
++https://github.com/shadow3aaa/fas-rs
++
++Copyright 2023-2025 YuSaki Kanade, shadow3, shadow3aaa, and contributors.
++Copyright 2026 Neko LineageOS Project.
++
++fasd is free software: you can redistribute it and/or modify it under the terms
++of the GNU General Public License as published by the Free Software Foundation,
++version 3 of the License.
++
++The full GPL-3.0 license text is available in the Android source tree at
++external/licenseclassifier/licenses/GPL-3.0.txt and at
++https://www.gnu.org/licenses/gpl-3.0.html.
+diff --git a/fasd/UpshiftProbe.h b/fasd/UpshiftProbe.h
+new file mode 100644
+index 0000000..ddf2473
+--- /dev/null
++++ b/fasd/UpshiftProbe.h
+@@ -0,0 +1,128 @@
++/*
++ * Copyright 2026 The LineageOS Project
++ * SPDX-License-Identifier: GPL-3.0-only
++ */
++
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <optional>
++
++namespace android::fas {
++
++// Pure policy: callers supply a monotonic timestamp and the already measured recent FPS.
++// No clocks, Binder, sysfs or sleeping are needed to exercise the production state machine.
++class UpshiftProbe {
++  public:
++    static constexpr int64_t kTriggerConfirmationNs = 1'000'000'000;
++    static constexpr int64_t kSuccessConfirmationNs = 2'000'000'000;
++    static constexpr int64_t kDurationNs = 10'000'000'000;
++    static constexpr int64_t kRetryCooldownNs = 20'000'000'000;
++
++    enum class Event { None, Started, TimedOut, ConfirmedActive, ConfirmedPassive };
++    struct Decision {
++        Event event = Event::None;
++        int32_t candidateFps = 0;
++        bool forceMaximum = false;
++        bool refreshVote = false;
++    };
++
++    Decision update(int64_t nowNs, int32_t currentTarget,
++                    std::optional<int32_t> nextCandidate, double recentFps) {
++        if (currentTarget <= 0 || !nextCandidate || *nextCandidate <= currentTarget) {
++            resetEvidence();
++            return {};
++        }
++        if (mCurrentTarget != currentTarget || mCandidate != *nextCandidate) {
++            resetEvidence();
++            mCurrentTarget = currentTarget;
++            mCandidate = *nextCandidate;
++        }
++        const bool activeProbe = active();
++        const double successThreshold = (currentTarget + *nextCandidate) / 2.0 + 1.0;
++        if (recentFps >= successThreshold) {
++            if (!mSuccessSinceNs) mSuccessSinceNs = nowNs;
++            if (nowNs - *mSuccessSinceNs >= kSuccessConfirmationNs) {
++                const Event event = activeProbe ? Event::ConfirmedActive : Event::ConfirmedPassive;
++                const int32_t candidate = *nextCandidate;
++                reset();
++                return {.event = event, .candidateFps = candidate};
++            }
++        } else {
++            mSuccessSinceNs.reset();
++        }
++
++        if (activeProbe) {
++            if (nowNs < *mProbeUntilNs) {
++                return {.candidateFps = *nextCandidate, .forceMaximum = true};
++            }
++            // The pulse expires, not the cadence evidence. The caller replaces the vote without
++            // releasing its backend, preserving both a live lock and external-ceiling history.
++            mProbeUntilNs.reset();
++            mTriggerSinceNs.reset();
++            mCooldownUntilNs = nowNs + kRetryCooldownNs;
++            return {.event = Event::TimedOut, .candidateFps = *nextCandidate, .refreshVote = true};
++        }
++        if (mCooldownUntilNs && nowNs < *mCooldownUntilNs) {
++            mTriggerSinceNs.reset();
++            return {.candidateFps = *nextCandidate};
++        }
++        const double triggerMargin = std::max(4.0, currentTarget * 0.15);
++        if (recentFps < currentTarget + triggerMargin) {
++            mTriggerSinceNs.reset();
++            return {.candidateFps = *nextCandidate};
++        }
++        if (!mTriggerSinceNs) mTriggerSinceNs = nowNs;
++        if (nowNs - *mTriggerSinceNs < kTriggerConfirmationNs) {
++            return {.candidateFps = *nextCandidate};
++        }
++        mTriggerSinceNs.reset();
++        mProbeUntilNs = nowNs + kDurationNs;
++        return {.event = Event::Started,
++                .candidateFps = *nextCandidate,
++                .forceMaximum = true,
++                .refreshVote = true};
++    }
++
++    void resetEvidence() {
++        mCurrentTarget = 0;
++        mCandidate = 0;
++        mTriggerSinceNs.reset();
++        mSuccessSinceNs.reset();
++        mProbeUntilNs.reset();
++    }
++
++    void reset() {
++        resetEvidence();
++        mCooldownUntilNs.reset();
++    }
++
++    int32_t candidate() const { return mCandidate; }
++    bool active() const { return mProbeUntilNs.has_value(); }
++    bool armed() const { return mTriggerSinceNs.has_value(); }
++    bool confirming() const { return mSuccessSinceNs.has_value(); }
++
++  private:
++    int32_t mCurrentTarget = 0;
++    int32_t mCandidate = 0;
++    std::optional<int64_t> mTriggerSinceNs;
++    std::optional<int64_t> mSuccessSinceNs;
++    std::optional<int64_t> mProbeUntilNs;
++    std::optional<int64_t> mCooldownUntilNs;
++};
++
++// Shared by Engine and host tests. A timeout forces an ordinary update even if the regular
++// backend interval has not elapsed. The existing backend owns acquire-before-retire and TTL;
++// this handoff must never issue release. Failed updates leave those safety mechanisms intact.
++template <typename Backend, typename Votes>
++bool submitBackendVoteIfDue(int64_t nowNs, int64_t intervalNs, bool forceUpdate,
++                            uint64_t generation, const Votes& votes, Backend& backend,
++                            int64_t& lastUpdateNs, bool& lastDelivered) {
++    if (!forceUpdate && nowNs - lastUpdateNs < intervalNs) return false;
++    lastUpdateNs = nowNs;
++    lastDelivered = backend.update(generation, votes);
++    return true;
++}
++
++} // namespace android::fas
+diff --git a/fasd/fasd.cpp b/fasd/fasd.cpp
+new file mode 100644
+index 0000000..1b7b97e
+--- /dev/null
++++ b/fasd/fasd.cpp
+@@ -0,0 +1,1850 @@
++/*
++ * Copyright 2023-2025 YuSaki Kanade, shadow3, shadow3aaa, and contributors
++ * Copyright 2026 The LineageOS Project
++ *
++ * This file is part of fasd and is distributed under the GNU General Public
++ * License, version 3. See NOTICE for attribution and license information.
++ */
++
++#define LOG_TAG "fasd"
++
++#include "UpshiftProbe.h"
++
++#include <aidl/vendor/performance/fas/CpuPolicyVote.h>
++#include <aidl/vendor/performance/fas/IFasBackend.h>
++#include <android/binder_manager.h>
++#include <android/gui/BnFpsListener.h>
++#include <binder/ProcessState.h>
++#include <cutils/sockets.h>
++#include <gui/SurfaceComposerClient.h>
++#include <utils/Log.h>
++#include <utils/Timers.h>
++
++#include <dirent.h>
++#include <fcntl.h>
++#include <sched.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cctype>
++#include <cerrno>
++#include <charconv>
++#include <chrono>
++#include <cinttypes>
++#include <cmath>
++#include <condition_variable>
++#include <cstdint>
++#include <cstring>
++#include <deque>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <map>
++#include <mutex>
++#include <optional>
++#include <set>
++#include <sstream>
++#include <string>
++#include <string_view>
++#include <thread>
++#include <unordered_map>
++#include <utility>
++#include <vector>
++
++namespace android::fas {
++namespace {
++
++using namespace std::chrono_literals;
++
++constexpr std::string_view kCpuFreqRoot = "/sys/devices/system/cpu/cpufreq";
++constexpr std::chrono::milliseconds kPolicyInterval = 100ms;
++constexpr std::chrono::milliseconds kLogInterval = 500ms;
++constexpr std::chrono::milliseconds kBackendInterval = 500ms;
++constexpr std::chrono::milliseconds kFrameCallbackGrace = 250ms;
++constexpr std::chrono::seconds kStartDelay = 3s;
++constexpr std::chrono::seconds kJankWindow = 1s;
++constexpr std::chrono::milliseconds kCadenceSubwindow = 500ms;
++constexpr std::chrono::seconds kDownshiftConfirmation = 3s;
++constexpr std::chrono::seconds kUpshiftConfirmation = 5s;
++constexpr std::chrono::seconds kTargetSwitchCooldown = 5s;
++constexpr std::chrono::seconds kTargetDiagnosticInterval = 1s;
++constexpr std::chrono::seconds kThreadDiagnosticInterval = 1s;
++constexpr std::chrono::milliseconds kThreadSampleInterval = 300ms;
++constexpr std::chrono::seconds kPolicyRuntimeStaleInterval = 2s;
++constexpr std::chrono::seconds kHealthyRecoveryConfirmation = 3s;
++constexpr std::chrono::seconds kHealthyRecoveryStepInterval = 1s;
++constexpr std::chrono::seconds kHealthyRecoveryCooldown = 5s;
++constexpr double kControllerKp = 0.0003;
++constexpr double kBalanceMarginFps = 1.0;
++constexpr double kCadenceFpsToleranceRatio = 0.06;
++constexpr double kHealthyRecoveryFpsMargin = 1.0;
++// A zero-tick process sample is common over a short sampling interval. Require positive
++// utilization evidence before allowing guarded recovery to lower the current vote.
++constexpr double kMinimumUtilizationForRecovery = 0.10;
++constexpr double kHighUtilizationForRecoveryHold = 0.65;
++// Keep fixed minimum votes on the policies carrying most of the observed top-thread runtime.
++// Weight runtime by each policy's maximum frequency as a portable performance-capacity proxy,
++// smooth it across complete windows, and use asymmetric confirmation so a short residency swap
++// neither fixes a policy nor relaxes a previously important policy immediately.
++constexpr double kFixedPolicyRuntimeCoverage = 0.75;
++constexpr double kPolicyRuntimeEwmaNewWindowWeight = 0.50;
++constexpr size_t kPolicyEnterWindowCount = 2;
++constexpr size_t kPolicyReleaseWindowCount = 5;
++// Keep a single delayed frame from taking the virtual controller straight to maximum, while
++// still allowing sustained misses to ramp quickly. Recover stale votes one guarded step at a time;
++// applying this step on every policy tick was fast enough to cause a drop-and-boost sawtooth.
++constexpr int64_t kMaximumControlIncreaseKhz = 150000;
++constexpr int64_t kHealthyRecoveryStepKhz = 25000;
++constexpr size_t kMinimumFrameSamples = 60;
++constexpr size_t kCadenceWindowCount = 4;
++constexpr size_t kRequiredStableWindows = 3;
++constexpr size_t kTopThreadCount = 8;
++
++struct Session {
++    uint64_t generation = 0;
++    int32_t taskId = -1;
++    int32_t uid = -1;
++    int32_t displayRefreshMilliHz = 0;
++    int32_t fpsOverride = 0;
++    std::string packageName;
++};
++
++struct CpuPolicy {
++    int32_t id = -1;
++    std::string path;
++    std::vector<int64_t> frequenciesKhz;
++    std::vector<int32_t> affectedCpus;
++};
++
++struct PolicyFrequencyRange {
++    int64_t minimumKhz = 0;
++    int64_t maximumKhz = 0;
++};
++
++struct ThreadSample {
++    uint64_t cpuTicks = 0;
++    nsecs_t sampleTimeNs = 0;
++};
++
++struct ThreadProcStat {
++    uint64_t cpuTicks = 0;
++    int32_t processor = -1;
++    std::string comm;
++};
++
++struct ThreadUsage {
++    double utilization = 0.0;
++    uint64_t elapsedTicks = 0;
++    nsecs_t elapsedNs = 0;
++    int32_t processor = -1;
++    std::string comm;
++};
++
++struct ThreadDiagnosticRecord {
++    int32_t tid = -1;
++    std::string comm;
++    double utilization = 0.0;
++    std::optional<std::vector<int32_t>> affinityCpus;
++    int32_t lastCpu = -1;
++    size_t sampleCount = 0;
++    std::map<int32_t, uint64_t> cpuTicks;
++};
++
++struct ProcessDiagnosticSnapshot {
++    nsecs_t windowNs = 0;
++    std::vector<ThreadDiagnosticRecord> threads;
++};
++
++struct PolicyRuntimeObservation {
++    std::map<int32_t, uint64_t> ticks;
++    std::map<int32_t, double> smoothedShares;
++    uint64_t unknownTicks = 0;
++    std::vector<int32_t> candidatePolicies;
++    std::vector<int32_t> fixedPolicies;
++    bool valid = false;
++};
++
++struct CadenceObservation {
++    int32_t candidateFps = 0;
++    double measuredFps = 0.0;
++    size_t stableWindows = 0;
++};
++
++std::optional<std::string> readFile(const std::string& path) {
++    std::ifstream stream(path);
++    if (!stream) return std::nullopt;
++    std::ostringstream contents;
++    contents << stream.rdbuf();
++    return contents.str();
++}
++
++template <typename T>
++std::optional<T> parseInteger(std::string_view text) {
++    T value{};
++    const char* begin = text.data();
++    const char* end = begin + text.size();
++    const auto [ptr, error] = std::from_chars(begin, end, value);
++    if (error != std::errc() || ptr != end) return std::nullopt;
++    return value;
++}
++
++std::vector<std::string_view> split(std::string_view text, char delimiter) {
++    std::vector<std::string_view> parts;
++    size_t start = 0;
++    while (start <= text.size()) {
++        const size_t end = text.find(delimiter, start);
++        parts.push_back(text.substr(start, end == std::string_view::npos ? end : end - start));
++        if (end == std::string_view::npos) break;
++        start = end + 1;
++    }
++    return parts;
++}
++
++std::vector<int64_t> parseFrequencyList(const std::string& contents) {
++    std::vector<int64_t> result;
++    std::istringstream stream(contents);
++    int64_t frequency;
++    while (stream >> frequency) {
++        if (frequency > 0) result.push_back(frequency);
++    }
++    std::sort(result.begin(), result.end());
++    result.erase(std::unique(result.begin(), result.end()), result.end());
++    return result;
++}
++
++std::vector<int32_t> parseCpuList(std::string contents) {
++    std::replace(contents.begin(), contents.end(), ',', ' ');
++    std::vector<int32_t> result;
++    std::istringstream stream(contents);
++    std::string token;
++    while (stream >> token) {
++        const size_t separator = token.find('-');
++        if (separator == std::string::npos) {
++            const auto cpu = parseInteger<int32_t>(token);
++            if (cpu && *cpu >= 0 && *cpu < CPU_SETSIZE) result.push_back(*cpu);
++            continue;
++        }
++
++        const auto first = parseInteger<int32_t>(std::string_view(token).substr(0, separator));
++        const auto last = parseInteger<int32_t>(std::string_view(token).substr(separator + 1));
++        if (!first || !last || *first < 0 || *last < *first || *last >= CPU_SETSIZE) continue;
++        for (int32_t cpu = *first; cpu <= *last; ++cpu) result.push_back(cpu);
++    }
++    std::sort(result.begin(), result.end());
++    result.erase(std::unique(result.begin(), result.end()), result.end());
++    return result;
++}
++
++std::optional<int64_t> readIntegerFile(const std::string& path) {
++    const auto contents = readFile(path);
++    if (!contents) return std::nullopt;
++    std::string_view value(*contents);
++    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
++        value.remove_suffix(1);
++    }
++    return parseInteger<int64_t>(value);
++}
++
++class ProcessMonitor {
++  public:
++    void setPid(int32_t pid) {
++        if (mPid == pid) return;
++        mPid = pid;
++        mAllSamples.clear();
++        mTopThreads.clear();
++        mDiagnosticAccumulators.clear();
++        mPendingDiagnosticSnapshot.reset();
++        mUtilMax.reset();
++        mLastFullUpdateNs = 0;
++        mLastUtilUpdateNs = 0;
++        mDiagnosticWindowStartNs = 0;
++        mLastDiagnosticSampleNs = 0;
++    }
++
++    std::optional<double> update(nsecs_t nowNs) {
++        if (mPid <= 0) return std::nullopt;
++        if (nowNs - mLastFullUpdateNs >=
++            seconds_to_nanoseconds(kThreadDiagnosticInterval.count())) {
++            finalizeDiagnostics(nowNs);
++            updateThreadList(nowNs);
++            mLastFullUpdateNs = nowNs;
++        }
++        if (nowNs - mLastUtilUpdateNs <
++            milliseconds_to_nanoseconds(kThreadSampleInterval.count())) {
++            return std::nullopt;
++        }
++
++        double utilMax = 0.0;
++        bool sampled = false;
++        for (const int32_t tid : mTopThreads) {
++            const auto usage = sampleUsage(tid, nowNs);
++            if (usage) {
++                utilMax = std::max(utilMax, usage->utilization);
++                recordDiagnostic(tid, *usage, nowNs);
++                sampled = true;
++            }
++        }
++        mLastUtilUpdateNs = nowNs;
++        if (sampled) mUtilMax = utilMax;
++        return sampled ? std::optional<double>(utilMax) : std::nullopt;
++    }
++
++    std::optional<double> utilMax() const { return mUtilMax; }
++    void clearUtil() { mUtilMax.reset(); }
++
++    void clearPolicySamples() {
++        mDiagnosticAccumulators.clear();
++        mPendingDiagnosticSnapshot.reset();
++        mLastFullUpdateNs = 0;
++        mLastUtilUpdateNs = 0;
++        mDiagnosticWindowStartNs = 0;
++        mLastDiagnosticSampleNs = 0;
++    }
++
++    std::optional<ProcessDiagnosticSnapshot> takeDiagnosticSnapshot() {
++        auto result = std::move(mPendingDiagnosticSnapshot);
++        mPendingDiagnosticSnapshot.reset();
++        return result;
++    }
++
++  private:
++    struct ThreadDiagnosticAccumulator {
++        std::string comm;
++        uint64_t elapsedTicks = 0;
++        nsecs_t elapsedNs = 0;
++        int32_t lastCpu = -1;
++        size_t sampleCount = 0;
++        std::map<int32_t, uint64_t> cpuTicks;
++    };
++
++    static std::optional<std::vector<int32_t>> readAffinityCpus(int32_t tid) {
++        cpu_set_t affinity;
++        CPU_ZERO(&affinity);
++        if (sched_getaffinity(tid, sizeof(affinity), &affinity) != 0) return std::nullopt;
++
++        std::vector<int32_t> cpus;
++        for (int32_t cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
++            if (CPU_ISSET(cpu, &affinity)) cpus.push_back(cpu);
++        }
++        return cpus.empty() ? std::nullopt : std::optional<std::vector<int32_t>>(std::move(cpus));
++    }
++
++    static std::string sanitizeLogToken(std::string value) {
++        if (value.size() > 32) value.resize(32);
++        for (char& character : value) {
++            const unsigned char byte = static_cast<unsigned char>(character);
++            if (!std::isalnum(byte) && character != '_' && character != '-' && character != '.') {
++                character = '_';
++            }
++        }
++        return value;
++    }
++
++    std::optional<ThreadProcStat> readThreadStat(int32_t tid) const {
++        const auto stat = readFile("/proc/" + std::to_string(mPid) + "/task/" +
++                                   std::to_string(tid) + "/stat");
++        if (!stat) return std::nullopt;
++        const size_t commStart = stat->find('(');
++        const size_t commEnd = stat->rfind(')');
++        if (commStart == std::string::npos || commEnd == std::string::npos ||
++            commEnd <= commStart || commEnd + 2 >= stat->size()) {
++            return std::nullopt;
++        }
++        std::istringstream fields(stat->substr(commEnd + 2));
++        std::string field;
++        uint64_t userTicks = 0;
++        uint64_t systemTicks = 0;
++        int32_t processor = -1;
++        bool haveUserTicks = false;
++        bool haveSystemTicks = false;
++        for (int index = 0; fields >> field; ++index) {
++            if (index == 11) {
++                const auto parsed = parseInteger<uint64_t>(field);
++                if (!parsed) return std::nullopt;
++                userTicks = *parsed;
++                haveUserTicks = true;
++            }
++            if (index == 12) {
++                const auto parsed = parseInteger<uint64_t>(field);
++                if (!parsed) return std::nullopt;
++                systemTicks = *parsed;
++                haveSystemTicks = true;
++            }
++            if (index == 36) {
++                processor = parseInteger<int32_t>(field).value_or(-1);
++                break;
++            }
++        }
++        if (!haveUserTicks || !haveSystemTicks) return std::nullopt;
++        if (processor < 0 || processor >= CPU_SETSIZE) processor = -1;
++        return ThreadProcStat{
++                .cpuTicks = userTicks + systemTicks,
++                .processor = processor,
++                .comm = sanitizeLogToken(stat->substr(commStart + 1, commEnd - commStart - 1))};
++    }
++
++    std::optional<ThreadUsage> sampleUsage(int32_t tid, nsecs_t nowNs) {
++        const auto stat = readThreadStat(tid);
++        if (!stat) return std::nullopt;
++        auto& old = mAllSamples[tid];
++        if (old.sampleTimeNs == 0 || stat->cpuTicks < old.cpuTicks) {
++            old = {stat->cpuTicks, nowNs};
++            return std::nullopt;
++        }
++        const long ticksPerSecond = sysconf(_SC_CLK_TCK);
++        const nsecs_t elapsedNs = nowNs - old.sampleTimeNs;
++        const uint64_t elapsedTicks = stat->cpuTicks - old.cpuTicks;
++        old = {stat->cpuTicks, nowNs};
++        if (ticksPerSecond <= 0 || elapsedNs <= 0) return std::nullopt;
++        return ThreadUsage{.utilization = static_cast<double>(elapsedTicks) *
++                                          seconds_to_nanoseconds(1) /
++                                          (static_cast<double>(ticksPerSecond) * elapsedNs),
++                           .elapsedTicks = elapsedTicks,
++                           .elapsedNs = elapsedNs,
++                           .processor = stat->processor,
++                           .comm = stat->comm};
++    }
++
++    void recordDiagnostic(int32_t tid, const ThreadUsage& usage, nsecs_t nowNs) {
++        auto& accumulator = mDiagnosticAccumulators[tid];
++        accumulator.comm = usage.comm;
++        accumulator.elapsedTicks += usage.elapsedTicks;
++        accumulator.elapsedNs += usage.elapsedNs;
++        accumulator.lastCpu = usage.processor;
++        ++accumulator.sampleCount;
++        // /proc/<pid>/task/<tid>/stat exposes the processor observed at the end of this sample,
++        // not an exact migration history. Attribute the interval's ticks to that CPU, then let the
++        // policy selector smooth this approximate signal across complete windows with conservative
++        // release hysteresis.
++        if (usage.processor >= 0) accumulator.cpuTicks[usage.processor] += usage.elapsedTicks;
++        mLastDiagnosticSampleNs = nowNs;
++    }
++
++    void finalizeDiagnostics(nsecs_t nowNs) {
++        if (mDiagnosticWindowStartNs == 0) {
++            mDiagnosticWindowStartNs = nowNs;
++            return;
++        }
++        if (mDiagnosticAccumulators.empty()) {
++            mDiagnosticWindowStartNs = nowNs;
++            return;
++        }
++        // evaluateLocked deliberately pauses utilization sampling while cadence is janked. Do not
++        // emit an old partial window at the timestamp where healthy sampling later resumes.
++        if (mLastDiagnosticSampleNs == 0 ||
++            nowNs - mLastDiagnosticSampleNs >=
++                    seconds_to_nanoseconds(kThreadDiagnosticInterval.count())) {
++            mDiagnosticAccumulators.clear();
++            mDiagnosticWindowStartNs = nowNs;
++            mLastDiagnosticSampleNs = 0;
++            return;
++        }
++
++        ProcessDiagnosticSnapshot snapshot{.windowNs = nowNs - mDiagnosticWindowStartNs};
++        const long ticksPerSecond = sysconf(_SC_CLK_TCK);
++        for (const auto& [tid, accumulator] : mDiagnosticAccumulators) {
++            double utilization = 0.0;
++            if (ticksPerSecond > 0 && accumulator.elapsedNs > 0) {
++                utilization = static_cast<double>(accumulator.elapsedTicks) *
++                              seconds_to_nanoseconds(1) /
++                              (static_cast<double>(ticksPerSecond) * accumulator.elapsedNs);
++            }
++            snapshot.threads.push_back(
++                    ThreadDiagnosticRecord{.tid = tid,
++                                           .comm = accumulator.comm,
++                                           .utilization = utilization,
++                                           .affinityCpus = readAffinityCpus(tid),
++                                           .lastCpu = accumulator.lastCpu,
++                                           .sampleCount = accumulator.sampleCount,
++                                           .cpuTicks = accumulator.cpuTicks});
++        }
++        std::sort(snapshot.threads.begin(), snapshot.threads.end(),
++                  [](const auto& left, const auto& right) {
++                      if (left.utilization != right.utilization) {
++                          return left.utilization > right.utilization;
++                      }
++                      return left.tid < right.tid;
++                  });
++        mPendingDiagnosticSnapshot = std::move(snapshot);
++        mDiagnosticAccumulators.clear();
++        mDiagnosticWindowStartNs = nowNs;
++        mLastDiagnosticSampleNs = 0;
++    }
++
++    void updateThreadList(nsecs_t nowNs) {
++        const std::string taskPath = "/proc/" + std::to_string(mPid) + "/task";
++        DIR* directory = opendir(taskPath.c_str());
++        if (directory == nullptr) return;
++
++        std::vector<std::pair<int32_t, std::optional<ThreadUsage>>> usage;
++        while (const dirent* entry = readdir(directory)) {
++            const auto tid = parseInteger<int32_t>(entry->d_name);
++            if (!tid || *tid <= 0) continue;
++            usage.emplace_back(*tid, sampleUsage(*tid, nowNs));
++        }
++        closedir(directory);
++
++        std::sort(usage.begin(), usage.end(), [](const auto& left, const auto& right) {
++            const double leftUtilization = left.second ? left.second->utilization : 0.0;
++            const double rightUtilization = right.second ? right.second->utilization : 0.0;
++            return leftUtilization > rightUtilization;
++        });
++        if (usage.size() > kTopThreadCount) usage.resize(kTopThreadCount);
++        mTopThreads.clear();
++        for (const auto& [tid, sample] : usage) {
++            mTopThreads.push_back(tid);
++            if (sample) recordDiagnostic(tid, *sample, nowNs);
++        }
++    }
++
++    int32_t mPid = -1;
++    std::unordered_map<int32_t, ThreadSample> mAllSamples;
++    std::vector<int32_t> mTopThreads;
++    std::unordered_map<int32_t, ThreadDiagnosticAccumulator> mDiagnosticAccumulators;
++    std::optional<ProcessDiagnosticSnapshot> mPendingDiagnosticSnapshot;
++    std::optional<double> mUtilMax;
++    nsecs_t mLastFullUpdateNs = 0;
++    nsecs_t mLastUtilUpdateNs = 0;
++    nsecs_t mDiagnosticWindowStartNs = 0;
++    nsecs_t mLastDiagnosticSampleNs = 0;
++};
++
++class CpuTopology {
++  public:
++    CpuTopology() { load(); }
++
++    void resetVirtualState() {
++        mVirtualFrequencyKhz = 0;
++        for (const auto& policy : mPolicies) {
++            if (!policy.frequenciesKhz.empty()) {
++                mVirtualFrequencyKhz = std::max(mVirtualFrequencyKhz, policy.frequenciesKhz.back());
++            }
++        }
++    }
++
++    std::map<int32_t, PolicyFrequencyRange> recommend(
++            int64_t controlKhz, const std::optional<std::vector<int32_t>>& fixedPolicyIds) {
++        std::map<int32_t, PolicyFrequencyRange> result;
++        if (mPolicies.empty()) return result;
++
++        int64_t absoluteMax = 0;
++        for (const auto& policy : mPolicies) {
++            absoluteMax = std::max(absoluteMax, policy.frequenciesKhz.back());
++        }
++
++        mVirtualFrequencyKhz =
++                std::clamp(mVirtualFrequencyKhz + controlKhz, int64_t{0}, absoluteMax);
++
++        std::vector<bool> fixedPolicies(mPolicies.size(),
++                                        !fixedPolicyIds || fixedPolicyIds->empty());
++        if (fixedPolicyIds && !fixedPolicyIds->empty()) {
++            size_t matchedPolicies = 0;
++            for (size_t i = 0; i < mPolicies.size(); ++i) {
++                fixedPolicies[i] = std::binary_search(fixedPolicyIds->begin(),
++                                                      fixedPolicyIds->end(), mPolicies[i].id);
++                if (fixedPolicies[i]) ++matchedPolicies;
++            }
++            // An unknown policy id indicates a topology mismatch. Retain the proven all-policy
++            // behavior instead of accidentally relaxing every minimum vote.
++            if (matchedPolicies != fixedPolicyIds->size()) {
++                std::fill(fixedPolicies.begin(), fixedPolicies.end(), true);
++            }
++        }
++
++        for (size_t i = 0; i < mPolicies.size(); ++i) {
++            auto& policy = mPolicies[i];
++            const int64_t suggestion =
++                    std::clamp(mVirtualFrequencyKhz, policy.frequenciesKhz.front(),
++                               policy.frequenciesKhz.back());
++            result.emplace(policy.id,
++                           PolicyFrequencyRange{
++                                   .minimumKhz = fixedPolicies[i] ? suggestion
++                                                                  : policy.frequenciesKhz.front(),
++                                   .maximumKhz = suggestion});
++        }
++        return result;
++    }
++
++    std::map<int32_t, PolicyFrequencyRange> maximumRecommendations() const {
++        std::map<int32_t, PolicyFrequencyRange> result;
++        for (const auto& policy : mPolicies) {
++            if (!policy.frequenciesKhz.empty()) {
++                const int64_t maximum = policy.frequenciesKhz.back();
++                result.emplace(policy.id,
++                               PolicyFrequencyRange{.minimumKhz = maximum, .maximumKhz = maximum});
++            }
++        }
++        return result;
++    }
++
++    bool empty() const { return mPolicies.empty(); }
++
++    std::vector<int32_t> policyIds() const {
++        std::vector<int32_t> result;
++        result.reserve(mPolicies.size());
++        for (const auto& policy : mPolicies) result.push_back(policy.id);
++        return result;
++    }
++
++    std::map<int32_t, int64_t> policyMaximumFrequenciesKhz() const {
++        std::map<int32_t, int64_t> result;
++        for (const auto& policy : mPolicies) {
++            if (!policy.frequenciesKhz.empty()) {
++                result.emplace(policy.id, policy.frequenciesKhz.back());
++            }
++        }
++        return result;
++    }
++
++    std::optional<int32_t> policyForCpu(int32_t cpu) const {
++        for (const auto& policy : mPolicies) {
++            if (std::find(policy.affectedCpus.begin(), policy.affectedCpus.end(), cpu) !=
++                policy.affectedCpus.end()) {
++                return policy.id;
++            }
++        }
++        return std::nullopt;
++    }
++
++    std::string policyState() const {
++        std::ostringstream state;
++        state << '{';
++        bool first = true;
++        for (const auto& policy : mPolicies) {
++            if (!first) state << ',';
++            first = false;
++            const int64_t current = readIntegerFile(policy.path + "/scaling_cur_freq").value_or(-1);
++            const int64_t minimum = readIntegerFile(policy.path + "/scaling_min_freq").value_or(-1);
++            const int64_t maximum = readIntegerFile(policy.path + "/scaling_max_freq").value_or(-1);
++            state << policy.id << ":" << current << '/' << minimum << '-' << maximum;
++        }
++        state << '}';
++        return state.str();
++    }
++
++  private:
++    void load() {
++        DIR* directory = opendir(std::string(kCpuFreqRoot).c_str());
++        if (directory == nullptr) {
++            ALOGW("CPU policy directory unavailable: %s", std::string(kCpuFreqRoot).c_str());
++            return;
++        }
++        while (const dirent* entry = readdir(directory)) {
++            const std::string name(entry->d_name);
++            if (!name.starts_with("policy")) continue;
++            const auto policyId = parseInteger<int32_t>(std::string_view(name).substr(6));
++            if (!policyId) continue;
++
++            CpuPolicy policy;
++            policy.id = *policyId;
++            policy.path = std::string(kCpuFreqRoot) + "/" + name;
++            if (const auto available = readFile(policy.path + "/scaling_available_frequencies")) {
++                policy.frequenciesKhz = parseFrequencyList(*available);
++            }
++            if (policy.frequenciesKhz.empty()) {
++                const auto minimum = readIntegerFile(policy.path + "/cpuinfo_min_freq");
++                const auto maximum = readIntegerFile(policy.path + "/cpuinfo_max_freq");
++                if (minimum && maximum && *minimum > 0 && *maximum >= *minimum) {
++                    policy.frequenciesKhz = {*minimum, *maximum};
++                }
++            }
++            if (const auto affected = readFile(policy.path + "/affected_cpus")) {
++                policy.affectedCpus = parseCpuList(*affected);
++            }
++            if (policy.affectedCpus.empty()) {
++                if (const auto related = readFile(policy.path + "/related_cpus")) {
++                    policy.affectedCpus = parseCpuList(*related);
++                }
++            }
++            if (!policy.frequenciesKhz.empty()) mPolicies.push_back(std::move(policy));
++        }
++        closedir(directory);
++        std::sort(mPolicies.begin(), mPolicies.end(),
++                  [](const CpuPolicy& left, const CpuPolicy& right) { return left.id < right.id; });
++        resetVirtualState();
++        std::ostringstream cpuMap;
++        cpuMap << '{';
++        for (size_t i = 0; i < mPolicies.size(); ++i) {
++            if (i != 0) cpuMap << ',';
++            cpuMap << mPolicies[i].id << ":";
++            if (mPolicies[i].affectedCpus.empty()) {
++                cpuMap << "unknown";
++                continue;
++            }
++            for (size_t j = 0; j < mPolicies[i].affectedCpus.size(); ++j) {
++                if (j != 0) cpuMap << '/';
++                cpuMap << mPolicies[i].affectedCpus[j];
++            }
++        }
++        cpuMap << '}';
++        ALOGI("loaded %zu CPU policies policyCpus=%s; frequency writes are disabled",
++              mPolicies.size(), cpuMap.str().c_str());
++    }
++
++    std::vector<CpuPolicy> mPolicies;
++    int64_t mVirtualFrequencyKhz = 0;
++};
++
++class QtiBackendClient {
++  public:
++    bool update(uint64_t generation,
++                const std::map<int32_t, PolicyFrequencyRange>& recommendations) {
++        if (recommendations.empty() || !ensureConnected()) return false;
++
++        std::vector<aidl::vendor::performance::fas::CpuPolicyVote> votes;
++        votes.reserve(std::min(recommendations.size(), kMaximumPolicyCount));
++        for (const auto& [policyId, range] : recommendations) {
++            if (votes.size() == kMaximumPolicyCount) break;
++            if (range.minimumKhz <= 0 || range.maximumKhz < range.minimumKhz ||
++                range.maximumKhz > std::numeric_limits<int32_t>::max()) {
++                continue;
++            }
++            votes.push_back({.policyId = policyId,
++                             .minimumKhz = static_cast<int32_t>(range.minimumKhz),
++                             .maximumKhz = static_cast<int32_t>(range.maximumKhz)});
++        }
++        if (votes.empty()) return false;
++
++        const uint64_t sequence = ++mSequence;
++        return updateCpuVotes(generation, sequence, votes, true);
++    }
++
++    void release(uint64_t generation) {
++        if (mBackend == nullptr) return;
++        const uint64_t sequence = ++mSequence;
++        const ndk::ScopedAStatus status = mBackend->releaseCpuVotes(generation, sequence);
++        if (!status.isOk()) {
++            logTransactionFailure("releaseCpuVotes", status);
++            mBackend.reset();
++        }
++    }
++
++  private:
++    static constexpr int32_t kVoteTtlMillis = 1500;
++    static constexpr size_t kMaximumPolicyCount = 8;
++
++    bool ensureConnected() {
++        if (mBackend != nullptr) return true;
++
++        using aidl::vendor::performance::fas::IFasBackend;
++        const std::string instance = std::string(IFasBackend::descriptor) + "/default";
++        ndk::SpAIBinder binder(AServiceManager_checkService(instance.c_str()));
++        if (binder.get() == nullptr) {
++            logConnectFailure("service unavailable");
++            return false;
++        }
++        mBackend = IFasBackend::fromBinder(binder);
++        if (mBackend == nullptr) {
++            logConnectFailure("invalid service binder");
++            return false;
++        }
++
++        mLastConnectErrorNs = 0;
++        ALOGI("connected to VINTF AIDL QTI vote backend; actual application state is reported by "
++              "fasqtid");
++        return true;
++    }
++
++    bool updateCpuVotes(uint64_t generation, uint64_t sequence,
++                        const std::vector<aidl::vendor::performance::fas::CpuPolicyVote>& votes,
++                        bool retry) {
++        const ndk::ScopedAStatus status =
++                mBackend->updateCpuVotes(generation, sequence, kVoteTtlMillis, votes);
++        if (status.isOk()) return true;
++
++        logTransactionFailure("updateCpuVotes", status);
++        mBackend.reset();
++        if (!retry || !ensureConnected()) return false;
++        return updateCpuVotes(generation, sequence, votes, false);
++    }
++
++    static void logTransactionFailure(const char* operation, const ndk::ScopedAStatus& status) {
++        const std::string description = status.getDescription();
++        ALOGW("QTI backend %s failed: %s", operation, description.c_str());
++    }
++
++    void logConnectFailure(const char* reason) {
++        const nsecs_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
++        if (mLastConnectErrorNs == 0 || nowNs - mLastConnectErrorNs >= seconds_to_nanoseconds(5)) {
++            ALOGW("QTI backend connection failed: %s", reason);
++            mLastConnectErrorNs = nowNs;
++        }
++    }
++
++    std::shared_ptr<aidl::vendor::performance::fas::IFasBackend> mBackend;
++    uint64_t mSequence = 0;
++    nsecs_t mLastConnectErrorNs = 0;
++};
++
++class Engine {
++  public:
++    Engine() {
++        ALOGI("threadPolicyDiagnostics=enabled intervalMs=%lld sampleIntervalMs=%lld "
++              "topThreadCount=%zu sampling=controller_util_windows "
++              "policyRuntime=last_cpu_max_freq_weighted_ticks_ewma_approx "
++              "selection=runtime_coverage coverage=%.2f ewmaNewWindowWeight=%.2f "
++              "enterWindows=%zu releaseWindows=%zu",
++              static_cast<long long>(kThreadDiagnosticInterval.count() * 1000),
++              static_cast<long long>(kThreadSampleInterval.count()), kTopThreadCount,
++              kFixedPolicyRuntimeCoverage, kPolicyRuntimeEwmaNewWindowWeight,
++              kPolicyEnterWindowCount, kPolicyReleaseWindowCount);
++    }
++
++    void setSession(Session session) {
++        std::scoped_lock lock(mMutex);
++        if (mSession.taskId >= 0) mQtiBackend.release(mSession.generation);
++        mSession = std::move(session);
++        mCadenceFrameTimes.clear();
++        mControlFrameTimes.clear();
++        mLastPresentTimeNs = 0;
++        mLastFrameCallbackNs = 0;
++        mAdditionalFrameTimeNs = 0;
++        mAlgorithmTargetFps.reset();
++        mPendingTargetFps.reset();
++        mPendingTargetSinceNs = 0;
++        mLastTargetSwitchNs = 0;
++        mLastTargetDiagnosticNs = 0;
++        mUpshiftProbe.reset();
++        resetHealthyRecoveryLocked(true);
++        mWorkingSinceNs = systemTime(SYSTEM_TIME_MONOTONIC);
++        mLastPolicyNs = 0;
++        mLastLogNs = 0;
++        mLastBackendNs = 0;
++        mLastBackendDelivery = false;
++        mTargetOffsetFps = 0.0;
++        mLastUsageAdjustmentNs = 0;
++        mRenderPid = -1;
++        mProcessMonitor.setPid(-1);
++        resetPolicySelectionLocked();
++        mCpuTopology.resetVirtualState();
++
++        const auto candidates = targetCandidatesLocked();
++        std::ostringstream values;
++        values << '[';
++        for (size_t i = 0; i < candidates.size(); ++i) {
++            if (i) values << ',';
++            values << candidates[i];
++        }
++        values << ']';
++        const double advertisedFps = mSession.displayRefreshMilliHz / 1000.0;
++        ALOGI("tracking package=%s uid=%d taskId=%d advertisedFps=%.2f gameModeOverride=%d "
++              "candidates=%s controlBackend=fasqtid",
++              mSession.packageName.c_str(), mSession.uid, mSession.taskId, advertisedFps,
++              mSession.fpsOverride, values.str().c_str());
++    }
++
++    void updateSessionParameters(int32_t displayRefreshMilliHz, int32_t fpsOverride) {
++        std::scoped_lock lock(mMutex);
++        if (mSession.displayRefreshMilliHz == displayRefreshMilliHz &&
++            mSession.fpsOverride == fpsOverride) {
++            return;
++        }
++        const int32_t oldRefresh = mSession.displayRefreshMilliHz;
++        mSession.displayRefreshMilliHz = displayRefreshMilliHz;
++        // The platform override remains telemetry; automatic cadence detection owns the target.
++        mSession.fpsOverride = fpsOverride;
++        const auto candidates = targetCandidatesLocked();
++        const auto eligible = [&candidates](int32_t fps) {
++            return std::find(candidates.begin(), candidates.end(), fps) != candidates.end();
++        };
++        const bool invalidTarget = mAlgorithmTargetFps && !eligible(*mAlgorithmTargetFps);
++        ALOGI("session parameters package=%s generation=%llu refreshMilliHz=%d->%d "
++              "gameModeOverride=%d targetAction=%s",
++              mSession.packageName.c_str(), static_cast<unsigned long long>(mSession.generation),
++              oldRefresh, displayRefreshMilliHz, fpsOverride,
++              invalidTarget ? "relearn" : "preserve");
++
++        if (invalidTarget) {
++            // A lower display limit invalidates the old target immediately. Do not keep voting
++            // for an unreachable FPS during cadence confirmation, or guess the new game cadence.
++            // This is a target reset, not a task/listener generation change.
++            mQtiBackend.release(mSession.generation);
++            mAlgorithmTargetFps.reset();
++            mPendingTargetFps.reset();
++            mPendingTargetSinceNs = 0;
++            mLastTargetSwitchNs = 0;
++            mLastTargetDiagnosticNs = 0;
++            mUpshiftProbe.reset();
++            resetHealthyRecoveryLocked(true);
++            mCadenceFrameTimes.clear();
++            mControlFrameTimes.clear();
++            mLastPresentTimeNs = 0;
++            mAdditionalFrameTimeNs = 0;
++            mWorkingSinceNs = systemTime(SYSTEM_TIME_MONOTONIC);
++            mLastBackendNs = 0;
++            mLastBackendDelivery = false;
++            mTargetOffsetFps = 0.0;
++            mLastUsageAdjustmentNs = 0;
++            mProcessMonitor.clearUtil();
++            mProcessMonitor.clearPolicySamples();
++            resetPolicySelectionLocked();
++            mCpuTopology.resetVirtualState();
++        } else {
++            // Preserve valid control/history/residency and the live backend's ceiling envelope.
++            // Only discard evidence for candidates that the new display mode no longer permits.
++            if (mPendingTargetFps && !eligible(*mPendingTargetFps)) {
++                mPendingTargetFps.reset();
++                mPendingTargetSinceNs = 0;
++            }
++            if (mUpshiftProbe.candidate() > 0 && !eligible(mUpshiftProbe.candidate())) {
++                mUpshiftProbe.resetEvidence();
++            }
++        }
++        trimFrameBuffersLocked();
++    }
++
++    void clearSession() {
++        std::scoped_lock lock(mMutex);
++        if (mSession.taskId >= 0) {
++            ALOGI("stopped tracking package=%s", mSession.packageName.c_str());
++            mQtiBackend.release(mSession.generation);
++        }
++        mSession = {};
++        mSession.taskId = -1;
++        mCadenceFrameTimes.clear();
++        mControlFrameTimes.clear();
++        mLastPresentTimeNs = 0;
++        mLastFrameCallbackNs = 0;
++        mAdditionalFrameTimeNs = 0;
++        mAlgorithmTargetFps.reset();
++        mPendingTargetFps.reset();
++        mPendingTargetSinceNs = 0;
++        mLastTargetSwitchNs = 0;
++        mLastTargetDiagnosticNs = 0;
++        mUpshiftProbe.reset();
++        resetHealthyRecoveryLocked(true);
++        mLastBackendNs = 0;
++        mLastBackendDelivery = false;
++        mProcessMonitor.setPid(-1);
++        resetPolicySelectionLocked();
++    }
++
++    void onFrameTimes(uint64_t generation, const std::vector<int64_t>& presentTimesNanos,
++                      int32_t ownerPid) {
++        std::scoped_lock lock(mMutex);
++        if (mSession.taskId < 0 || generation != mSession.generation) return;
++        const nsecs_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
++        mLastFrameCallbackNs = nowNs;
++
++        if (ownerPid > 0 && ownerPid != mRenderPid && pidBelongsToUid(ownerPid, mSession.uid)) {
++            mRenderPid = ownerPid;
++            mProcessMonitor.setPid(ownerPid);
++            resetPolicySelectionLocked();
++            ALOGI("render owner package=%s pid=%d uid=%d", mSession.packageName.c_str(), ownerPid,
++                  mSession.uid);
++        }
++
++        for (const int64_t presentTimeNs : presentTimesNanos) {
++            if (presentTimeNs <= mLastPresentTimeNs) continue;
++            if (mLastPresentTimeNs > 0) {
++                const int64_t frameTimeNs = presentTimeNs - mLastPresentTimeNs;
++                if (frameTimeNs > 0) {
++                    mCadenceFrameTimes.push_front(frameTimeNs);
++                    mControlFrameTimes.push_front(frameTimeNs);
++                }
++            }
++            mLastPresentTimeNs = presentTimeNs;
++        }
++        trimFrameBuffersLocked();
++        mAdditionalFrameTimeNs = 0;
++        evaluateLocked(nowNs, true);
++    }
++
++    void tick() {
++        std::scoped_lock lock(mMutex);
++        if (mSession.taskId < 0 || mLastFrameCallbackNs <= 0) return;
++        const nsecs_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
++        mAdditionalFrameTimeNs = std::max<int64_t>(
++                0, nowNs - mLastFrameCallbackNs -
++                           milliseconds_to_nanoseconds(kFrameCallbackGrace.count()));
++        evaluateLocked(nowNs, false);
++    }
++
++  private:
++    static std::string formatIntegerList(const std::vector<int32_t>& values, char delimiter) {
++        std::ostringstream result;
++        for (size_t i = 0; i < values.size(); ++i) {
++            if (i != 0) result << delimiter;
++            result << values[i];
++        }
++        return result.str();
++    }
++
++    static std::string formatCpuList(const std::optional<std::vector<int32_t>>& cpus) {
++        if (!cpus) return "unknown";
++        return formatIntegerList(*cpus, '/');
++    }
++
++    void resetPolicySelectionLocked() {
++        mFixedPolicyIds.clear();
++        mSmoothedPolicyRuntimeShares.clear();
++        mPolicyEnterWindows.clear();
++        mPolicyReleaseWindows.clear();
++        mPolicySelectionInitialized = false;
++        mPolicyRuntimeValid = false;
++        mLastPolicyRuntimeNs = 0;
++    }
++
++    PolicyRuntimeObservation updatePolicySelectionLocked(const ProcessDiagnosticSnapshot& snapshot,
++                                                         nsecs_t nowNs) {
++        PolicyRuntimeObservation observation;
++        const std::vector<int32_t> allPolicyIds = mCpuTopology.policyIds();
++        const std::map<int32_t, int64_t> policyMaximumFrequenciesKhz =
++                mCpuTopology.policyMaximumFrequenciesKhz();
++        observation.fixedPolicies = allPolicyIds;
++        uint64_t totalTicks = 0;
++        for (const auto& thread : snapshot.threads) {
++            for (const auto& [cpu, ticks] : thread.cpuTicks) {
++                if (ticks == 0) continue;
++                if (const auto policy = mCpuTopology.policyForCpu(cpu)) {
++                    observation.ticks[*policy] += ticks;
++                    totalTicks += ticks;
++                } else {
++                    observation.unknownTicks += ticks;
++                }
++            }
++        }
++
++        if (allPolicyIds.empty() || policyMaximumFrequenciesKhz.size() != allPolicyIds.size() ||
++            totalTicks == 0 || observation.unknownTicks > 0) {
++            resetPolicySelectionLocked();
++            return observation;
++        }
++
++        if (mLastPolicyRuntimeNs > 0 &&
++            nowNs - mLastPolicyRuntimeNs >=
++                    seconds_to_nanoseconds(kPolicyRuntimeStaleInterval.count())) {
++            resetPolicySelectionLocked();
++        }
++
++        long double weightedTotal = 0.0;
++        std::map<int32_t, long double> weightedRuntime;
++        for (const int32_t policy : allPolicyIds) {
++            const uint64_t ticks = observation.ticks[policy];
++            const int64_t maximumKhz = policyMaximumFrequenciesKhz.at(policy);
++            if (maximumKhz <= 0) {
++                resetPolicySelectionLocked();
++                return observation;
++            }
++            const long double weightedTicks = static_cast<long double>(ticks) * maximumKhz;
++            weightedRuntime.emplace(policy, weightedTicks);
++            weightedTotal += weightedTicks;
++        }
++        if (weightedTotal <= 0.0) {
++            resetPolicySelectionLocked();
++            return observation;
++        }
++
++        for (const int32_t policy : allPolicyIds) {
++            const double windowShare =
++                    static_cast<double>(weightedRuntime.at(policy) / weightedTotal);
++            if (mSmoothedPolicyRuntimeShares.empty()) {
++                observation.smoothedShares.emplace(policy, windowShare);
++                continue;
++            }
++            const double previousShare = mSmoothedPolicyRuntimeShares.contains(policy)
++                                                 ? mSmoothedPolicyRuntimeShares.at(policy)
++                                                 : 0.0;
++            observation.smoothedShares.emplace(
++                    policy, kPolicyRuntimeEwmaNewWindowWeight * windowShare +
++                                    (1.0 - kPolicyRuntimeEwmaNewWindowWeight) * previousShare);
++        }
++        mSmoothedPolicyRuntimeShares = observation.smoothedShares;
++
++        std::vector<std::pair<int32_t, double>> rankedPolicies(observation.smoothedShares.begin(),
++                                                               observation.smoothedShares.end());
++        std::sort(rankedPolicies.begin(), rankedPolicies.end(),
++                  [](const auto& left, const auto& right) {
++                      if (left.second != right.second) return left.second > right.second;
++                      return left.first > right.first;
++                  });
++        double coveredShare = 0.0;
++        for (const auto& [policy, share] : rankedPolicies) {
++            observation.candidatePolicies.push_back(policy);
++            coveredShare += share;
++            if (coveredShare >= kFixedPolicyRuntimeCoverage) break;
++        }
++        std::sort(observation.candidatePolicies.begin(), observation.candidatePolicies.end());
++        if (observation.candidatePolicies.empty()) {
++            mPolicyRuntimeValid = false;
++            return observation;
++        }
++
++        if (!mPolicySelectionInitialized) {
++            mFixedPolicyIds.insert(allPolicyIds.begin(), allPolicyIds.end());
++            mPolicySelectionInitialized = true;
++        }
++        for (const int32_t policy : allPolicyIds) {
++            const bool candidate = std::binary_search(observation.candidatePolicies.begin(),
++                                                      observation.candidatePolicies.end(), policy);
++            if (candidate) {
++                mPolicyReleaseWindows.erase(policy);
++                if (mFixedPolicyIds.contains(policy)) {
++                    mPolicyEnterWindows.erase(policy);
++                    continue;
++                }
++                size_t& enterWindows = mPolicyEnterWindows[policy];
++                enterWindows = std::min(enterWindows + 1, kPolicyEnterWindowCount);
++                if (enterWindows >= kPolicyEnterWindowCount) {
++                    mFixedPolicyIds.insert(policy);
++                    mPolicyEnterWindows.erase(policy);
++                }
++                continue;
++            }
++            mPolicyEnterWindows.erase(policy);
++            if (!mFixedPolicyIds.contains(policy)) continue;
++            size_t& releaseWindows = mPolicyReleaseWindows[policy];
++            releaseWindows = std::min(releaseWindows + 1, kPolicyReleaseWindowCount);
++            if (releaseWindows >= kPolicyReleaseWindowCount) {
++                mFixedPolicyIds.erase(policy);
++                mPolicyReleaseWindows.erase(policy);
++            }
++        }
++
++        observation.fixedPolicies.assign(mFixedPolicyIds.begin(), mFixedPolicyIds.end());
++        observation.valid = true;
++        mPolicyRuntimeValid = true;
++        mLastPolicyRuntimeNs = nowNs;
++        return observation;
++    }
++
++    std::optional<std::vector<int32_t>> fixedPoliciesLocked(nsecs_t nowNs,
++                                                            bool forceAllPolicies) const {
++        if (forceAllPolicies || !mPolicySelectionInitialized || !mPolicyRuntimeValid ||
++            nowNs - mLastPolicyRuntimeNs >=
++                    seconds_to_nanoseconds(kPolicyRuntimeStaleInterval.count())) {
++            return std::nullopt;
++        }
++        if (mFixedPolicyIds.empty()) return std::nullopt;
++        return std::vector<int32_t>(mFixedPolicyIds.begin(), mFixedPolicyIds.end());
++    }
++
++    void logThreadPolicyDiagnosticsLocked(const ProcessDiagnosticSnapshot& snapshot,
++                                          const PolicyRuntimeObservation& observation) const {
++        struct AffinityGroup {
++            size_t threadCount = 0;
++            double utilization = 0.0;
++        };
++        std::map<std::string, AffinityGroup> affinityGroups;
++        ALOGI("threadPolicySample package=%s ownerPid=%d windowMs=%lld threadCount=%zu",
++              mSession.packageName.c_str(), mRenderPid,
++              static_cast<long long>(snapshot.windowNs / 1000000), snapshot.threads.size());
++        for (const auto& thread : snapshot.threads) {
++            const std::string affinity = formatCpuList(thread.affinityCpus);
++            auto& group = affinityGroups[affinity];
++            ++group.threadCount;
++            group.utilization += thread.utilization;
++
++            std::map<int32_t, uint64_t> threadPolicyTicks;
++            uint64_t threadUnknownPolicyTicks = 0;
++            for (const auto& [cpu, ticks] : thread.cpuTicks) {
++                if (const auto policy = mCpuTopology.policyForCpu(cpu)) {
++                    threadPolicyTicks[*policy] += ticks;
++                } else {
++                    threadUnknownPolicyTicks += ticks;
++                }
++            }
++            const auto lastPolicy = mCpuTopology.policyForCpu(thread.lastCpu);
++            std::ostringstream lastCpu;
++            if (thread.lastCpu >= 0) {
++                lastCpu << thread.lastCpu;
++            } else {
++                lastCpu << "unknown";
++            }
++            std::ostringstream lastPolicyValue;
++            if (lastPolicy) {
++                lastPolicyValue << *lastPolicy;
++            } else {
++                lastPolicyValue << "unknown";
++            }
++            std::ostringstream policyTicks;
++            bool firstThreadPolicy = true;
++            for (const auto& [policy, ticks] : threadPolicyTicks) {
++                if (!firstThreadPolicy) policyTicks << '|';
++                firstThreadPolicy = false;
++                policyTicks << policy << ':' << ticks;
++            }
++            if (threadUnknownPolicyTicks > 0) {
++                if (!firstThreadPolicy) policyTicks << '|';
++                firstThreadPolicy = false;
++                policyTicks << "unknown:" << threadUnknownPolicyTicks;
++            }
++            if (firstThreadPolicy) policyTicks << "none";
++            ALOGI("threadPolicyThread package=%s tid=%d comm=%s util=%.3f affinity=%s "
++                  "lastCpu=%s lastPolicy=%s policyTicks=%s samples=%zu",
++                  mSession.packageName.c_str(), thread.tid, thread.comm.c_str(), thread.utilization,
++                  affinity.c_str(), lastCpu.str().c_str(), lastPolicyValue.str().c_str(),
++                  policyTicks.str().c_str(), thread.sampleCount);
++        }
++        for (const auto& [affinity, group] : affinityGroups) {
++            ALOGI("threadPolicyAffinity package=%s affinity=%s threads=%zu util=%.3f",
++                  mSession.packageName.c_str(), affinity.c_str(), group.threadCount,
++                  group.utilization);
++        }
++
++        std::ostringstream runtime;
++        runtime << '{';
++        bool first = true;
++        for (const auto& [policy, ticks] : observation.ticks) {
++            if (!first) runtime << ',';
++            first = false;
++            runtime << policy << ':' << ticks;
++        }
++        if (observation.unknownTicks > 0) {
++            if (!first) runtime << ',';
++            runtime << "unknown:" << observation.unknownTicks;
++        }
++        runtime << '}';
++        std::ostringstream smoothedShares;
++        smoothedShares << '{' << std::fixed << std::setprecision(3);
++        first = true;
++        for (const auto& [policy, share] : observation.smoothedShares) {
++            if (!first) smoothedShares << ',';
++            first = false;
++            smoothedShares << policy << ':' << share;
++        }
++        smoothedShares << '}';
++        ALOGI("threadPolicySummary package=%s policyRuntimeTicksApprox=%s "
++              "policyRuntimeShareEwma=%s candidateFixedPolicies=[%s] fixedPolicies=[%s] "
++              "selector=%s",
++              mSession.packageName.c_str(), runtime.str().c_str(), smoothedShares.str().c_str(),
++              formatIntegerList(observation.candidatePolicies, ',').c_str(),
++              formatIntegerList(observation.fixedPolicies, ',').c_str(),
++              observation.valid ? "smoothed_runtime_coverage" : "fallback_all");
++    }
++
++    static bool pidBelongsToUid(int32_t pid, int32_t uid) {
++        const auto status = readFile("/proc/" + std::to_string(pid) + "/status");
++        if (!status) return false;
++        std::istringstream lines(*status);
++        std::string line;
++        while (std::getline(lines, line)) {
++            if (!line.starts_with("Uid:")) continue;
++            std::istringstream values(line.substr(4));
++            int32_t realUid = -1;
++            values >> realUid;
++            return realUid == uid;
++        }
++        return false;
++    }
++
++    std::vector<int32_t> targetCandidatesLocked() const {
++        // Game Mode's FPS override is telemetry for now. A future FAS UI may explicitly replace
++        // automatic cadence detection, but the platform override must not lock one package-wide
++        // target across scenes.
++        std::vector<int32_t> result;
++        for (const int32_t candidate : {30, 60, 120}) {
++            if (candidate * 1000 <= mSession.displayRefreshMilliHz + 500) {
++                result.push_back(candidate);
++            }
++        }
++        return result;
++    }
++
++    double currentFpsLocked(size_t maximumSamples = 0) const {
++        const size_t count = maximumSamples == 0
++                                     ? mControlFrameTimes.size()
++                                     : std::min(maximumSamples, mControlFrameTimes.size());
++        if (count == 0) return 0.0;
++        long double totalNs = mAdditionalFrameTimeNs;
++        size_t taken = 0;
++        for (const int64_t frameTimeNs : mControlFrameTimes) {
++            if (taken++ >= count) break;
++            totalNs += frameTimeNs;
++        }
++        if (totalNs <= 0) return 0.0;
++        return static_cast<double>(count * seconds_to_nanoseconds(1) / totalNs);
++    }
++
++    double recentFpsLocked() const {
++        const int64_t windowNs = seconds_to_nanoseconds(kJankWindow.count());
++        if (mAdditionalFrameTimeNs >= windowNs) return 0.0;
++
++        long double totalNs = mAdditionalFrameTimeNs;
++        size_t count = 0;
++        for (const int64_t frameTimeNs : mControlFrameTimes) {
++            if (frameTimeNs <= 0) continue;
++            totalNs += frameTimeNs;
++            ++count;
++            if (totalNs >= windowNs) break;
++        }
++        if (count == 0 || totalNs <= 0) return 0.0;
++        return static_cast<double>(count * seconds_to_nanoseconds(1) / totalNs);
++    }
++
++    bool targetSwitchCooldownActiveLocked(nsecs_t nowNs) const {
++        return mLastTargetSwitchNs > 0 &&
++               nowNs - mLastTargetSwitchNs < seconds_to_nanoseconds(kTargetSwitchCooldown.count());
++    }
++
++    bool shouldProtectUpshiftLocked(nsecs_t nowNs, double fpsRecent) const {
++        if (!mAlgorithmTargetFps || !targetSwitchCooldownActiveLocked(nowNs)) return false;
++        for (const int32_t candidate : targetCandidatesLocked()) {
++            if (candidate <= *mAlgorithmTargetFps) continue;
++            const double threshold = (*mAlgorithmTargetFps + candidate) / 2.0;
++            return fpsRecent > threshold;
++        }
++        return false;
++    }
++
++    std::optional<int32_t> nextTargetCandidateLocked() const {
++        if (!mAlgorithmTargetFps) return std::nullopt;
++        for (const int32_t candidate : targetCandidatesLocked()) {
++            if (candidate > *mAlgorithmTargetFps) return candidate;
++        }
++        return std::nullopt;
++    }
++
++    void resetHealthyRecoveryLocked(bool resetCooldown = false) {
++        mHealthyRecoverySinceNs = 0;
++        mLastHealthyRecoveryStepNs = 0;
++        if (resetCooldown) mHealthyRecoveryCooldownUntilNs = 0;
++    }
++
++    std::optional<CadenceObservation> observeCadenceLocked() const {
++        const auto candidates = targetCandidatesLocked();
++        if (candidates.empty()) return std::nullopt;
++
++        const int64_t subwindowNs = milliseconds_to_nanoseconds(kCadenceSubwindow.count());
++        std::array<double, kCadenceWindowCount> windowFps{};
++        int64_t elapsedNs = 0;
++        size_t frames = 0;
++        size_t completedWindows = 0;
++        for (const int64_t frameTimeNs : mCadenceFrameTimes) {
++            if (frameTimeNs <= 0) continue;
++            elapsedNs += frameTimeNs;
++            ++frames;
++            if (elapsedNs < subwindowNs) continue;
++
++            windowFps[completedWindows++] =
++                    static_cast<double>(frames) * seconds_to_nanoseconds(1) / elapsedNs;
++            elapsedNs = 0;
++            frames = 0;
++            if (completedWindows == kCadenceWindowCount) break;
++        }
++        if (completedWindows != kCadenceWindowCount) return std::nullopt;
++
++        auto sortedWindowFps = windowFps;
++        std::sort(sortedWindowFps.begin(), sortedWindowFps.end());
++        const double measuredFps = (sortedWindowFps[1] + sortedWindowFps[2]) / 2.0;
++
++        int32_t bestCandidate = 0;
++        size_t bestStableWindows = 0;
++        for (const int32_t candidate : candidates) {
++            const double tolerance = std::max(2.0, candidate * kCadenceFpsToleranceRatio);
++            size_t stableWindows = 0;
++            for (const double window : windowFps) {
++                if (std::abs(window - candidate) <= tolerance) ++stableWindows;
++            }
++            if (stableWindows > bestStableWindows ||
++                (stableWindows == bestStableWindows && bestCandidate > 0 &&
++                 std::abs(measuredFps - candidate) < std::abs(measuredFps - bestCandidate))) {
++                bestCandidate = candidate;
++                bestStableWindows = stableWindows;
++            }
++        }
++        if (bestStableWindows < kRequiredStableWindows) return std::nullopt;
++
++        return CadenceObservation{bestCandidate, measuredFps, bestStableWindows};
++    }
++
++    void trimFrameBuffersLocked() {
++        const auto candidates = targetCandidatesLocked();
++        const int32_t maximumCandidate = candidates.empty() ? 120 : candidates.back();
++        const size_t cadenceLimit = static_cast<size_t>(maximumCandidate) * 5;
++        while (mCadenceFrameTimes.size() > cadenceLimit) mCadenceFrameTimes.pop_back();
++
++        const int32_t controlTarget = mAlgorithmTargetFps.value_or(maximumCandidate);
++        const size_t controlLimit = static_cast<size_t>(controlTarget) * 5;
++        while (mControlFrameTimes.size() > controlLimit) mControlFrameTimes.pop_back();
++    }
++
++    void commitTargetLocked(nsecs_t nowNs, const CadenceObservation& observation,
++                            const char* source) {
++        const int32_t oldTarget = mAlgorithmTargetFps.value_or(0);
++        const bool isUpshift = oldTarget > 0 && observation.candidateFps > oldTarget;
++        const double advertisedFps = mSession.displayRefreshMilliHz / 1000.0;
++        ALOGI("target package=%s advertisedFps=%.2f algorithmFps=%d previousFps=%d "
++              "observedFps=%.2f stableWindows=%zu/%zu source=%s",
++              mSession.packageName.c_str(), advertisedFps, observation.candidateFps, oldTarget,
++              observation.measuredFps, observation.stableWindows, kCadenceWindowCount, source);
++        mAlgorithmTargetFps = observation.candidateFps;
++        mPendingTargetFps.reset();
++        mPendingTargetSinceNs = 0;
++        mLastTargetSwitchNs = nowNs;
++        mUpshiftProbe.reset();
++        resetHealthyRecoveryLocked(true);
++        mQtiBackend.release(mSession.generation);
++        mLastBackendNs = 0;
++        mLastBackendDelivery = false;
++        if (isUpshift) {
++            // The higher target was proven while the existing target's vote was binding. Keep
++            // those recent frame samples and restart from maximum virtual frequencies so the old
++            // low-frequency state cannot immediately suppress the newly selected cadence.
++            mCpuTopology.resetVirtualState();
++            trimFrameBuffersLocked();
++            mWorkingSinceNs = nowNs - seconds_to_nanoseconds(kStartDelay.count());
++        } else {
++            // Initial selection and downshifts start with samples from their new target only.
++            mControlFrameTimes.clear();
++            mAdditionalFrameTimeNs = 0;
++            mWorkingSinceNs = nowNs;
++        }
++        mTargetOffsetFps = 0.0;
++        mLastUsageAdjustmentNs = 0;
++        mProcessMonitor.clearUtil();
++        mProcessMonitor.clearPolicySamples();
++        resetPolicySelectionLocked();
++    }
++
++    void updateTargetLocked(nsecs_t nowNs) {
++        const auto observation = observeCadenceLocked();
++        if (!observation) {
++            if (mPendingTargetFps &&
++                nowNs - mLastTargetDiagnosticNs >=
++                        seconds_to_nanoseconds(kTargetDiagnosticInterval.count())) {
++                ALOGI("target candidate reset package=%s candidateFps=%d reason=unstable_windows",
++                      mSession.packageName.c_str(), *mPendingTargetFps);
++                mLastTargetDiagnosticNs = nowNs;
++            }
++            mPendingTargetFps.reset();
++            mPendingTargetSinceNs = 0;
++            return;
++        }
++        if (mAlgorithmTargetFps && observation->candidateFps == *mAlgorithmTargetFps) {
++            mPendingTargetFps.reset();
++            mPendingTargetSinceNs = 0;
++            return;
++        }
++
++        if (targetSwitchCooldownActiveLocked(nowNs)) {
++            mPendingTargetFps.reset();
++            mPendingTargetSinceNs = 0;
++            return;
++        }
++
++        if (mPendingTargetFps != observation->candidateFps) {
++            mPendingTargetFps = observation->candidateFps;
++            mPendingTargetSinceNs = nowNs;
++            if (nowNs - mLastTargetDiagnosticNs >=
++                seconds_to_nanoseconds(kTargetDiagnosticInterval.count())) {
++                ALOGI("target candidate package=%s candidateFps=%d observedFps=%.2f "
++                      "stableWindows=%zu/%zu",
++                      mSession.packageName.c_str(), observation->candidateFps,
++                      observation->measuredFps, observation->stableWindows, kCadenceWindowCount);
++                mLastTargetDiagnosticNs = nowNs;
++            }
++            return;
++        }
++
++        const bool isUpshift =
++                mAlgorithmTargetFps && observation->candidateFps > *mAlgorithmTargetFps;
++        const nsecs_t confirmationNs = seconds_to_nanoseconds(
++                (isUpshift ? kUpshiftConfirmation : kDownshiftConfirmation).count());
++        if (nowNs - mPendingTargetSinceNs < confirmationNs) return;
++
++        const int32_t oldTarget = mAlgorithmTargetFps.value_or(0);
++        const char* source = oldTarget == 0 ? "auto_stable_initial"
++                             : isUpshift    ? "auto_stable_upshift"
++                                            : "auto_stable_downshift";
++        if (isUpshift && mUpshiftProbe.active()) {
++            ALOGI("target probe package=%s state=success candidateFps=%d observedFps=%.2f "
++                  "evidence=stable_cadence",
++                  mSession.packageName.c_str(), observation->candidateFps,
++                  observation->measuredFps);
++        }
++        commitTargetLocked(nowNs, *observation, source);
++    }
++
++    UpshiftProbe::Decision updateUpshiftProbeLocked(nsecs_t nowNs, double fpsRecent) {
++        const auto decision = mUpshiftProbe.update(
++                nowNs, mAlgorithmTargetFps.value_or(0), nextTargetCandidateLocked(), fpsRecent);
++        if (decision.event == UpshiftProbe::Event::ConfirmedActive ||
++            decision.event == UpshiftProbe::Event::ConfirmedPassive) {
++            const bool active = decision.event == UpshiftProbe::Event::ConfirmedActive;
++            ALOGI("target probe package=%s state=success fromFps=%d candidateFps=%d "
++                  "observedFps=%.2f evidence=midpoint_sustained mode=%s",
++                  mSession.packageName.c_str(), *mAlgorithmTargetFps, decision.candidateFps,
++                  fpsRecent, active ? "active" : "passive");
++            const CadenceObservation observation{decision.candidateFps, fpsRecent, 0};
++            commitTargetLocked(nowNs, observation,
++                               active ? "auto_probe_upshift" : "auto_observed_upshift");
++        } else if (decision.event == UpshiftProbe::Event::TimedOut) {
++            ALOGI("target probe package=%s state=timeout fromFps=%d candidateFps=%d "
++                  "observedFps=%.2f retryCooldownMs=%lld",
++                  mSession.packageName.c_str(), *mAlgorithmTargetFps, decision.candidateFps,
++                  fpsRecent, static_cast<long long>(UpshiftProbe::kRetryCooldownNs / 1000000));
++            mLastBackendDelivery = false;
++        } else if (decision.event == UpshiftProbe::Event::Started) {
++            ALOGI("target probe package=%s state=start fromFps=%d candidateFps=%d observedFps=%.2f "
++                  "durationMs=%lld",
++                  mSession.packageName.c_str(), *mAlgorithmTargetFps, decision.candidateFps,
++                  fpsRecent, static_cast<long long>(UpshiftProbe::kDurationNs / 1000000));
++        }
++        return decision;
++    }
++
++    void adjustTargetForUsageLocked(nsecs_t nowNs) {
++        if (nowNs - mLastUsageAdjustmentNs < seconds_to_nanoseconds(1)) return;
++        mLastUsageAdjustmentNs = nowNs;
++        const double util = mProcessMonitor.utilMax().value_or(0.0);
++        if (util <= 0.1) {
++            mTargetOffsetFps = 0.0;
++        } else if (util <= 0.55) {
++            mTargetOffsetFps -= 0.1;
++        } else if (util >= kHighUtilizationForRecoveryHold) {
++            mTargetOffsetFps += 0.1;
++        }
++        mTargetOffsetFps = std::clamp(mTargetOffsetFps, -3.0, 0.0);
++    }
++
++    void evaluateLocked(nsecs_t nowNs, bool hasNewFrames) {
++        // Target detection is driven only by newly reported frames. Keep it outside the policy
++        // throttle so the 100 ms timer cannot starve cadence confirmation by updating
++        // mLastPolicyNs immediately before a frame callback arrives.
++        if (hasNewFrames) updateTargetLocked(nowNs);
++
++        if (nowNs - mLastPolicyNs < milliseconds_to_nanoseconds(kPolicyInterval.count())) return;
++        mLastPolicyNs = nowNs;
++        if (!mAlgorithmTargetFps || mControlFrameTimes.size() < kMinimumFrameSamples ||
++            nowNs - mWorkingSinceNs < seconds_to_nanoseconds(kStartDelay.count())) {
++            return;
++        }
++
++        const double fpsLong = currentFpsLocked();
++        // The five-second average is useful as telemetry, but it keeps a brief transition in the
++        // jank state until that sample ages out. Use a time-bounded recent average for policy so a
++        // real slowdown is still observed without extending it across the full control history.
++        const double fpsRecent = recentFpsLocked();
++        const auto probeDecision = updateUpshiftProbeLocked(nowNs, fpsRecent);
++        const bool upshiftProbe = probeDecision.forceMaximum;
++        const bool upshiftProbeArmed = mUpshiftProbe.armed();
++        const bool upshiftConfirmation = mUpshiftProbe.confirming();
++        const bool janked = fpsRecent < *mAlgorithmTargetFps - 2.0;
++        // fas-rs adjusts the target from the previous utilization sample, then refreshes the
++        // utilization state while computing the next virtual frequency recommendation.
++        adjustTargetForUsageLocked(nowNs);
++        if (janked) {
++            mProcessMonitor.clearUtil();
++            resetPolicySelectionLocked();
++        } else {
++            mProcessMonitor.update(nowNs);
++        }
++        if (const auto diagnostics = mProcessMonitor.takeDiagnosticSnapshot()) {
++            const auto observation = updatePolicySelectionLocked(*diagnostics, nowNs);
++            logThreadPolicyDiagnosticsLocked(*diagnostics, observation);
++        }
++        const std::optional<double> sampledUtil = mProcessMonitor.utilMax();
++        const bool highUtilization = sampledUtil && *sampledUtil >= kHighUtilizationForRecoveryHold;
++
++        const double marginFps = *mAlgorithmTargetFps / 60.0 * kBalanceMarginFps;
++        const double adjustedTarget =
++                std::max(0.0, *mAlgorithmTargetFps + mTargetOffsetFps - marginFps);
++        const int64_t lastFrameNs = mControlFrameTimes.empty() ? 0 : mControlFrameTimes.front();
++        const int64_t effectiveLastFrameNs = std::max(lastFrameNs, mAdditionalFrameTimeNs);
++        const long double normalizedFrameNs = effectiveLastFrameNs * adjustedTarget;
++        const int64_t rawControlKhz = static_cast<int64_t>(
++                (normalizedFrameNs - seconds_to_nanoseconds(1)) * kControllerKp);
++        const bool upshiftProtection =
++                upshiftProbe || upshiftProbeArmed || upshiftConfirmation ||
++                shouldProtectUpshiftLocked(nowNs, fpsRecent);
++        int64_t controlKhz = rawControlKhz;
++        const char* controlMode = "proportional";
++        if (controlKhz > kMaximumControlIncreaseKhz) {
++            controlKhz = kMaximumControlIncreaseKhz;
++            controlMode = "rise_limited";
++        }
++        if (janked) {
++            resetHealthyRecoveryLocked();
++            mHealthyRecoveryCooldownUntilNs =
++                    nowNs + seconds_to_nanoseconds(kHealthyRecoveryCooldown.count());
++            if (controlKhz < 0) {
++                controlKhz = 0;
++                controlMode = "jank_hold";
++            }
++        } else if (upshiftProtection) {
++            resetHealthyRecoveryLocked();
++            if (controlKhz < 0) {
++                controlKhz = 0;
++                controlMode = "upshift_hold";
++            }
++        } else if (highUtilization) {
++            // The recent cadence is healthy, but the busiest render thread has no useful CPU
++            // headroom. Preserve the current vote instead of drifting below its equilibrium, while
++            // still allowing a positive controller response to a real load increase.
++            resetHealthyRecoveryLocked();
++            if (controlKhz < 0) {
++                controlKhz = 0;
++                controlMode = "utilization_hold";
++            }
++        } else if (sampledUtil && *sampledUtil > kMinimumUtilizationForRecovery) {
++            const double recoveryFpsFloor = *mAlgorithmTargetFps - kHealthyRecoveryFpsMargin;
++            if (fpsRecent < recoveryFpsFloor) {
++                // Do not wait for the broader jank threshold before protecting a cadence that has
++                // started to regress after a recovery step. Positive control remains available to
++                // restore the cadence; only a contradictory negative response is suppressed.
++                resetHealthyRecoveryLocked();
++                mHealthyRecoveryCooldownUntilNs =
++                        nowNs + seconds_to_nanoseconds(kHealthyRecoveryCooldown.count());
++                if (controlKhz < 0) {
++                    controlKhz = 0;
++                    controlMode = "recovery_fps_hold";
++                }
++            } else if (nowNs < mHealthyRecoveryCooldownUntilNs) {
++                controlKhz = 0;
++                controlMode = "recovery_cooldown";
++            } else {
++                // A healthy aggregate cadence is more reliable than an isolated last-frame error.
++                // Keep recovery state across either sign of raw control so quantized 30 FPS frame
++                // intervals cannot repeatedly undo the guarded down-frequency search.
++                if (mHealthyRecoverySinceNs == 0) mHealthyRecoverySinceNs = nowNs;
++                const bool confirmed = nowNs - mHealthyRecoverySinceNs >=
++                                       seconds_to_nanoseconds(kHealthyRecoveryConfirmation.count());
++                const bool stepDue =
++                        mLastHealthyRecoveryStepNs == 0 ||
++                        nowNs - mLastHealthyRecoveryStepNs >=
++                                seconds_to_nanoseconds(kHealthyRecoveryStepInterval.count());
++                if (confirmed && stepDue) {
++                    controlKhz = -kHealthyRecoveryStepKhz;
++                    controlMode = "recovery_step";
++                    mLastHealthyRecoveryStepNs = nowNs;
++                } else {
++                    controlKhz = 0;
++                    controlMode = confirmed ? "recovery_settle" : "recovery_stabilizing";
++                }
++            }
++        } else {
++            resetHealthyRecoveryLocked();
++        }
++        if (upshiftProbe) controlMode = "upshift_probe_max";
++        const auto fixedPolicyIds = fixedPoliciesLocked(nowNs, janked || upshiftProtection);
++        const auto recommendations = upshiftProbe
++                                             ? mCpuTopology.maximumRecommendations()
++                                             : mCpuTopology.recommend(controlKhz, fixedPolicyIds);
++
++        submitBackendVoteIfDue(nowNs, milliseconds_to_nanoseconds(kBackendInterval.count()),
++                               probeDecision.refreshVote, mSession.generation, recommendations,
++                               mQtiBackend, mLastBackendNs, mLastBackendDelivery);
++
++        if (nowNs - mLastLogNs < milliseconds_to_nanoseconds(kLogInterval.count())) return;
++        mLastLogNs = nowNs;
++        std::ostringstream frequencies;
++        std::ostringstream votes;
++        frequencies << '{';
++        votes << '{';
++        bool first = true;
++        for (const auto& [policy, range] : recommendations) {
++            if (!first) {
++                frequencies << ',';
++                votes << ',';
++            }
++            first = false;
++            frequencies << policy << ':' << range.maximumKhz;
++            votes << policy << ':' << range.minimumKhz << '-' << range.maximumKhz;
++        }
++        frequencies << '}';
++        votes << '}';
++        std::ostringstream fixedPolicyList;
++        fixedPolicyList << '[';
++        if (fixedPolicyIds) {
++            fixedPolicyList << formatIntegerList(*fixedPolicyIds, ',');
++        } else {
++            fixedPolicyList << "all";
++        }
++        fixedPolicyList << ']';
++        const std::string policyState = mCpuTopology.policyState();
++        ALOGI("recommend package=%s taskId=%d ownerPid=%d fpsActual=%.2f fpsRecent=%.2f "
++              "fpsTargetAlgorithm=%d controlKhzRaw=%" PRId64 " controlKhz=%" PRId64
++              " controlMode=%s upshiftProtection=%s upshiftProbeArmed=%s upshiftProbe=%s "
++              "upshiftConfirmation=%s "
++              "janked=%s utilMax=%.3f "
++              "fixedPolicies=%s cpuPolicyFreqsKhz=%s cpuPolicyVotesKhz=%s "
++              "effectivePolicyKhz=cur/min-max:%s "
++              "backend=fasqtid backendDelivered=%s "
++              "appliedByFasd=false virtualState=true frequencyControls=external",
++              mSession.packageName.c_str(), mSession.taskId, mRenderPid, fpsLong, fpsRecent,
++              *mAlgorithmTargetFps, rawControlKhz, controlKhz, controlMode,
++              upshiftProtection ? "true" : "false", upshiftProbeArmed ? "true" : "false",
++              upshiftProbe ? "true" : "false", upshiftConfirmation ? "true" : "false",
++              janked ? "true" : "false", sampledUtil.value_or(0.0),
++              fixedPolicyList.str().c_str(), frequencies.str().c_str(), votes.str().c_str(),
++              policyState.c_str(), mLastBackendDelivery ? "true" : "false");
++    }
++
++    std::mutex mMutex;
++    Session mSession;
++    std::deque<int64_t> mCadenceFrameTimes;
++    std::deque<int64_t> mControlFrameTimes;
++    int64_t mLastPresentTimeNs = 0;
++    nsecs_t mLastFrameCallbackNs = 0;
++    int64_t mAdditionalFrameTimeNs = 0;
++    std::optional<int32_t> mAlgorithmTargetFps;
++    std::optional<int32_t> mPendingTargetFps;
++    nsecs_t mPendingTargetSinceNs = 0;
++    nsecs_t mLastTargetSwitchNs = 0;
++    nsecs_t mLastTargetDiagnosticNs = 0;
++    UpshiftProbe mUpshiftProbe;
++    nsecs_t mHealthyRecoverySinceNs = 0;
++    nsecs_t mLastHealthyRecoveryStepNs = 0;
++    nsecs_t mHealthyRecoveryCooldownUntilNs = 0;
++    nsecs_t mWorkingSinceNs = 0;
++    nsecs_t mLastPolicyNs = 0;
++    nsecs_t mLastLogNs = 0;
++    nsecs_t mLastBackendNs = 0;
++    bool mLastBackendDelivery = false;
++    double mTargetOffsetFps = 0.0;
++    nsecs_t mLastUsageAdjustmentNs = 0;
++    int32_t mRenderPid = -1;
++    std::set<int32_t> mFixedPolicyIds;
++    std::map<int32_t, double> mSmoothedPolicyRuntimeShares;
++    std::map<int32_t, size_t> mPolicyEnterWindows;
++    std::map<int32_t, size_t> mPolicyReleaseWindows;
++    bool mPolicySelectionInitialized = false;
++    bool mPolicyRuntimeValid = false;
++    nsecs_t mLastPolicyRuntimeNs = 0;
++    ProcessMonitor mProcessMonitor;
++    CpuTopology mCpuTopology;
++    QtiBackendClient mQtiBackend;
++};
++
++class FrameListener : public gui::BnFpsListener {
++  public:
++    FrameListener(Engine& engine, uint64_t generation) : mEngine(engine), mGeneration(generation) {}
++
++    binder::Status onFpsReported(float) override { return binder::Status::ok(); }
++
++    binder::Status onFrameTimesReported(const std::vector<int64_t>& presentTimesNanos,
++                                        int32_t ownerPid) override {
++        mEngine.onFrameTimes(mGeneration, presentTimesNanos, ownerPid);
++        return binder::Status::ok();
++    }
++
++  private:
++    Engine& mEngine;
++    const uint64_t mGeneration;
++};
++
++class SessionManager {
++  public:
++    explicit SessionManager(Engine& engine) : mEngine(engine) {}
++
++    void track(Session session) {
++        if (mCurrentSession && mCurrentSession->taskId == session.taskId &&
++            mCurrentSession->uid == session.uid &&
++            mCurrentSession->packageName == session.packageName) {
++            mEngine.updateSessionParameters(session.displayRefreshMilliHz, session.fpsOverride);
++            mCurrentSession->displayRefreshMilliHz = session.displayRefreshMilliHz;
++            mCurrentSession->fpsOverride = session.fpsOverride;
++            return;
++        }
++        stopListener();
++        session.generation = ++mGeneration;
++        mEngine.setSession(session);
++        mListener = sp<FrameListener>::make(mEngine, session.generation);
++        const status_t status = SurfaceComposerClient::addFpsListener(session.taskId, mListener);
++        if (status != OK) {
++            ALOGE("failed to register frame listener for taskId=%d: %d", session.taskId, status);
++            mListener.clear();
++            mEngine.clearSession();
++            mCurrentSession.reset();
++            return;
++        }
++        mCurrentSession = std::move(session);
++    }
++
++    void stop() {
++        stopListener();
++        ++mGeneration;
++        mEngine.clearSession();
++        mCurrentSession.reset();
++    }
++
++  private:
++    void stopListener() {
++        if (mListener != nullptr) {
++            const status_t status = SurfaceComposerClient::removeFpsListener(mListener);
++            if (status != OK) ALOGW("failed to unregister frame listener: %d", status);
++            mListener.clear();
++        }
++    }
++
++    Engine& mEngine;
++    uint64_t mGeneration = 0;
++    sp<FrameListener> mListener;
++    std::optional<Session> mCurrentSession;
++};
++
++std::optional<Session> parseTrackCommand(std::string_view command) {
++    while (!command.empty() && (command.back() == '\n' || command.back() == '\0')) {
++        command.remove_suffix(1);
++    }
++    const auto fields = split(command, '\t');
++    if (fields.size() != 6 || fields[0] != "TRACK") return std::nullopt;
++    const auto taskId = parseInteger<int32_t>(fields[1]);
++    const auto uid = parseInteger<int32_t>(fields[2]);
++    const auto refresh = parseInteger<int32_t>(fields[3]);
++    const auto overrideFps = parseInteger<int32_t>(fields[4]);
++    if (!taskId || !uid || !refresh || !overrideFps || *taskId < 0 || *uid < 0 || *refresh <= 0 ||
++        fields[5].empty()) {
++        return std::nullopt;
++    }
++    return Session{.taskId = *taskId,
++                   .uid = *uid,
++                   .displayRefreshMilliHz = *refresh,
++                   .fpsOverride = *overrideFps,
++                   .packageName = std::string(fields[5])};
++}
++
++int runSocketServer(SessionManager& sessions) {
++    const int serverFd = android_get_control_socket("fasd");
++    if (serverFd < 0) {
++        ALOGE("missing init control socket: %s", strerror(errno));
++        return 1;
++    }
++    if (listen(serverFd, 4) != 0) {
++        ALOGE("listen failed: %s", strerror(errno));
++        return 1;
++    }
++
++    ALOGI("ready; frequency application is delegated to the external QTI backend");
++    for (;;) {
++        const int clientFd = accept4(serverFd, nullptr, nullptr, SOCK_CLOEXEC);
++        if (clientFd < 0) {
++            if (errno == EINTR) continue;
++            ALOGE("accept failed: %s", strerror(errno));
++            return 1;
++        }
++        char buffer[1024];
++        const ssize_t size = TEMP_FAILURE_RETRY(recv(clientFd, buffer, sizeof(buffer), 0));
++        close(clientFd);
++        if (size <= 0) continue;
++        const std::string_view command(buffer, static_cast<size_t>(size));
++        if (command.starts_with("STOP")) {
++            sessions.stop();
++        } else if (const auto session = parseTrackCommand(command)) {
++            sessions.track(*session);
++        } else {
++            ALOGW("ignored malformed control message");
++        }
++    }
++}
++
++}  // namespace
++}  // namespace android::fas
++
++int main() {
++    android::ProcessState::self()->startThreadPool();
++    android::fas::Engine engine;
++    android::fas::SessionManager sessions(engine);
++    std::thread timer([&engine] {
++        for (;;) {
++            std::this_thread::sleep_for(std::chrono::milliseconds(100));
++            engine.tick();
++        }
++    });
++    timer.detach();
++    return android::fas::runSocketServer(sessions);
++}
+diff --git a/fasd/fasd.rc b/fasd/fasd.rc
+new file mode 100644
+index 0000000..1623c88
+--- /dev/null
++++ b/fasd/fasd.rc
+@@ -0,0 +1,5 @@
++service fasd /system/bin/fasd
++    class core
++    user system
++    group system graphics readproc
++    socket fasd seqpacket 0660 system system
+-- 
+2.43.0
+

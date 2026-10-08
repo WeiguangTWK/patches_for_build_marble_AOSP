@@ -1,0 +1,109 @@
+From 50d7f1c931052adf085136dbcebd0613e4226d50 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:50:16 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add SELinux infra for FAS backend
+
+Change-Id: I80d5bf38858f3ff5c9132f577a8d23fe2f12a64a
+---
+ contexts/file_contexts_test_data |  2 ++
+ private/fasd.te                  | 21 +++++++++++++++++++++
+ private/file.te                  |  1 +
+ private/file_contexts            |  2 ++
+ private/system_server.te         |  1 +
+ 5 files changed, 27 insertions(+)
+ create mode 100644 private/fasd.te
+
+diff --git a/contexts/file_contexts_test_data b/contexts/file_contexts_test_data
+index f2e971d..80637f9 100644
+--- a/contexts/file_contexts_test_data
++++ b/contexts/file_contexts_test_data
+@@ -193,6 +193,7 @@
+ /dev/socket/aconfigd_system                                       aconfigd_socket
+ /dev/socket/dnsproxyd                                             dnsproxyd_socket
+ /dev/socket/dumpstate                                             dumpstate_socket
++/dev/socket/fasd                                                  fasd_socket
+ /dev/socket/fwmarkd                                               fwmarkd_socket
+ /dev/socket/lmkd                                                  lmkd_socket
+ /dev/socket/logd                                                  logd_socket
+@@ -317,6 +318,7 @@
+ /system/bin/boringssl_self_test32                                 boringssl_self_test_exec
+ /system/bin/boringssl_self_test64                                 boringssl_self_test_exec
+ /system/bin/boringssl_self_test31                                 system_file
++/system/bin/fasd                                                  fasd_exec
+ /system/bin/prng_seeder                                           prng_seeder_exec
+ /system/bin/charger                                               charger_exec
+ /system/bin/e2fsdroid                                             e2fs_exec
+diff --git a/private/fasd.te b/private/fasd.te
+new file mode 100644
+index 0000000..f11c47e
+--- /dev/null
++++ b/private/fasd.te
+@@ -0,0 +1,21 @@
++# Standalone GPL frame-aware recommendation daemon. It observes SurfaceFlinger frame timing and
++# process CPU usage, then sends recommendations to a separately licensed power backend.
++type fasd, domain, coredomain;
++type fasd_exec, system_file_type, exec_type, file_type;
++typeattribute fasd mlstrustedsubject;
++
++init_daemon_domain(fasd)
++binder_use(fasd)
++binder_call(fasd, surfaceflinger)
++binder_call(surfaceflinger, fasd)
++hal_client_domain(fasd, hal_power)
++
++allow fasd surfaceflinger_service:service_manager find;
++allow fasd fasd_socket:sock_file write;
++
++# Read CPU topology/frequency data and the selected render process' thread accounting.
++allow fasd sysfs_devices_system_cpu:dir r_dir_perms;
++allow fasd sysfs_devices_system_cpu:file r_file_perms;
++allow fasd appdomain:dir r_dir_perms;
++allow fasd appdomain:file r_file_perms;
++allow fasd appdomain:process getsched;
+diff --git a/private/file.te b/private/file.te
+index 6da616a..2954aac 100644
+--- a/private/file.te
++++ b/private/file.te
+@@ -166,6 +166,7 @@ type compos_key_helper_exec, exec_type, file_type, system_file_type;
+ # write permission on this to connect, and needs to be mlstrustedobject
+ # in to satisfy MLS constraints for trusted domains.
+ type prng_seeder_socket, file_type, coredomain_socket, mlstrustedobject;
++type fasd_socket, file_type, coredomain_socket;
+ 
+ # /proc/device-tree/avf and /sys/firmware/devicetree/base/avf
+ type sysfs_dt_avf, fs_type, sysfs_type;
+diff --git a/private/file_contexts b/private/file_contexts
+index a82ea18..7454df3 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -161,6 +161,7 @@
+ /dev/socket/dumpstate	u:object_r:dumpstate_socket:s0
+ /dev/socket/fwmarkd	u:object_r:fwmarkd_socket:s0
+ /dev/socket/lmkd        u:object_r:lmkd_socket:s0
++/dev/socket/fasd        u:object_r:fasd_socket:s0
+ /dev/socket/logd	u:object_r:logd_socket:s0
+ /dev/socket/logdr	u:object_r:logdr_socket:s0
+ /dev/socket/logdw	u:object_r:logdw_socket:s0
+@@ -400,6 +401,7 @@
+ /system/bin/statsd               u:object_r:statsd_exec:s0
+ /system/bin/bpfloader            u:object_r:bpfloader_platform_exec:s0
+ /system/bin/watchdogd            u:object_r:watchdogd_exec:s0
++/system/bin/fasd                 u:object_r:fasd_exec:s0
+ /system/bin/aconfigd-system      u:object_r:aconfigd_exec:s0
+ /system/bin/apexd                u:object_r:apexd_exec:s0
+ /system/bin/gsid                 u:object_r:gsid_exec:s0
+diff --git a/private/system_server.te b/private/system_server.te
+index 229fdc7..f14d772 100644
+--- a/private/system_server.te
++++ b/private/system_server.te
+@@ -274,6 +274,7 @@ allow system_server self:tun_socket create_socket_perms_no_ioctl;
+ 
+ # Talk to init and various daemons via sockets.
+ unix_socket_connect(system_server, lmkd, lmkd)
++unix_socket_connect(system_server, fasd, fasd)
+ unix_socket_connect(system_server, zygote, zygote)
+ unix_socket_connect(system_server, zygote_next, zygote_next)
+ unix_socket_connect(system_server, uncrypt, uncrypt)
+-- 
+2.43.0
+

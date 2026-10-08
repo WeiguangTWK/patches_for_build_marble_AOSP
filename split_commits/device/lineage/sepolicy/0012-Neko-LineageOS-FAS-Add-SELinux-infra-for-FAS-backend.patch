@@ -1,0 +1,24 @@
+From 1f08fb4bb9a0a7613b80fc056afc3973790be81f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:01:48 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add SELinux infra for FAS backend
+
+Change-Id: If3a6004b7775d0738af4ca49cc1e10ec8df89229
+---
+ common/dynamic/service_contexts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/common/dynamic/service_contexts b/common/dynamic/service_contexts
+index 8e4ee9b..06a6b5e 100644
+--- a/common/dynamic/service_contexts
++++ b/common/dynamic/service_contexts
+@@ -1,5 +1,6 @@
+ vendor.system.health.IChargingControl/default                  u:object_r:hal_lineage_health_service:s0
+ vendor.system.health.IFastCharge/default                       u:object_r:hal_lineage_health_service:s0
++vendor.performance.fas.IFasBackend/default                     u:object_r:hal_power_service:s0
+ vendor.lineage.livedisplay.IAdaptiveBacklight/default          u:object_r:hal_lineage_livedisplay_service:s0
+ vendor.lineage.livedisplay.IAntiFlicker/default                u:object_r:hal_lineage_livedisplay_service:s0
+ vendor.lineage.livedisplay.IAutoContrast/default               u:object_r:hal_lineage_livedisplay_service:s0
+-- 
+2.43.0
+
