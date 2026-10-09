@@ -1,0 +1,468 @@
+From b27bf2c690861e33f2820e8a467caff43a540d8e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 15:43:25 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Introduce UI per-app/global settings
+
+Change-Id: I0f188b62fc16ac805995bb6c9ae34d278b6b0cbb
+---
+ Android.bp                                    |   1 +
+ AndroidManifest.xml                           |  15 ++
+ res/layout/fas_mode_widget.xml                |   8 +
+ res/values-zh-rCN/strings.xml                 |  13 ++
+ res/values-zh-rTW/strings.xml                 |  13 ++
+ res/values/strings.xml                        |  13 ++
+ res/xml/fas_settings.xml                      |   9 +
+ res/xml/parts_catalog.xml                     |   5 +
+ .../lineageos/lineageparts/BootReceiver.java  |   8 +
+ .../lineageparts/fas/FasAppPreference.java    |  58 ++++++
+ .../lineageparts/fas/FasSettings.java         | 193 ++++++++++++++++++
+ 11 files changed, 336 insertions(+)
+ create mode 100644 res/layout/fas_mode_widget.xml
+ create mode 100644 res/xml/fas_settings.xml
+ create mode 100644 src/org/lineageos/lineageparts/fas/FasAppPreference.java
+ create mode 100644 src/org/lineageos/lineageparts/fas/FasSettings.java
+
+diff --git a/Android.bp b/Android.bp
+index e3014e8..9bf16df 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -33,6 +33,7 @@ android_app {
+         "jsr305",
+         "org.lineageos.platform.internal",
+         "SettingsLibPreference",
++        "SettingsLibSearchWidget",
+         "SystemUISharedLib",
+         "LineagePreferenceLib",
+     ],
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index daa68bb..8ad4c7b 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -168,6 +168,21 @@
+         </activity-alias>
+ 
+ 
++        <activity-alias android:name=".fas.FasSettings"
++            android:exported="true" android:enabled="false"
++            android:permission="android.permission.WRITE_SECURE_SETTINGS"
++            android:label="@string/fas_title" android:targetActivity="PartsActivity">
++            <intent-filter>
++                <action android:name="com.android.settings.action.IA_SETTINGS" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++            <meta-data android:name="com.android.settings.category"
++                android:value="com.android.settings.category.ia.system" />
++            <meta-data android:name="com.android.settings.icon" android:resource="@drawable/ic_add_24dp" />
++            <meta-data android:name="com.android.settings.order" android:value="-254" />
++            <meta-data android:name="com.android.settings.summary" android:resource="@string/fas_description" />
++        </activity-alias>
++
+         <!-- TEE soft debug settings (System category) -->
+         <activity-alias
+             android:name=".teedebug.TeeSoftDebugSettings"
+diff --git a/res/layout/fas_mode_widget.xml b/res/layout/fas_mode_widget.xml
+new file mode 100644
+index 0000000..1fe3837
+--- /dev/null
++++ b/res/layout/fas_mode_widget.xml
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<TextView xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/fas_mode" android:layout_width="wrap_content"
++    android:layout_height="wrap_content" android:minHeight="48dp"
++    android:gravity="center" android:paddingStart="12dp" android:paddingEnd="12dp"
++    android:textAppearance="?android:attr/textAppearanceListItemSecondary"
++    android:importantForAccessibility="no" />
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index f290fad..53f31c8 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -561,4 +561,17 @@
+     <plurals name="tee_soft_debug_enabled_with_apps">
+         <item quantity="other">已为 %d 个应用启用</item>
+     </plurals>
++    <string name="fas_title">FAS</string>
++    <string name="fas_enabled">启用 FAS</string>
++    <string name="fas_description">按频率需求调整CPU性能</string>
++    <string name="fas_apps">应用</string>
++    <string name="fas_search">搜索应用</string>
++    <string name="fas_app_mode_accessibility">%1$s，%2$s</string>
++    <string name="fas_auto">自动</string>
++    <string name="fas_on">启用</string>
++    <string name="fas_off">关闭</string>
++    <string name="fas_120">120 FPS</string>
++    <string name="fas_60">60 FPS</string>
++    <string name="fas_30">30 FPS</string>
++    <string name="fas_save_failed">FAS 配置不可用或保存失败</string>
+ </resources>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index 6220206..e239bad 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -548,4 +548,17 @@
+     <plurals name="tee_soft_debug_enabled_with_apps">
+         <item quantity="other">已為 %d 個應用程式啟用</item>
+     </plurals>
++    <string name="fas_title">FAS</string>
++    <string name="fas_enabled">啟用 FAS</string>
++    <string name="fas_description">依頻率需求調整CPU效能</string>
++    <string name="fas_apps">應用程式</string>
++    <string name="fas_search">搜尋應用程式</string>
++    <string name="fas_app_mode_accessibility">%1$s，%2$s</string>
++    <string name="fas_auto">自動</string>
++    <string name="fas_on">啟用</string>
++    <string name="fas_off">關閉</string>
++    <string name="fas_120">120 FPS</string>
++    <string name="fas_60">60 FPS</string>
++    <string name="fas_30">30 FPS</string>
++    <string name="fas_save_failed">FAS 設定無法使用或儲存失敗</string>
+ </resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index cf67699..a1e1ab5 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -765,4 +765,17 @@
+         <item quantity="one">Enabled for %d app</item>
+         <item quantity="other">Enabled for %d apps</item>
+     </plurals>
++    <string name="fas_title">FAS</string>
++    <string name="fas_enabled">Enable FAS</string>
++    <string name="fas_description">Adjust CPU performance to frequency demand</string>
++    <string name="fas_apps">Applications</string>
++    <string name="fas_search">Search applications</string>
++    <string name="fas_app_mode_accessibility">%1$s, %2$s</string>
++    <string name="fas_auto">Automatic</string>
++    <string name="fas_on">Enabled</string>
++    <string name="fas_off">Disabled</string>
++    <string name="fas_120">120 FPS</string>
++    <string name="fas_60">60 FPS</string>
++    <string name="fas_30">30 FPS</string>
++    <string name="fas_save_failed">FAS configuration unavailable or could not be saved</string>
+ </resources>
+diff --git a/res/xml/fas_settings.xml b/res/xml/fas_settings.xml
+new file mode 100644
+index 0000000..ce4f2ac
+--- /dev/null
++++ b/res/xml/fas_settings.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    android:key="fas" android:title="@string/fas_title">
++    <androidx.preference.SwitchPreferenceCompat
++        android:key="fas_enabled" android:title="@string/fas_enabled"
++        android:summary="@string/fas_description" android:persistent="false" />
++    <PreferenceCategory android:key="fas_apps" android:title="@string/fas_apps" />
++</PreferenceScreen>
+diff --git a/res/xml/parts_catalog.xml b/res/xml/parts_catalog.xml
+index ef1a159..0d42ab5 100644
+--- a/res/xml/parts_catalog.xml
++++ b/res/xml/parts_catalog.xml
+@@ -33,6 +33,11 @@
+           android:fragment="org.lineageos.lineageparts.input.ButtonSettings"
+           lineage:xmlRes="@xml/button_settings" />
+ 
++    <part android:key="fas" android:title="@string/fas_title"
++          android:summary="@string/fas_description"
++          android:fragment="org.lineageos.lineageparts.fas.FasSettings"
++          lineage:xmlRes="@xml/fas_settings" />
++
+     <part android:key="tee_soft_debug"
+           android:title="@string/tee_soft_debug_title"
+           android:summary="@string/tee_soft_debug_summary"
+diff --git a/src/org/lineageos/lineageparts/BootReceiver.java b/src/org/lineageos/lineageparts/BootReceiver.java
+index e46fcdf..0089f02 100644
+--- a/src/org/lineageos/lineageparts/BootReceiver.java
++++ b/src/org/lineageos/lineageparts/BootReceiver.java
+@@ -7,9 +7,11 @@
+ package org.lineageos.lineageparts;
+ 
+ import android.content.BroadcastReceiver;
++import android.content.ComponentName;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.SharedPreferences;
++import android.content.pm.PackageManager;
+ import android.os.UserManager;
+ import android.util.Log;
+ 
+@@ -27,6 +29,12 @@ public class BootReceiver extends BroadcastReceiver {
+ 
+     @Override
+     public void onReceive(Context ctx, Intent intent) {
++        ctx.getPackageManager().setComponentEnabledSetting(
++                new ComponentName(ctx, "org.lineageos.lineageparts.fas.FasSettings"),
++                ctx.getResources().getBoolean(com.android.internal.R.bool.config_enableFas)
++                        ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
++                        : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
++                PackageManager.DONT_KILL_APP);
+         // Extract the contributors database
+         ContributorsCloudFragment.extractContributorsCloudDatabase(ctx);
+ 
+diff --git a/src/org/lineageos/lineageparts/fas/FasAppPreference.java b/src/org/lineageos/lineageparts/fas/FasAppPreference.java
+new file mode 100644
+index 0000000..e4d0f7c
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/fas/FasAppPreference.java
+@@ -0,0 +1,58 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.lineageparts.fas;
++
++import android.content.Context;
++import android.app.fas.FasManager;
++import android.view.View;
++import android.widget.PopupMenu;
++import android.widget.TextView;
++import androidx.preference.Preference;
++import androidx.preference.PreferenceViewHolder;
++import org.lineageos.lineageparts.R;
++import java.util.function.IntConsumer;
++
++/** A single app row; persistence belongs to the caller, not the preference. */
++final class FasAppPreference extends Preference {
++    private static final int[] MODES = {FasManager.MODE_AUTO, FasManager.MODE_ENABLED,
++            120, 60, 30, FasManager.MODE_DISABLED};
++    private static final int[] LABELS = {R.string.fas_auto, R.string.fas_on,
++            R.string.fas_120, R.string.fas_60, R.string.fas_30, R.string.fas_off};
++    private final IntConsumer mOnSelected;
++    private int mMode;
++    private View mAnchor;
++
++    FasAppPreference(Context context, int mode, IntConsumer onSelected) {
++        super(context);
++        mMode = mode;
++        mOnSelected = onSelected;
++        setPersistent(false);
++        setWidgetLayoutResource(R.layout.fas_mode_widget);
++        setOnPreferenceClickListener(pref -> {
++            if (mAnchor == null) return false;
++            PopupMenu popup = new PopupMenu(getContext(), mAnchor);
++            for (int i = 0; i < MODES.length; i++) {
++                popup.getMenu().add(1, i + 1, i, LABELS[i]).setChecked(MODES[i] == mMode);
++            }
++            popup.getMenu().setGroupCheckable(1, true, true);
++            popup.setOnMenuItemClickListener(item -> {
++                mOnSelected.accept(MODES[item.getItemId() - 1]);
++                return true;
++            });
++            popup.show();
++            return true;
++        });
++    }
++
++    void setMode(int mode) { mMode = mode; notifyChanged(); }
++
++    @Override public void onBindViewHolder(PreferenceViewHolder holder) {
++        super.onBindViewHolder(holder);
++        mAnchor = holder.findViewById(R.id.fas_mode);
++        int label = LABELS[0];
++        for (int i = 0; i < MODES.length; i++) if (MODES[i] == mMode) label = LABELS[i];
++        String value = getContext().getString(label);
++        ((TextView) mAnchor).setText(value);
++        holder.itemView.setContentDescription(getContext().getString(
++                R.string.fas_app_mode_accessibility, getTitle(), value));
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/fas/FasSettings.java b/src/org/lineageos/lineageparts/fas/FasSettings.java
+new file mode 100644
+index 0000000..3ccc1e1
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/fas/FasSettings.java
+@@ -0,0 +1,193 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.lineageparts.fas;
++
++import android.app.fas.FasManager;
++import android.content.Context;
++import android.content.pm.ApplicationInfo;
++import android.content.pm.PackageManager;
++import android.graphics.drawable.Drawable;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.UserHandle;
++import android.view.Menu;
++import android.view.MenuInflater;
++import android.widget.SearchView;
++import android.widget.Toast;
++import androidx.preference.PreferenceCategory;
++import androidx.preference.SwitchPreferenceCompat;
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++import java.text.Collator;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++
++public final class FasSettings extends SettingsPreferenceFragment {
++    private final FasManager mManager = new FasManager();
++    private final ExecutorService mWorker = Executors.newSingleThreadExecutor();
++    private final Handler mMain = new Handler(Looper.getMainLooper());
++    private final List<App> mApps = new ArrayList<>();
++    private Bundle mModes = new Bundle();
++    private SwitchPreferenceCompat mEnabled;
++    private PreferenceCategory mAppList;
++    private String mQuery = "";
++    private int mLoadVersion;
++    private boolean mLocated;
++
++    private static final class App {
++        final ApplicationInfo info;
++        final String label;
++        final Drawable icon;
++        App(ApplicationInfo info, PackageManager pm) {
++            this.info = info;
++            label = info.loadLabel(pm).toString();
++            icon = info.loadIcon(pm);
++        }
++    }
++
++    @Override public void onCreate(Bundle state) {
++        super.onCreate(state);
++        addPreferencesFromResource(R.xml.fas_settings);
++        setHasOptionsMenu(true);
++        mEnabled = findPreference("fas_enabled");
++        mAppList = findPreference("fas_apps");
++        mAppList.setOrderingAsAdded(true);
++        mEnabled.setEnabled(false);
++        mEnabled.setOnPreferenceChangeListener((pref, value) -> {
++            mEnabled.setEnabled(false);
++            mWorker.execute(() -> {
++                boolean saved;
++                try { saved = mManager.setEnabled((Boolean) value); }
++                catch (Exception e) { saved = false; }
++                final boolean success = saved;
++                mMain.post(() -> {
++                    if (!isAdded() || getView() == null) return;
++                    mEnabled.setEnabled(true);
++                    if (success) mEnabled.setChecked((Boolean) value); else showFailure();
++                });
++            });
++            return false;
++        });
++    }
++
++    @Override public void onResume() {
++        super.onResume();
++        final int version = ++mLoadVersion;
++        final Context context = requireContext().getApplicationContext();
++        final int user = UserHandle.myUserId();
++        mWorker.execute(() -> {
++            try {
++                Bundle config = mManager.getConfiguration(user);
++                PackageManager pm = context.getPackageManager();
++                List<App> apps = new ArrayList<>();
++                for (ApplicationInfo info : pm.getInstalledApplications(0)) apps.add(new App(info, pm));
++                mMain.post(() -> {
++                    if (!isAdded() || getView() == null || version != mLoadVersion) return;
++                    mApps.clear();
++                    mApps.addAll(apps);
++                    mModes = config.getBundle(FasManager.KEY_MODES);
++                    if (mModes == null) mModes = new Bundle();
++                    mEnabled.setChecked(config.getBoolean(FasManager.KEY_ENABLED));
++                    mEnabled.setEnabled(true);
++                    render();
++                });
++            } catch (Exception e) {
++                mMain.post(() -> {
++                    if (!isAdded() || getView() == null || version != mLoadVersion) return;
++                    mEnabled.setEnabled(false);
++                    mAppList.removeAll();
++                    showFailure();
++                });
++            }
++        });
++    }
++
++    @Override public void onPause() { ++mLoadVersion; super.onPause(); }
++    @Override public void onDestroy() { mWorker.shutdown(); super.onDestroy(); }
++
++    private boolean priority(App app) {
++        return app.info.category == ApplicationInfo.CATEGORY_GAME
++                || mModes.getInt(app.info.packageName, FasManager.MODE_AUTO) != FasManager.MODE_AUTO;
++    }
++
++    private void render() {
++        Collator collator = Collator.getInstance();
++        mApps.sort((a, b) -> {
++            int group = Boolean.compare(priority(b), priority(a));
++            if (group != 0) return group;
++            int label = collator.compare(a.label, b.label);
++            return label != 0 ? label : a.info.packageName.compareTo(b.info.packageName);
++        });
++        mAppList.removeAll();
++        String query = mQuery.toLowerCase(Locale.ROOT);
++        for (App app : mApps) {
++            String pkg = app.info.packageName;
++            if (!app.label.toLowerCase(Locale.ROOT).contains(query)
++                    && !pkg.toLowerCase(Locale.ROOT).contains(query)) continue;
++            FasAppPreference row = new FasAppPreference(requireContext(),
++                    mModes.getInt(pkg, FasManager.MODE_AUTO), mode -> saveMode(pkg, mode));
++            row.setKey(pkg);
++            row.setTitle(app.label);
++            row.setSummary(pkg);
++            row.setIcon(app.icon);
++            mAppList.addPreference(row);
++        }
++        Bundle args = getArguments();
++        String target = args == null ? null : args.getString("package");
++        if (!mLocated && target != null && findPreference(target) != null) {
++            mLocated = true;
++            scrollToPreference(target);
++            highlightPreferenceIfNeeded();
++        }
++    }
++
++    private void saveMode(String pkg, int mode) {
++        FasAppPreference row = findPreference(pkg);
++        if (row == null) return;
++        row.setEnabled(false);
++        final int user = UserHandle.myUserId();
++        mWorker.execute(() -> {
++            boolean saved;
++            try { saved = mManager.setAppMode(pkg, user, mode); }
++            catch (Exception e) { saved = false; }
++            final boolean success = saved;
++            mMain.post(() -> {
++                if (!isAdded() || getView() == null) return;
++                if (success) mModes.putInt(pkg, mode); else showFailure();
++                FasAppPreference current = findPreference(pkg);
++                if (current != null) {
++                    current.setEnabled(true);
++                    if (success) current.setMode(mode);
++                }
++                // Do not sort here: changing the mode must not move the row under the user.
++            });
++        });
++    }
++
++    private void showFailure() {
++        Toast.makeText(requireContext(), R.string.fas_save_failed, Toast.LENGTH_LONG).show();
++    }
++
++    @Override public void onCreateOptionsMenu(Menu menu, MenuInflater inflater) {
++        super.onCreateOptionsMenu(menu, inflater);
++        SearchView search = new SearchView(requireContext());
++        search.setQueryHint(getString(R.string.fas_search));
++        search.setOnQueryTextListener(new SearchView.OnQueryTextListener() {
++            @Override public boolean onQueryTextSubmit(String query) { return true; }
++            @Override public boolean onQueryTextChange(String query) {
++                mQuery = query;
++                render();
++                return true;
++            }
++        });
++        menu.add(R.string.fas_search)
++                .setIcon(com.android.settingslib.search.widget.R.drawable.ic_search_24dp)
++                .setContentDescription(getString(R.string.fas_search))
++                .setActionView(search)
++                .setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS
++                        | android.view.MenuItem.SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW);
++    }
++}
+-- 
+2.43.0
+

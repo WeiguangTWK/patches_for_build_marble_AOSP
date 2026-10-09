@@ -1,0 +1,116 @@
+From d7c3b74d0ddff14c625b764791d355bb675d777e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 17:18:17 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Pass package PID candidates to fasd
+
+Include foreground package PIDs in TRACK commands, filtered by UID
+and package membership. Exclude system_server from owner candidates.
+
+Report FPS observation state from the registered callback identity
+instead of game classification, and remove useless dry-run log prefix.
+
+Change-Id: I15bc3b737e68ecf54dea1780d5920fb4ea07faa4
+---
+ .../android/server/fas/FasManagerService.java | 27 ++++++++++++-------
+ 1 file changed, 18 insertions(+), 9 deletions(-)
+
+diff --git a/services/core/java/com/android/server/fas/FasManagerService.java b/services/core/java/com/android/server/fas/FasManagerService.java
+index 637d3d4ef..7b078e668 100644
+--- a/services/core/java/com/android/server/fas/FasManagerService.java
++++ b/services/core/java/com/android/server/fas/FasManagerService.java
+@@ -50,6 +50,7 @@ import android.os.Process;
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
+ import android.os.UserHandle;
++import android.text.TextUtils;
+ import android.util.Slog;
+ import android.view.Display;
+ import android.view.WindowManager;
+@@ -391,7 +392,7 @@ public final class FasManagerService extends SystemService {
+             : GameData.unsupported(getDisplayRefreshRate(task.displayId));
+ 
+     syncTaskFpsCallback(enabled, task.taskId, packageName, uid);
+-    syncFasd(enabled, task.taskId, packageName, uid, gameData, mode > 1 ? mode : 0);
++    syncFasd(enabled, task.taskId, packageName, uid, gameData, mode > 1 ? mode : 0, pids);
+ 
+     logSnapshot(
+         "state="
+@@ -431,7 +432,10 @@ public final class FasManagerService extends SystemService {
+             + " displayRefreshRate="
+             + formatFps(gameData.displayRefreshRate)
+             + " fpsActual="
+-            + (isGame ? "reported_async_by_surfaceflinger" : "not_tracked"));
++            + (mTaskFpsCallback != null && mFpsTaskId == task.taskId
++                && mTaskFpsCallback.mUid == uid
++                && packageName.equals(mTaskFpsCallback.mPackageName)
++                ? "reported_async_by_surfaceflinger" : "not_tracked"));
+   }
+ 
+   private List<RunningTaskInfo> getFocusedTasks() {
+@@ -476,7 +480,8 @@ public final class FasManagerService extends SystemService {
+ 
+     final List<Integer> pids = new ArrayList<>();
+     for (RunningAppProcessInfo process : processes) {
+-      if (process.uid == uid && containsPackage(process.pkgList, packageName)) {
++      if (process.pid > 0 && process.pid != Process.myPid()
++          && process.uid == uid && containsPackage(process.pkgList, packageName)) {
+         pids.add(process.pid);
+       }
+     }
+@@ -536,11 +541,12 @@ public final class FasManagerService extends SystemService {
+     mObservedUid = Process.INVALID_UID;
+     mObservedPackage = null;
+     syncTaskFpsCallback(false, INVALID_TASK_ID, null, Process.INVALID_UID);
+-    syncFasd(false, INVALID_TASK_ID, null, Process.INVALID_UID, null, 0);
++    syncFasd(false, INVALID_TASK_ID, null, Process.INVALID_UID, null, 0, Collections.emptyList());
+   }
+ 
+   private void syncFasd(
+-      boolean tracked, int taskId, String packageName, int uid, GameData gameData, int fixedTargetFps) {
++      boolean tracked, int taskId, String packageName, int uid, GameData gameData,
++      int fixedTargetFps, List<Integer> pids) {
+     final String session =
+         tracked && gameData != null
+             ? "TRACK\t"
+@@ -555,6 +561,8 @@ public final class FasManagerService extends SystemService {
+                 + fixedTargetFps
+                 + "\t"
+                 + packageName
++                + "\t"
++                + (pids.isEmpty() ? "-" : TextUtils.join(",", pids))
+             : "STOP";
+     if (session.equals(mLastFasdSession)) {
+       return;
+@@ -585,8 +593,9 @@ public final class FasManagerService extends SystemService {
+     }
+   }
+ 
+-  private void syncTaskFpsCallback(boolean isGame, int taskId, String packageName, int uid) {
+-    if (isGame && taskId == mFpsTaskId && mTaskFpsCallback != null) {
++  private void syncTaskFpsCallback(boolean tracked, int taskId, String packageName, int uid) {
++    if (tracked && taskId == mFpsTaskId && mTaskFpsCallback != null
++        && mTaskFpsCallback.mUid == uid && packageName.equals(mTaskFpsCallback.mPackageName)) {
+       return;
+     }
+ 
+@@ -601,7 +610,7 @@ public final class FasManagerService extends SystemService {
+       }
+     }
+ 
+-    if (!isGame || mWindowManager == null) {
++    if (!tracked || mWindowManager == null) {
+       return;
+     }
+ 
+@@ -662,7 +671,7 @@ public final class FasManagerService extends SystemService {
+   private void logSnapshot(String snapshot) {
+     if (!snapshot.equals(mLastSnapshot)) {
+       mLastSnapshot = snapshot;
+-      Slog.i(TAG, "dry-run " + snapshot);
++      Slog.i(TAG, "session " + snapshot);
+     }
+   }
+ 
+-- 
+2.43.0
+

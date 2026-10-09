@@ -1,0 +1,229 @@
+From b0afd51cb2fec9687e09389d1bfc7f27de692f7a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 15:55:32 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Let fasd respect config of user
+
+Change-Id: Ia7726c865010c122ce4464cab6ee752b65d0783e
+---
+ fasd/FasTarget.h           | 24 +++++++++++++++++
+ fasd/UpshiftProbe_test.cpp | 26 ++++++++++++++++++
+ fasd/fasd.cpp              | 54 ++++++++++++++++++++++++++++----------
+ 3 files changed, 90 insertions(+), 14 deletions(-)
+ create mode 100644 fasd/FasTarget.h
+
+diff --git a/fasd/FasTarget.h b/fasd/FasTarget.h
+new file mode 100644
+index 0000000..6936f0d
+--- /dev/null
++++ b/fasd/FasTarget.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-3.0-only */
++#pragma once
++
++#include <array>
++#include <cstdint>
++
++namespace android::fas {
++inline constexpr std::array<int32_t, 3> kTargetCandidates = {30, 60, 120};
++
++inline constexpr bool validFixedTarget(int32_t fps) {
++    return fps == 0 || fps == 30 || fps == 60 || fps == 120;
++}
++
++// Zero means there is no supported target at the current display refresh rate.
++inline constexpr int32_t effectiveFixedTarget(int32_t requested, int32_t refreshMilliHz) {
++    if (!validFixedTarget(requested) || requested == 0) return 0;
++    int32_t result = 0;
++    for (int32_t fps : kTargetCandidates) {
++        if (fps <= requested && static_cast<int64_t>(fps) * 1000 <=
++                                       static_cast<int64_t>(refreshMilliHz) + 500) result = fps;
++    }
++    return result;
++}
++}  // namespace android::fas
+diff --git a/fasd/UpshiftProbe_test.cpp b/fasd/UpshiftProbe_test.cpp
+index 18d3788..968be92 100644
+--- a/fasd/UpshiftProbe_test.cpp
++++ b/fasd/UpshiftProbe_test.cpp
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include "UpshiftProbe.h"
++#include "FasTarget.h"
+ 
+ #include <gtest/gtest.h>
+ 
+@@ -11,6 +12,31 @@ namespace android::fas {
+ namespace {
+ 
+ using Event = UpshiftProbe::Event;
++
++TEST(FasTargetTest, AutomaticAndInvalidValuesDoNotProduceFixedTargets) {
++    EXPECT_EQ(effectiveFixedTarget(0, 120000), 0);
++    EXPECT_EQ(effectiveFixedTarget(90, 120000), 0);
++    EXPECT_EQ(effectiveFixedTarget(-1, 120000), 0);
++}
++
++TEST(FasTargetTest, FixedTargetsDoNotFollowHigherDisplayRefresh) {
++    EXPECT_EQ(effectiveFixedTarget(30, 120000), 30);
++    EXPECT_EQ(effectiveFixedTarget(60, 120000), 60);
++    EXPECT_EQ(effectiveFixedTarget(120, 120000), 120);
++}
++
++TEST(FasTargetTest, DisplayCapCanFallAndRecoverWithoutChangingRequestedMode) {
++    EXPECT_EQ(effectiveFixedTarget(120, 60000), 60);
++    EXPECT_EQ(effectiveFixedTarget(120, 30000), 30);
++    EXPECT_EQ(effectiveFixedTarget(120, 90000), 60);
++    EXPECT_EQ(effectiveFixedTarget(120, 120000), 120);
++    EXPECT_EQ(effectiveFixedTarget(60, 24000), 0);
++}
++
++TEST(FasTargetTest, DisplayToleranceMatchesAutomaticCandidates) {
++    EXPECT_EQ(effectiveFixedTarget(60, 59500), 60);
++    EXPECT_EQ(effectiveFixedTarget(60, 59499), 30);
++}
+ constexpr int64_t ns(int64_t milliseconds) { return milliseconds * 1'000'000; }
+ 
+ class UpshiftProbeTest : public testing::Test {
+diff --git a/fasd/fasd.cpp b/fasd/fasd.cpp
+index 1b7b97e..d60e468 100644
+--- a/fasd/fasd.cpp
++++ b/fasd/fasd.cpp
+@@ -8,6 +8,8 @@
+ 
+ #define LOG_TAG "fasd"
+ 
++#include "FasTarget.h"
++
+ #include "UpshiftProbe.h"
+ 
+ #include <aidl/vendor/performance/fas/CpuPolicyVote.h>
+@@ -109,6 +111,7 @@ struct Session {
+     int32_t uid = -1;
+     int32_t displayRefreshMilliHz = 0;
+     int32_t fpsOverride = 0;
++    int32_t fixedTargetFps = 0;
+     std::string packageName;
+ };
+ 
+@@ -836,21 +839,25 @@ class Engine {
+               mSession.fpsOverride, values.str().c_str());
+     }
+ 
+-    void updateSessionParameters(int32_t displayRefreshMilliHz, int32_t fpsOverride) {
++    void updateSessionParameters(int32_t displayRefreshMilliHz, int32_t fpsOverride,
++                                 int32_t fixedTargetFps) {
+         std::scoped_lock lock(mMutex);
+         if (mSession.displayRefreshMilliHz == displayRefreshMilliHz &&
+-            mSession.fpsOverride == fpsOverride) {
++            mSession.fpsOverride == fpsOverride && mSession.fixedTargetFps == fixedTargetFps) {
+             return;
+         }
+         const int32_t oldRefresh = mSession.displayRefreshMilliHz;
++        const bool modeChanged = mSession.fixedTargetFps != fixedTargetFps;
++        mSession.fixedTargetFps = fixedTargetFps;
+         mSession.displayRefreshMilliHz = displayRefreshMilliHz;
+-        // The platform override remains telemetry; automatic cadence detection owns the target.
++        // The platform override remains telemetry; FAS automatic or explicit mode owns the target.
+         mSession.fpsOverride = fpsOverride;
+         const auto candidates = targetCandidatesLocked();
+         const auto eligible = [&candidates](int32_t fps) {
+             return std::find(candidates.begin(), candidates.end(), fps) != candidates.end();
+         };
+-        const bool invalidTarget = mAlgorithmTargetFps && !eligible(*mAlgorithmTargetFps);
++        const bool invalidTarget = modeChanged ||
++                (mAlgorithmTargetFps && !eligible(*mAlgorithmTargetFps));
+         ALOGI("session parameters package=%s generation=%llu refreshMilliHz=%d->%d "
+               "gameModeOverride=%d targetAction=%s",
+               mSession.packageName.c_str(), static_cast<unsigned long long>(mSession.generation),
+@@ -1232,12 +1239,12 @@ class Engine {
+     }
+ 
+     std::vector<int32_t> targetCandidatesLocked() const {
+-        // Game Mode's FPS override is telemetry for now. A future FAS UI may explicitly replace
+-        // automatic cadence detection, but the platform override must not lock one package-wide
+-        // target across scenes.
++        // Game Mode's FPS override remains telemetry. Only explicit FAS configuration can fix
++        // a package-wide target across scenes.
+         std::vector<int32_t> result;
+-        for (const int32_t candidate : {30, 60, 120}) {
+-            if (candidate * 1000 <= mSession.displayRefreshMilliHz + 500) {
++        for (const int32_t candidate : kTargetCandidates) {
++            if (static_cast<int64_t>(candidate) * 1000 <=
++                    static_cast<int64_t>(mSession.displayRefreshMilliHz) + 500) {
+                 result.push_back(candidate);
+             }
+         }
+@@ -1401,6 +1408,17 @@ class Engine {
+     }
+ 
+     void updateTargetLocked(nsecs_t nowNs) {
++        if (mSession.fixedTargetFps > 0) {
++            // Keep the requested mode intact across display changes; only the effective target
++            // is capped to the highest supported cadence allowed by the current display.
++            const int32_t target = effectiveFixedTarget(mSession.fixedTargetFps,
++                                                        mSession.displayRefreshMilliHz);
++            if (target > 0 && mAlgorithmTargetFps != target) {
++                commitTargetLocked(nowNs, CadenceObservation{target, recentFpsLocked(), 0},
++                                   "user_fixed");
++            }
++            return;
++        }
+         const auto observation = observeCadenceLocked();
+         if (!observation) {
+             if (mPendingTargetFps &&
+@@ -1519,7 +1537,8 @@ class Engine {
+         // jank state until that sample ages out. Use a time-bounded recent average for policy so a
+         // real slowdown is still observed without extending it across the full control history.
+         const double fpsRecent = recentFpsLocked();
+-        const auto probeDecision = updateUpshiftProbeLocked(nowNs, fpsRecent);
++        const auto probeDecision = mSession.fixedTargetFps > 0
++                ? UpshiftProbe::Decision{} : updateUpshiftProbeLocked(nowNs, fpsRecent);
+         const bool upshiftProbe = probeDecision.forceMaximum;
+         const bool upshiftProbeArmed = mUpshiftProbe.armed();
+         const bool upshiftConfirmation = mUpshiftProbe.confirming();
+@@ -1735,9 +1754,11 @@ class SessionManager {
+         if (mCurrentSession && mCurrentSession->taskId == session.taskId &&
+             mCurrentSession->uid == session.uid &&
+             mCurrentSession->packageName == session.packageName) {
+-            mEngine.updateSessionParameters(session.displayRefreshMilliHz, session.fpsOverride);
++            mEngine.updateSessionParameters(session.displayRefreshMilliHz, session.fpsOverride,
++                                            session.fixedTargetFps);
+             mCurrentSession->displayRefreshMilliHz = session.displayRefreshMilliHz;
+             mCurrentSession->fpsOverride = session.fpsOverride;
++            mCurrentSession->fixedTargetFps = session.fixedTargetFps;
+             return;
+         }
+         stopListener();
+@@ -1782,20 +1803,25 @@ std::optional<Session> parseTrackCommand(std::string_view command) {
+         command.remove_suffix(1);
+     }
+     const auto fields = split(command, '\t');
+-    if (fields.size() != 6 || fields[0] != "TRACK") return std::nullopt;
++    if ((fields.size() != 6 && fields.size() != 7) || fields[0] != "TRACK") return std::nullopt;
+     const auto taskId = parseInteger<int32_t>(fields[1]);
+     const auto uid = parseInteger<int32_t>(fields[2]);
+     const auto refresh = parseInteger<int32_t>(fields[3]);
+     const auto overrideFps = parseInteger<int32_t>(fields[4]);
++    const auto fixedFps = fields.size() == 7 ? parseInteger<int32_t>(fields[5])
++                                            : std::optional<int32_t>(0);
++    const auto packageName = fields.back();
+     if (!taskId || !uid || !refresh || !overrideFps || *taskId < 0 || *uid < 0 || *refresh <= 0 ||
+-        fields[5].empty()) {
++        !fixedFps || !validFixedTarget(*fixedFps) ||
++        packageName.empty()) {
+         return std::nullopt;
+     }
+     return Session{.taskId = *taskId,
+                    .uid = *uid,
+                    .displayRefreshMilliHz = *refresh,
+                    .fpsOverride = *overrideFps,
+-                   .packageName = std::string(fields[5])};
++                   .fixedTargetFps = *fixedFps,
++                   .packageName = std::string(packageName)};
+ }
+ 
+ int runSocketServer(SessionManager& sessions) {
+-- 
+2.43.0
+

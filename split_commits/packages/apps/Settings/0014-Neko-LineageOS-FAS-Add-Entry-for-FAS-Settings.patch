@@ -1,0 +1,99 @@
+From d91187a21e942c1534756e65a90e3835b97bfd87 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 15:47:27 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add Entry for FAS Settings
+
+Change-Id: Ibd79a90a8a2fe5e67a0116aa01121bf790c00f5e
+---
+ res/values-zh-rCN/strings.xml                 |  1 +
+ res/values-zh-rTW/strings.xml                 |  1 +
+ res/values/strings.xml                        |  1 +
+ .../spa/app/appinfo/AppInfoSettings.kt        |  1 +
+ .../settings/spa/app/appinfo/FasPreference.kt | 33 +++++++++++++++++++
+ 5 files changed, 37 insertions(+)
+ create mode 100644 src/com/android/settings/spa/app/appinfo/FasPreference.kt
+
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index d622135..df99ceb 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -6018,4 +6018,5 @@
+     <string name="safety_center_account_security_search_terms" msgid="3950829613581775913"></string>
+     <string name="safety_center_device_finder_search_terms" msgid="452013643838126923"></string>
+     <string name="safety_center_system_component_update_search_terms" msgid="3110390275537109543"></string>
++    <string name="fas_settings_title">FAS</string>
+ </resources>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index b6d84c3..bbfe27f 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -6014,4 +6014,5 @@
+     <string name="safety_center_account_security_search_terms" msgid="3950829613581775913"></string>
+     <string name="safety_center_device_finder_search_terms" msgid="452013643838126923"></string>
+     <string name="safety_center_system_component_update_search_terms" msgid="3110390275537109543"></string>
++    <string name="fas_settings_title">FAS</string>
+ </resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 025ea4b..eb1a989 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -14982,4 +14982,5 @@
+     <string name="safety_center_device_finder_search_terms"></string>
+     <!-- Safety Center system component update search terms [CHAR LIMIT=NONE] -->
+     <string name="safety_center_system_component_update_search_terms"></string>
++    <string name="fas_settings_title">FAS</string>
+ </resources>
+diff --git a/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt b/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
+index 0e72eb1..ed17317 100644
+--- a/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
++++ b/src/com/android/settings/spa/app/appinfo/AppInfoSettings.kt
+@@ -150,6 +150,7 @@ private fun AppInfoSettings(packageInfoPresenter: PackageInfoPresenter) {
+             LineageAppVisibilityBlockSwitchPreference(app)
+             PlayStoreInstallSpoofSwitchPreference(app)
+             MemorySafetyCompatibilitySwitchPreference(app)
++            FasPreference(app)
+             ManageTargetAppFunctionAccessPreference(app)
+             ManageAgentAppFunctionAccessPreference(app)
+             AppStoragePreference(app)
+diff --git a/src/com/android/settings/spa/app/appinfo/FasPreference.kt b/src/com/android/settings/spa/app/appinfo/FasPreference.kt
+new file mode 100644
+index 0000000..856db68
+--- /dev/null
++++ b/src/com/android/settings/spa/app/appinfo/FasPreference.kt
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package com.android.settings.spa.app.appinfo
++
++import android.content.ComponentName
++import android.content.Intent
++import android.content.pm.ApplicationInfo
++import android.os.Bundle
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.res.stringResource
++import com.android.settings.R
++import com.android.settingslib.spa.widget.preference.Preference
++import com.android.settingslib.spa.widget.preference.PreferenceModel
++import com.android.settingslib.spaprivileged.model.app.userHandle
++
++@Composable
++fun FasPreference(app: ApplicationInfo) {
++    val context = LocalContext.current
++    if (!context.resources.getBoolean(com.android.internal.R.bool.config_enableFas)) return
++    val intent = Intent().apply {
++        component = ComponentName("org.lineageos.lineageparts",
++            "org.lineageos.lineageparts.fas.FasSettings")
++        putExtra(":settings:show_fragment_args", Bundle().apply {
++            putString("package", app.packageName)
++        })
++        putExtra(":settings:fragment_args_key", app.packageName)
++    }
++    if (context.packageManager.resolveActivity(intent, 0) == null) return
++    Preference(object : PreferenceModel {
++        override val title = stringResource(R.string.fas_settings_title)
++        override val onClick = { context.startActivityAsUser(intent, app.userHandle) }
++    })
++}
+-- 
+2.43.0
+

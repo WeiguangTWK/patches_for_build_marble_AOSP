@@ -1,0 +1,44 @@
+From 17ee533545acd45106e2e8a7e51aed48274bfd76 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Thu, 8 Oct 2026 18:05:44 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Enable FAS in marble profile
+
+Change-Id: I0719106b658aad9a03d63c772ab342142881757c
+---
+ device.mk                                | 5 +++++
+ overlay/Frameworks/res/values/config.xml | 3 +++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/device.mk b/device.mk
+index 58a76b6..85464df 100644
+--- a/device.mk
++++ b/device.mk
+@@ -23,6 +23,11 @@ $(call inherit-product, vendor/gapps/arm64/arm64-vendor.mk)
+ PRODUCT_COPY_FILES += \
+     $(LOCAL_PATH)/rootdir/etc/init.marble.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.marble.rc
+ 
++# Frame-aware scheduling
++PRODUCT_PACKAGES += \
++    fasd \
++    fasqtid
++
+ # Audio
+ PRODUCT_PACKAGES += \
+     firmware_aw_cali.bin_symlink
+diff --git a/overlay/Frameworks/res/values/config.xml b/overlay/Frameworks/res/values/config.xml
+index be71cb2..53fe596 100644
+--- a/overlay/Frameworks/res/values/config.xml
++++ b/overlay/Frameworks/res/values/config.xml
+@@ -4,6 +4,9 @@
+      SPDX-License-Identifier: Apache-2.0
+ -->
+ <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
++    <!-- Enable frame-aware scheduling on this device. -->
++    <bool name="config_enableFas">true</bool>
++
+     <!-- Minimum screen brightness setting allowed by power manager.
+          -2 is invalid so setting will resort to int value specified above.
+          Set this to 0.0 to allow screen to go to minimal brightness.
+-- 
+2.43.0
+

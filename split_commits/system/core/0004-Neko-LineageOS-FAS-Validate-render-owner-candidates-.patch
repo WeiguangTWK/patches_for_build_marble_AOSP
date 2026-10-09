@@ -1,0 +1,211 @@
+From 1a58b0a3740f39385be48466a78a1526c08b2e78 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 17:21:46 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Validate render owner candidates before
+ procfs access
+
+Require SurfaceFlinger owner PIDs to match the package candidates
+provided by the session manager before checking their UID through
+procfs.
+
+Accept legacy TRACK messages without probing unverified owner PIDs.
+Reject oversized control packets and add candidate filtering tests.
+
+Change-Id: I5e93e776e30ee16253fb91a226c016642e56c36b
+---
+ fasd/RenderOwner.h         | 13 +++++++++
+ fasd/UpshiftProbe_test.cpp | 15 ++++++++++
+ fasd/fasd.cpp              | 58 ++++++++++++++++++++++++++++++++------
+ 3 files changed, 77 insertions(+), 9 deletions(-)
+ create mode 100644 fasd/RenderOwner.h
+
+diff --git a/fasd/RenderOwner.h b/fasd/RenderOwner.h
+new file mode 100644
+index 0000000..9428276
+--- /dev/null
++++ b/fasd/RenderOwner.h
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: GPL-3.0-only */
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <vector>
++
++namespace android::fas {
++// Apply the trusted package PID set before touching the candidate's procfs directory.
++inline bool isRenderOwnerCandidate(int32_t pid, const std::vector<int32_t>& packagePids) {
++    return pid > 0 && std::find(packagePids.begin(), packagePids.end(), pid) != packagePids.end();
++}
++}  // namespace android::fas
+diff --git a/fasd/UpshiftProbe_test.cpp b/fasd/UpshiftProbe_test.cpp
+index 968be92..1af58e1 100644
+--- a/fasd/UpshiftProbe_test.cpp
++++ b/fasd/UpshiftProbe_test.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "UpshiftProbe.h"
+ #include "FasTarget.h"
++#include "RenderOwner.h"
+ 
+ #include <gtest/gtest.h>
+ 
+@@ -13,6 +14,20 @@ namespace {
+ 
+ using Event = UpshiftProbe::Event;
+ 
++TEST(RenderOwnerTest, OnlyPackageCandidatesAreEligible) {
++    const std::vector<int32_t> candidates{14199, 14200};
++    EXPECT_TRUE(isRenderOwnerCandidate(14199, candidates));
++    EXPECT_TRUE(isRenderOwnerCandidate(14200, candidates));
++    EXPECT_FALSE(isRenderOwnerCandidate(2242, candidates));
++    EXPECT_FALSE(isRenderOwnerCandidate(0, candidates));
++    EXPECT_FALSE(isRenderOwnerCandidate(-1, candidates));
++}
++
++TEST(RenderOwnerTest, EmptyOrRemovedCandidateCannotBeRead) {
++    EXPECT_FALSE(isRenderOwnerCandidate(14199, {}));
++    EXPECT_FALSE(isRenderOwnerCandidate(14199, {14200}));
++}
++
+ TEST(FasTargetTest, AutomaticAndInvalidValuesDoNotProduceFixedTargets) {
+     EXPECT_EQ(effectiveFixedTarget(0, 120000), 0);
+     EXPECT_EQ(effectiveFixedTarget(90, 120000), 0);
+diff --git a/fasd/fasd.cpp b/fasd/fasd.cpp
+index d60e468..12cbfe5 100644
+--- a/fasd/fasd.cpp
++++ b/fasd/fasd.cpp
+@@ -9,6 +9,7 @@
+ #define LOG_TAG "fasd"
+ 
+ #include "FasTarget.h"
++#include "RenderOwner.h"
+ 
+ #include "UpshiftProbe.h"
+ 
+@@ -113,6 +114,7 @@ struct Session {
+     int32_t fpsOverride = 0;
+     int32_t fixedTargetFps = 0;
+     std::string packageName;
++    std::vector<int32_t> renderOwnerCandidates;
+ };
+ 
+ struct CpuPolicy {
+@@ -834,9 +836,24 @@ class Engine {
+         values << ']';
+         const double advertisedFps = mSession.displayRefreshMilliHz / 1000.0;
+         ALOGI("tracking package=%s uid=%d taskId=%d advertisedFps=%.2f gameModeOverride=%d "
+-              "candidates=%s controlBackend=fasqtid",
++              "candidates=%s controlBackend=fasqtid renderOwnerCandidates=[%s]",
+               mSession.packageName.c_str(), mSession.uid, mSession.taskId, advertisedFps,
+-              mSession.fpsOverride, values.str().c_str());
++              mSession.fpsOverride, values.str().c_str(),
++              formatIntegerList(mSession.renderOwnerCandidates, ',').c_str());
++    }
++
++    void updateRenderOwnerCandidates(std::vector<int32_t> candidates) {
++        std::scoped_lock lock(mMutex);
++        if (mSession.renderOwnerCandidates == candidates) return;
++        mSession.renderOwnerCandidates = std::move(candidates);
++        ALOGI("render owner candidates package=%s generation=%llu pids=[%s]",
++              mSession.packageName.c_str(), static_cast<unsigned long long>(mSession.generation),
++              formatIntegerList(mSession.renderOwnerCandidates, ',').c_str());
++        if (mRenderPid > 0 && !isRenderOwnerCandidate(mRenderPid, mSession.renderOwnerCandidates)) {
++            mRenderPid = -1;
++            mProcessMonitor.setPid(-1);
++            resetPolicySelectionLocked();
++        }
+     }
+ 
+     void updateSessionParameters(int32_t displayRefreshMilliHz, int32_t fpsOverride,
+@@ -936,7 +953,9 @@ class Engine {
+         const nsecs_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
+         mLastFrameCallbackNs = nowNs;
+ 
+-        if (ownerPid > 0 && ownerPid != mRenderPid && pidBelongsToUid(ownerPid, mSession.uid)) {
++        if (ownerPid != mRenderPid &&
++            isRenderOwnerCandidate(ownerPid, mSession.renderOwnerCandidates) &&
++            pidBelongsToUid(ownerPid, mSession.uid)) {
+             mRenderPid = ownerPid;
+             mProcessMonitor.setPid(ownerPid);
+             resetPolicySelectionLocked();
+@@ -1754,11 +1773,13 @@ class SessionManager {
+         if (mCurrentSession && mCurrentSession->taskId == session.taskId &&
+             mCurrentSession->uid == session.uid &&
+             mCurrentSession->packageName == session.packageName) {
++            mEngine.updateRenderOwnerCandidates(session.renderOwnerCandidates);
+             mEngine.updateSessionParameters(session.displayRefreshMilliHz, session.fpsOverride,
+                                             session.fixedTargetFps);
+             mCurrentSession->displayRefreshMilliHz = session.displayRefreshMilliHz;
+             mCurrentSession->fpsOverride = session.fpsOverride;
+             mCurrentSession->fixedTargetFps = session.fixedTargetFps;
++            mCurrentSession->renderOwnerCandidates = std::move(session.renderOwnerCandidates);
+             return;
+         }
+         stopListener();
+@@ -1799,18 +1820,32 @@ class SessionManager {
+ };
+ 
+ std::optional<Session> parseTrackCommand(std::string_view command) {
++    // TRACK task uid refresh override [fixedTarget] package [comma-separated package PIDs].
++    // Legacy messages keep timing/target control, but without authoritative package PIDs the
++    // daemon must not probe arbitrary SF owner candidates; residency uses its existing fallback.
+     while (!command.empty() && (command.back() == '\n' || command.back() == '\0')) {
+         command.remove_suffix(1);
+     }
+     const auto fields = split(command, '\t');
+-    if ((fields.size() != 6 && fields.size() != 7) || fields[0] != "TRACK") return std::nullopt;
++    if ((fields.size() < 6 || fields.size() > 8) || fields[0] != "TRACK") return std::nullopt;
+     const auto taskId = parseInteger<int32_t>(fields[1]);
+     const auto uid = parseInteger<int32_t>(fields[2]);
+     const auto refresh = parseInteger<int32_t>(fields[3]);
+     const auto overrideFps = parseInteger<int32_t>(fields[4]);
+-    const auto fixedFps = fields.size() == 7 ? parseInteger<int32_t>(fields[5])
++    const auto fixedFps = fields.size() >= 7 ? parseInteger<int32_t>(fields[5])
+                                             : std::optional<int32_t>(0);
+-    const auto packageName = fields.back();
++    const auto packageName = fields[fields.size() == 6 ? 5 : 6];
++    std::vector<int32_t> candidates;
++    if (fields.size() == 8 && fields[7] != "-") {
++        for (const auto token : split(fields[7], ',')) {
++            const auto pid = parseInteger<int32_t>(token);
++            if (!pid || *pid <= 0 || candidates.size() >= 128) return std::nullopt;
++            candidates.push_back(*pid);
++        }
++        if (candidates.empty()) return std::nullopt;
++        std::sort(candidates.begin(), candidates.end());
++        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
++    }
+     if (!taskId || !uid || !refresh || !overrideFps || *taskId < 0 || *uid < 0 || *refresh <= 0 ||
+         !fixedFps || !validFixedTarget(*fixedFps) ||
+         packageName.empty()) {
+@@ -1821,7 +1856,8 @@ std::optional<Session> parseTrackCommand(std::string_view command) {
+                    .displayRefreshMilliHz = *refresh,
+                    .fpsOverride = *overrideFps,
+                    .fixedTargetFps = *fixedFps,
+-                   .packageName = std::string(packageName)};
++                   .packageName = std::string(packageName),
++                   .renderOwnerCandidates = std::move(candidates)};
+ }
+ 
+ int runSocketServer(SessionManager& sessions) {
+@@ -1843,10 +1879,14 @@ int runSocketServer(SessionManager& sessions) {
+             ALOGE("accept failed: %s", strerror(errno));
+             return 1;
+         }
+-        char buffer[1024];
+-        const ssize_t size = TEMP_FAILURE_RETRY(recv(clientFd, buffer, sizeof(buffer), 0));
++        char buffer[4096];
++        const ssize_t size = TEMP_FAILURE_RETRY(recv(clientFd, buffer, sizeof(buffer), MSG_TRUNC));
+         close(clientFd);
+         if (size <= 0) continue;
++        if (size > static_cast<ssize_t>(sizeof(buffer))) {
++            ALOGW("ignored oversized control message");
++            continue;
++        }
+         const std::string_view command(buffer, static_cast<size_t>(size));
+         if (command.starts_with("STOP")) {
+             sessions.stop();
+-- 
+2.43.0
+

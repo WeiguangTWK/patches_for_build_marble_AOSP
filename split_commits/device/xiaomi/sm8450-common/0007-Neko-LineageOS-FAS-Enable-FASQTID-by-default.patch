@@ -1,0 +1,69 @@
+From 96b0d07562bcbf1a80e2374080b783897ce770cf Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 15:11:37 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Enable FASQTID by default
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+During early alpha testing, fasqtid defaulted to shadow mode(output recommended vote but not actually vote) and actual
+QTI votes had to be enabled through a persistent vendor property.
+
+FAS now has UI global and per-app controls. Therefore, allow
+fasqtid to apply actual votes by default while retaining
+persist.vendor.fas.qti.enabled as a debugging and emergency kill switch.
+
+P.S. What is fasqtid?
+
+This is understood as fas + qti + d, the FAS works though this way:
+
+FasManagerService
+    └─ TRACK/STOP
+       fasd
+         └─ calculates per-policy CPU min/max frequency votes
+            fasqtid
+              └─ validates thermal/safety state and translates votes
+                 QTI perf HAL / perf backend
+                   └─ kernel frequency constraints
+
+With some luck, adapting FAS to an MTK platform should mainly involve adding an equivalent vendor bridge, such as fasmtkd
+
+Change-Id: I9d4acc66b1373f8c7077ad4e7a9e555cc1077f35
+---
+ fasqtid/fasqtid.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/fasqtid/fasqtid.cpp b/fasqtid/fasqtid.cpp
+index 22d7b09..0bb276c 100644
+--- a/fasqtid/fasqtid.cpp
++++ b/fasqtid/fasqtid.cpp
+@@ -571,7 +571,7 @@ class Backend final : public BnFasBackend {
+ 
+     void start() {
+         mWorker = std::thread([this] { watchdogLoop(); });
+-        ALOGI("VINTF AIDL backend ready; QTI votes default to shadow mode (%s=false)",
++        ALOGI("VINTF AIDL backend ready; QTI votes default to actual mode (%s=false)",
+               kEnabledProperty);
+     }
+ 
+@@ -609,7 +609,7 @@ class Backend final : public BnFasBackend {
+ 
+         const bool thermalWasAllowed = mThermal.allowed();
+         mThermal.refresh(mLastUpdate);
+-        const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, false);
++        const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, true);
+         handleSafetyTransitionsLocked(mLastUpdate, thermalWasAllowed, actualEnabled, false);
+ 
+         bool applied = false;
+@@ -651,7 +651,7 @@ class Backend final : public BnFasBackend {
+             const TimePoint now = Clock::now();
+             const bool thermalWasAllowed = mThermal.allowed();
+             mThermal.refresh(now);
+-            const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, false);
++            const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, true);
+             expireStaleVoteLocked(now);
+             handleSafetyTransitionsLocked(now, thermalWasAllowed, actualEnabled, true);
+         }
+-- 
+2.43.0
+

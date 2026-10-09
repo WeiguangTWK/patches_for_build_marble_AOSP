@@ -1,0 +1,65 @@
+From ca8e74ba590de1f49247f5af268479d5e037d60e Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 15:59:46 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add infra for FAS UI
+
+Change-Id: Ic30c4c03773c13ed9281a058f02d501c566aab8f
+---
+ build/soong/service_fuzzer_bindings.go | 2 ++
+ private/service.te                     | 1 +
+ private/service_contexts               | 1 +
+ private/system_app.te                  | 1 +
+ 4 files changed, 5 insertions(+)
+
+diff --git a/build/soong/service_fuzzer_bindings.go b/build/soong/service_fuzzer_bindings.go
+index da71147..fa76fe7 100644
+--- a/build/soong/service_fuzzer_bindings.go
++++ b/build/soong/service_fuzzer_bindings.go
+@@ -308,6 +308,8 @@ var (
+ 		"feature_flags":                                                       EXCEPTION_NO_FUZZER,
+ 		"font":                                                                EXCEPTION_NO_FUZZER,
+ 		"android.hardware.fingerprint.IFingerprintDaemon": EXCEPTION_NO_FUZZER,
++		// Java Binder service; automatic service fuzzing is not supported for Java yet.
++		"fas_manager":                            EXCEPTION_NO_FUZZER,
+ 		"game":                                   EXCEPTION_NO_FUZZER,
+ 		"gfxinfo":                                EXCEPTION_NO_FUZZER,
+ 		"gnss_time_update_service":               EXCEPTION_NO_FUZZER,
+diff --git a/private/service.te b/private/service.te
+index 62e2e70..af6b8da 100644
+--- a/private/service.te
++++ b/private/service.te
+@@ -3,6 +3,7 @@ type ambient_context_service,        app_api_service, system_server_service, ser
+ type authentication_policy_service,  app_api_service, system_api_service, system_server_service, service_manager_type;
+ 
+ type attention_service,              system_server_service, service_manager_type;
++type fas_manager_service,            system_server_service, service_manager_type;
+ type adbroot_service,                service_manager_type;
+ type bg_install_control_service,     system_api_service, system_server_service, service_manager_type;
+ type binder_stats_consumer_service,  system_server_service, service_manager_type;
+diff --git a/private/service_contexts b/private/service_contexts
+index 6e61a70..84fa139 100644
+--- a/private/service_contexts
++++ b/private/service_contexts
+@@ -54,6 +54,7 @@ android.hardware.drm.IDrmFactory/clearkey                            u:object_r:
+ android.hardware.drm.ICryptoFactory/clearkey                         u:object_r:hal_drm_service:s0
+ android.hardware.dumpstate.IDumpstateDevice/default                  u:object_r:hal_dumpstate_service:s0
+ android.hardware.fastboot.IFastboot/default                          u:object_r:hal_fastboot_service:s0
++fas_manager                                                        u:object_r:fas_manager_service:s0
+ android.hardware.gnss.IGnss/default                                  u:object_r:hal_gnss_service:s0
+ android.hardware.graphics.allocator.IAllocator/default               u:object_r:hal_graphics_allocator_service:s0
+ android.hardware.graphics.composer3.IComposer/default                u:object_r:hal_graphics_composer_service:s0
+diff --git a/private/system_app.te b/private/system_app.te
+index 020395a..5430b2c 100644
+--- a/private/system_app.te
++++ b/private/system_app.te
+@@ -7,6 +7,7 @@
+ typeattribute system_app coredomain, mlstrustedsubject;
+ 
+ app_domain(system_app)
++allow system_app fas_manager_service:service_manager find;
+ net_domain(system_app)
+ binder_service(system_app)
+ 
+-- 
+2.43.0
+

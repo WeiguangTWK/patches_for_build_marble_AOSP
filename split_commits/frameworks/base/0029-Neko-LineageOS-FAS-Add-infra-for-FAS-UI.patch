@@ -1,0 +1,471 @@
+From 572f7588c4794cbd7d94eadbb13c01136d43dab8 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 9 Oct 2026 15:32:59 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Add infra for FAS UI
+
+Change-Id: I38e570614306cb3539abd95bdbb8cffad4b9386b
+---
+ core/java/android/app/fas/FasManager.java     |  43 ++++++++
+ core/java/android/app/fas/IFasManager.aidl    |  11 ++
+ core/res/res/values/config.xml                |   3 +
+ core/res/res/values/symbols.xml               |   1 +
+ .../android/server/fas/FasConfigStore.java    |  93 ++++++++++++++++
+ .../android/server/fas/FasManagerService.java | 101 ++++++++++++++++--
+ .../server/fas/FasConfigStoreTest.java        |  60 +++++++++++
+ 7 files changed, 303 insertions(+), 9 deletions(-)
+ create mode 100644 core/java/android/app/fas/FasManager.java
+ create mode 100644 core/java/android/app/fas/IFasManager.aidl
+ create mode 100644 services/core/java/com/android/server/fas/FasConfigStore.java
+ create mode 100644 services/tests/servicestests/src/com/android/server/fas/FasConfigStoreTest.java
+
+diff --git a/core/java/android/app/fas/FasManager.java b/core/java/android/app/fas/FasManager.java
+new file mode 100644
+index 000000000..cb9796bd2
+--- /dev/null
++++ b/core/java/android/app/fas/FasManager.java
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package android.app.fas;
++
++import android.os.Bundle;
++import android.os.RemoteException;
++import android.os.ServiceManager;
++
++/**
++ * Settings-only client for FAS configuration.
++ * @hide
++ */
++public final class FasManager {
++    public static final String SERVICE_NAME = "fas_manager";
++    public static final int MODE_AUTO = 0;
++    public static final int MODE_ENABLED = 1;
++    public static final int MODE_DISABLED = -1;
++    public static final String KEY_ENABLED = "enabled";
++    public static final String KEY_MODES = "modes";
++
++    public static boolean isValidMode(int mode) {
++        return mode == MODE_AUTO || mode == MODE_ENABLED || mode == MODE_DISABLED
++                || mode == 30 || mode == 60 || mode == 120;
++    }
++
++    private IFasManager service() {
++        final IFasManager service = IFasManager.Stub.asInterface(
++                ServiceManager.getService(SERVICE_NAME));
++        if (service == null) throw new IllegalStateException("FAS service unavailable");
++        return service;
++    }
++
++    public Bundle getConfiguration(int userId) throws RemoteException {
++        return service().getConfiguration(userId);
++    }
++
++    public boolean setEnabled(boolean enabled) throws RemoteException {
++        return service().setEnabled(enabled);
++    }
++
++    public boolean setAppMode(String packageName, int userId, int mode) throws RemoteException {
++        return service().setAppMode(packageName, userId, mode);
++    }
++}
+diff --git a/core/java/android/app/fas/IFasManager.aidl b/core/java/android/app/fas/IFasManager.aidl
+new file mode 100644
+index 000000000..e65a650b1
+--- /dev/null
++++ b/core/java/android/app/fas/IFasManager.aidl
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package android.app.fas;
++
++import android.os.Bundle;
++
++/** @hide */
++interface IFasManager {
++    Bundle getConfiguration(int userId);
++    boolean setEnabled(boolean enabled);
++    boolean setAppMode(String packageName, int userId, int mode);
++}
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index 345529549..fffd44846 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -205,6 +205,9 @@
+     <!-- Enable or disable android.companion.virtual.VirtualDeviceManager. Enabled by default. -->
+     <bool name="config_enableVirtualDeviceManager">true</bool>
+ 
++    <!-- Whether the frame-aware scheduling service and its settings are available. -->
++    <bool name="config_enableFas">false</bool>
++
+     <!-- Whether dialogs should close automatically when the user touches outside
+          of them.  This should not normally be modified. -->
+     <bool name="config_closeDialogWhenTouchOutside">true</bool>
+diff --git a/core/res/res/values/symbols.xml b/core/res/res/values/symbols.xml
+index e5cb3f221..5e61d5c32 100644
+--- a/core/res/res/values/symbols.xml
++++ b/core/res/res/values/symbols.xml
+@@ -450,6 +450,7 @@
+   <java-symbol type="bool" name="config_ignoreUdfpsVote" />
+   <java-symbol type="bool" name="config_enableProximityService" />
+   <java-symbol type="bool" name="config_enableVirtualDeviceManager" />
++  <java-symbol type="bool" name="config_enableFas" />
+   <java-symbol type="array" name="config_localPrivateDisplayPorts" />
+   <java-symbol type="array" name="config_localNotStealTopFocusDisplayPorts" />
+   <java-symbol type="integer" name="config_defaultDisplayDefaultColorMode" />
+diff --git a/services/core/java/com/android/server/fas/FasConfigStore.java b/services/core/java/com/android/server/fas/FasConfigStore.java
+new file mode 100644
+index 000000000..4463afe3d
+--- /dev/null
++++ b/services/core/java/com/android/server/fas/FasConfigStore.java
+@@ -0,0 +1,93 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package com.android.server.fas;
++
++import android.app.fas.FasManager;
++import android.os.Bundle;
++import android.os.Environment;
++import android.util.AtomicFile;
++import android.util.Slog;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import org.json.JSONException;
++import org.json.JSONObject;
++
++/** Owns the device-wide switch and per-user overrides; absent entries mean automatic. */
++final class FasConfigStore {
++    private final AtomicFile mFile;
++    private JSONObject mData = new JSONObject();
++
++    FasConfigStore() {
++        this(new File(Environment.getDataSystemDirectory(), "fas.json"));
++    }
++
++    FasConfigStore(File file) {
++        mFile = new AtomicFile(file);
++        try {
++            mData = new JSONObject(new String(mFile.readFully(), StandardCharsets.UTF_8));
++        } catch (IOException | JSONException e) {
++            if (mFile.getBaseFile().exists()) Slog.w("FasConfigStore", "Cannot load config", e);
++        }
++    }
++
++    synchronized boolean enabled() { return mData.optBoolean("enabled", false); }
++
++    synchronized int mode(int userId, String pkg) {
++        JSONObject user = mData.optJSONObject(Integer.toString(userId));
++        int mode = user == null ? FasManager.MODE_AUTO : user.optInt(pkg, FasManager.MODE_AUTO);
++        return FasManager.isValidMode(mode) ? mode : FasManager.MODE_AUTO;
++    }
++
++    synchronized Bundle snapshot(int userId) {
++        Bundle result = new Bundle();
++        result.putBoolean(FasManager.KEY_ENABLED, enabled());
++        Bundle modes = new Bundle();
++        JSONObject user = mData.optJSONObject(Integer.toString(userId));
++        if (user != null) {
++            user.keys().forEachRemaining(pkg -> modes.putInt(pkg, mode(userId, pkg)));
++        }
++        result.putBundle(FasManager.KEY_MODES, modes);
++        return result;
++    }
++
++    synchronized boolean setEnabled(boolean enabled) {
++        return mutate(data -> data.put("enabled", enabled));
++    }
++
++    synchronized boolean setMode(int userId, String pkg, int mode) {
++        if (userId < 0 || pkg == null || pkg.isEmpty() || !FasManager.isValidMode(mode)) {
++            throw new IllegalArgumentException("Invalid FAS application mode");
++        }
++        return mutate(data -> {
++            String key = Integer.toString(userId);
++            JSONObject user = data.optJSONObject(key);
++            if (user == null) user = new JSONObject();
++            if (mode == FasManager.MODE_AUTO) user.remove(pkg); else user.put(pkg, mode);
++            if (user.length() == 0) data.remove(key); else data.put(key, user);
++        });
++    }
++
++    synchronized boolean removeUser(int userId) {
++        return mutate(data -> data.remove(Integer.toString(userId)));
++    }
++
++    private interface Mutation { void apply(JSONObject data) throws JSONException; }
++
++    private boolean mutate(Mutation mutation) {
++        FileOutputStream out = null;
++        try {
++            JSONObject next = new JSONObject(mData.toString());
++            mutation.apply(next);
++            out = mFile.startWrite();
++            out.write(next.toString().getBytes(StandardCharsets.UTF_8));
++            mFile.finishWrite(out);
++            mData = next;
++            return true;
++        } catch (IOException | JSONException e) {
++            if (out != null) mFile.failWrite(out);
++            Slog.w("FasConfigStore", "Cannot save config", e);
++            return false;
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/fas/FasManagerService.java b/services/core/java/com/android/server/fas/FasManagerService.java
+index 565c76484..637d3d4ef 100644
+--- a/services/core/java/com/android/server/fas/FasManagerService.java
++++ b/services/core/java/com/android/server/fas/FasManagerService.java
+@@ -32,13 +32,20 @@ import android.app.IProcessObserver;
+ import android.app.TaskStackListener;
+ import android.app.UidObserver;
+ import android.app.WindowConfiguration;
++import android.app.fas.FasManager;
++import android.app.fas.IFasManager;
++import android.content.BroadcastReceiver;
+ import android.content.ComponentName;
+ import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
+ import android.content.pm.ApplicationInfo;
+ import android.content.pm.PackageManager;
+ import android.hardware.display.DisplayManager;
+ import android.net.LocalSocket;
+ import android.net.LocalSocketAddress;
++import android.os.Binder;
++import android.os.Bundle;
+ import android.os.Process;
+ import android.os.RemoteException;
+ import android.os.ServiceManager;
+@@ -58,7 +65,7 @@ import java.util.List;
+ import java.util.Locale;
+ import java.util.Objects;
+ 
+-/** Observes foreground games and emits dry-run diagnostics without applying performance policy. */
++/** Owns FAS configuration and delegates foreground performance sessions to fasd. */
+ public final class FasManagerService extends SystemService {
+   private static final String TAG = "FasManagerService";
+   private static final long REFRESH_DEBOUNCE_MILLIS = 100;
+@@ -88,6 +95,48 @@ public final class FasManagerService extends SystemService {
+   private ObservedTaskFpsCallback mTaskFpsCallback;
+   private String mLastFasdSession;
+   private boolean mFasdRetryScheduled;
++  private FasConfigStore mConfig;
++
++  private void enforceConfigAccess(int userId) {
++    mContext.enforceCallingOrSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS, TAG);
++    if (userId < 0) throw new IllegalArgumentException("A concrete user is required");
++    if (UserHandle.getCallingUserId() != userId) {
++      mContext.enforceCallingOrSelfPermission(
++          android.Manifest.permission.INTERACT_ACROSS_USERS_FULL, TAG);
++    }
++  }
++
++  private final IFasManager.Stub mService = new IFasManager.Stub() {
++    @Override public Bundle getConfiguration(int userId) {
++      enforceConfigAccess(userId);
++      return mConfig.snapshot(userId);
++    }
++
++    @Override public boolean setEnabled(boolean enabled) {
++      mContext.enforceCallingOrSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS, TAG);
++      boolean saved = mConfig.setEnabled(enabled);
++      if (saved) BackgroundThread.getHandler().post(FasManagerService.this::refresh);
++      return saved;
++    }
++
++    @Override public boolean setAppMode(String pkg, int userId, int mode) {
++      enforceConfigAccess(userId);
++      if (pkg == null || pkg.isEmpty() || !FasManager.isValidMode(mode)) {
++        throw new IllegalArgumentException("Invalid FAS application mode");
++      }
++      final long identity = Binder.clearCallingIdentity();
++      try {
++        mPackageManager.getApplicationInfoAsUser(pkg, 0, userId);
++        boolean saved = mConfig.setMode(userId, pkg, mode);
++        if (saved) BackgroundThread.getHandler().post(FasManagerService.this::refresh);
++        return saved;
++      } catch (PackageManager.NameNotFoundException e) {
++        throw new IllegalArgumentException("Package not installed for user", e);
++      } finally {
++        Binder.restoreCallingIdentity(identity);
++      }
++    }
++  };
+ 
+   private final TaskStackListener mTaskStackListener =
+       new TaskStackListener() {
+@@ -204,14 +253,37 @@ public final class FasManagerService extends SystemService {
+ 
+   @Override
+   public void onStart() {
++    if (!mContext.getResources().getBoolean(
++        com.android.internal.R.bool.config_enableFas)) return;
++    mConfig = new FasConfigStore();
++    publishBinderService(FasManager.SERVICE_NAME, mService);
++    IntentFilter packages = new IntentFilter(Intent.ACTION_PACKAGE_REMOVED);
++    packages.addDataScheme("package");
++    mContext.registerReceiverAsUser(new BroadcastReceiver() {
++      @Override public void onReceive(Context context, Intent intent) {
++        int uid = intent.getIntExtra(Intent.EXTRA_UID, -1);
++        if (uid >= 0 && !intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)
++            && intent.getData() != null) {
++          mConfig.setMode(UserHandle.getUserId(uid), intent.getData().getSchemeSpecificPart(),
++              FasManager.MODE_AUTO);
++          scheduleRefresh();
++        }
++      }
++    }, UserHandle.ALL, packages, null, BackgroundThread.getHandler());
++    mContext.registerReceiver(new BroadcastReceiver() {
++      @Override public void onReceive(Context context, Intent intent) {
++        int user = intent.getIntExtra(Intent.EXTRA_USER_HANDLE, -1);
++        if (user >= 0) mConfig.removeUser(user);
++      }
++    }, new IntentFilter(Intent.ACTION_USER_REMOVED), null, BackgroundThread.getHandler());
+     registerObservers();
+-    Slog.i(TAG, "FAS observer started; QTI controls are delegated to fasqtid (shadow by default)");
++    Slog.i(TAG, "FAS configuration ready; performance controls are delegated to fasqtid");
+     scheduleRefresh();
+   }
+ 
+   @Override
+   public void onUserSwitching(TargetUser from, TargetUser to) {
+-    scheduleRefresh();
++    if (mConfig != null) scheduleRefresh();
+   }
+ 
+   private void registerObservers() {
+@@ -306,6 +378,11 @@ public final class FasManagerService extends SystemService {
+ 
+     // Deliberately the only game-identification predicate; there is no built-in game list.
+     final boolean isGame = applicationInfo.category == ApplicationInfo.CATEGORY_GAME;
++    final Bundle config = mConfig.snapshot(userId);
++    final int mode = config.getBundle(FasManager.KEY_MODES).getInt(packageName, FasManager.MODE_AUTO);
++    final boolean enabled = config.getBoolean(FasManager.KEY_ENABLED)
++        && mode != FasManager.MODE_DISABLED
++        && (isGame || mode != FasManager.MODE_AUTO);
+     final List<Integer> pids = getPackagePids(packageName, uid);
+     final int uidProcessState = mActivityManagerInternal.getUidProcessState(uid);
+     final GameData gameData =
+@@ -313,14 +390,18 @@ public final class FasManagerService extends SystemService {
+             ? getGameData(packageName, userId, task.displayId)
+             : GameData.unsupported(getDisplayRefreshRate(task.displayId));
+ 
+-    syncTaskFpsCallback(isGame, task.taskId, packageName, uid);
+-    syncFasd(isGame, task.taskId, packageName, uid, gameData);
++    syncTaskFpsCallback(enabled, task.taskId, packageName, uid);
++    syncFasd(enabled, task.taskId, packageName, uid, gameData, mode > 1 ? mode : 0);
+ 
+     logSnapshot(
+         "state="
+             + (isGame ? "GAME" : "NON_GAME")
+             + " isGame="
+             + isGame
++            + " fasEnabled="
++            + enabled
++            + " appMode="
++            + mode
+             + " package="
+             + packageName
+             + " userId="
+@@ -455,13 +536,13 @@ public final class FasManagerService extends SystemService {
+     mObservedUid = Process.INVALID_UID;
+     mObservedPackage = null;
+     syncTaskFpsCallback(false, INVALID_TASK_ID, null, Process.INVALID_UID);
+-    syncFasd(false, INVALID_TASK_ID, null, Process.INVALID_UID, null);
++    syncFasd(false, INVALID_TASK_ID, null, Process.INVALID_UID, null, 0);
+   }
+ 
+   private void syncFasd(
+-      boolean isGame, int taskId, String packageName, int uid, GameData gameData) {
++      boolean tracked, int taskId, String packageName, int uid, GameData gameData, int fixedTargetFps) {
+     final String session =
+-        isGame && gameData != null
++        tracked && gameData != null
+             ? "TRACK\t"
+                 + taskId
+                 + "\t"
+@@ -471,6 +552,8 @@ public final class FasManagerService extends SystemService {
+                 + "\t"
+                 + gameData.fpsOverride
+                 + "\t"
++                + fixedTargetFps
++                + "\t"
+                 + packageName
+             : "STOP";
+     if (session.equals(mLastFasdSession)) {
+@@ -483,7 +566,7 @@ public final class FasManagerService extends SystemService {
+       mLastFasdSession = session;
+       mFasdRetryScheduled = false;
+       BackgroundThread.getHandler().removeCallbacks(mFasdHeartbeatRunnable);
+-      if (isGame) {
++      if (tracked) {
+         BackgroundThread.getHandler()
+             .postDelayed(mFasdHeartbeatRunnable, FASD_HEARTBEAT_MILLIS);
+       }
+diff --git a/services/tests/servicestests/src/com/android/server/fas/FasConfigStoreTest.java b/services/tests/servicestests/src/com/android/server/fas/FasConfigStoreTest.java
+new file mode 100644
+index 000000000..bc45a454c
+--- /dev/null
++++ b/services/tests/servicestests/src/com/android/server/fas/FasConfigStoreTest.java
+@@ -0,0 +1,60 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package com.android.server.fas;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import android.app.fas.FasManager;
++import java.io.File;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.TemporaryFolder;
++
++public class FasConfigStoreTest {
++    @Rule public TemporaryFolder folder = new TemporaryFolder();
++
++    @Test public void defaultsAreOffAndAutomatic() {
++        FasConfigStore store = new FasConfigStore(new File(folder.getRoot(), "fas.json"));
++        assertFalse(store.enabled());
++        assertEquals(FasManager.MODE_AUTO, store.mode(0, "example.game"));
++    }
++
++    @Test public void modesPersistAndAreIsolatedByUser() {
++        File file = new File(folder.getRoot(), "fas.json");
++        FasConfigStore store = new FasConfigStore(file);
++        assertTrue(store.setEnabled(true));
++        for (int mode : new int[] {1, 120, 60, 30, -1}) {
++            assertTrue(store.setMode(0, "example.game", mode));
++            FasConfigStore loaded = new FasConfigStore(file);
++            assertTrue(loaded.enabled());
++            assertEquals(mode, loaded.mode(0, "example.game"));
++            assertEquals(FasManager.MODE_AUTO, loaded.mode(10, "example.game"));
++        }
++        assertTrue(store.setMode(0, "example.game", FasManager.MODE_AUTO));
++        assertFalse(store.snapshot(0).getBundle(FasManager.KEY_MODES).containsKey("example.game"));
++    }
++
++    @Test public void globalOffKeepsOverridesAndRemovedUserDoesNot() {
++        FasConfigStore store = new FasConfigStore(new File(folder.getRoot(), "fas.json"));
++        assertTrue(store.setMode(10, "example.game", 60));
++        assertTrue(store.setEnabled(false));
++        assertEquals(60, store.mode(10, "example.game"));
++        assertTrue(store.removeUser(10));
++        assertEquals(FasManager.MODE_AUTO, store.mode(10, "example.game"));
++    }
++
++    @Test public void failedWriteDoesNotChangeLiveConfiguration() throws Exception {
++        File blocker = folder.newFile("not-a-directory");
++        FasConfigStore store = new FasConfigStore(new File(blocker, "fas.json"));
++        assertFalse(store.setEnabled(true));
++        assertFalse(store.enabled());
++        assertFalse(store.setMode(0, "example.game", 120));
++        assertEquals(FasManager.MODE_AUTO, store.mode(0, "example.game"));
++    }
++
++    @Test(expected = IllegalArgumentException.class)
++    public void rejectsUnsupportedMode() {
++        new FasConfigStore(new File(folder.getRoot(), "fas.json")).setMode(0, "example.game", 90);
++    }
++}
+-- 
+2.43.0
+
