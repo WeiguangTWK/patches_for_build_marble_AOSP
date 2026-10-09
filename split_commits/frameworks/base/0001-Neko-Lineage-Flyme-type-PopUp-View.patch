@@ -1,4 +1,4 @@
-From 622f1165c5a06e8268df0c0e4e2ac05c2f9caadd Mon Sep 17 00:00:00 2001
+From fbc0bd944ca3feaa9bb1c74520b1b92578906a66 Mon Sep 17 00:00:00 2001
 From: WeiguangTWK <weiguangtwk@outlook.com>
 Date: Tue, 30 Jun 2026 14:10:06 +0800
 Subject: [PATCH] Neko-Lineage: Flyme-type PopUp View
@@ -105,7 +105,7 @@ signed-off-by: WeiguangTWK <weiguangtwk@outlook.com>
  .../java/com/android/server/wm/Session.java   |    6 +
  .../android/server/wm/SurfaceAnimatorExt.java |   87 +
  .../android/server/wm/SurfaceFreezerExt.java  |  202 +++
- .../core/java/com/android/server/wm/Task.java |   51 +-
+ .../core/java/com/android/server/wm/Task.java |   46 +-
  .../android/server/wm/TaskDisplayArea.java    |   18 +-
  .../com/android/server/wm/TaskFragment.java   |   38 +-
  .../server/wm/TaskWindowSurfaceInfo.java      | 1141 ++++++++++++
@@ -122,7 +122,7 @@ signed-off-by: WeiguangTWK <weiguangtwk@outlook.com>
  .../com/android/server/wm/WindowState.java    |   14 +-
  .../server/wm/WindowSurfacePlacer.java        |    1 +
  .../com/android/server/wm/WindowToken.java    |    3 +
- 113 files changed, 9811 insertions(+), 69 deletions(-)
+ 113 files changed, 9806 insertions(+), 69 deletions(-)
  create mode 100644 core/java/android/app/ActivityOptionsExt.java
  create mode 100644 core/java/android/content/res/ConfigurationExt.java
  create mode 100644 core/java/android/view/MotionEventExt.java
@@ -3205,7 +3205,7 @@ index bd9ed05f9..bcaa41472 100644
          final boolean displayChanged = mLastReportedDisplayId != newDisplayId;
          if (displayChanged) {
 diff --git a/services/core/java/com/android/server/wm/ActivityStarter.java b/services/core/java/com/android/server/wm/ActivityStarter.java
-index b0a800796..88c71407b 100644
+index ca3ef12ad..2f6e21276 100644
 --- a/services/core/java/com/android/server/wm/ActivityStarter.java
 +++ b/services/core/java/com/android/server/wm/ActivityStarter.java
 @@ -31,6 +31,7 @@ import static android.app.ActivityManager.isStartResultSuccessful;
@@ -3216,7 +3216,7 @@ index b0a800796..88c71407b 100644
  import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
  import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
  import static android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK;
-@@ -787,6 +788,10 @@ class ActivityStarter {
+@@ -790,6 +791,10 @@ class ActivityStarter {
          String callerActivityName = null;
          ActivityRecord launchingRecord = null;
          try {
@@ -3227,7 +3227,7 @@ index b0a800796..88c71407b 100644
              onExecutionStarted();
  
              if (mRequest.intent != null) {
-@@ -1703,6 +1708,19 @@ class ActivityStarter {
+@@ -1713,6 +1718,19 @@ class ActivityStarter {
          int result = START_CANCELED;
          final Task startedActivityRootTask;
  
@@ -3247,7 +3247,7 @@ index b0a800796..88c71407b 100644
          RemoteTransition remoteTransition = r.takeRemoteTransition();
          // Create a display snapshot as soon as possible.
          if (isIndependentLaunch && mRequest.freezeScreen) {
-@@ -2130,7 +2148,7 @@ class ActivityStarter {
+@@ -2140,7 +2158,7 @@ class ActivityStarter {
                  mOptions, sourceRecord);
          if (mDoResume) {
              final ActivityRecord topTaskActivity = startedTask.topRunningActivityLocked();
@@ -3256,7 +3256,7 @@ index b0a800796..88c71407b 100644
                      || (topTaskActivity != null && topTaskActivity.isTaskOverlay()
                      && mStartActivity != topTaskActivity)) {
                  // If the activity is not focusable, we can't resume it, but still would like to
-@@ -2251,6 +2269,7 @@ class ActivityStarter {
+@@ -2261,6 +2279,7 @@ class ActivityStarter {
              Task targetTask) {
          mSupervisor.getLaunchParamsController().calculate(targetTask, r.info.windowLayout, r,
                  sourceRecord, mOptions, mRequest, PHASE_BOUNDS, mLaunchParams);
@@ -3265,7 +3265,7 @@ index b0a800796..88c71407b 100644
                  ? mLaunchParams.mPreferredTaskDisplayArea
                  : mRootWindowContainer.getDefaultTaskDisplayArea();
 diff --git a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
-index 7e0b56ce9..867d1a4f0 100644
+index c695279f5..84e33ef51 100644
 --- a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
 +++ b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
 @@ -138,6 +138,8 @@ import static com.android.server.wm.Task.REPARENT_KEEP_ROOT_TASK_AT_FRONT;
@@ -3277,7 +3277,7 @@ index 7e0b56ce9..867d1a4f0 100644
  import android.Manifest;
  import android.annotation.EnforcePermission;
  import android.annotation.IntDef;
-@@ -2772,6 +2774,8 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+@@ -2782,6 +2784,8 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
              return;
          }
  
@@ -3286,7 +3286,7 @@ index 7e0b56ce9..867d1a4f0 100644
          final Task rootTask = mRootWindowContainer.getTopDisplayFocusedRootTask();
          if (rootTask == null || task != rootTask.getTopMostTask()) {
              throw new IllegalArgumentException("Invalid task, not in foreground");
-@@ -4197,6 +4201,13 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+@@ -4207,6 +4211,13 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
              return true;
          }
  
@@ -3300,7 +3300,7 @@ index 7e0b56ce9..867d1a4f0 100644
          // Activity supports picture-in-picture, now check that we can enter PiP at this
          // point, if it is
          if (!r.checkEnterPictureInPictureState("enterPictureInPictureMode",
-@@ -7320,6 +7331,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+@@ -7330,6 +7341,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
          public boolean onForceStopPackage(String packageName, boolean doit, boolean evenPersistent,
                  int userId) {
              synchronized (mGlobalLock) {
@@ -8649,7 +8649,7 @@ index 000000000..2c4baea51
 +    }
 +}
 diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
-index b5698711e..9346b0e79 100644
+index fd8345e36..a6aa5a9e1 100644
 --- a/services/core/java/com/android/server/wm/Task.java
 +++ b/services/core/java/com/android/server/wm/Task.java
 @@ -70,6 +70,7 @@ import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_STARTING;
@@ -8669,7 +8669,7 @@ index b5698711e..9346b0e79 100644
  import android.annotation.IntDef;
  import android.annotation.NonNull;
  import android.annotation.Nullable;
-@@ -714,6 +717,8 @@ class Task extends TaskFragment {
+@@ -720,6 +723,8 @@ class Task extends TaskFragment {
          mRemoveWithTaskOrganizer = _removeWithTaskOrganizer;
          mIsTrimmableFromRecents = true;
          EventLogTags.writeWmTaskCreated(mTaskId);
@@ -8678,7 +8678,7 @@ index b5698711e..9346b0e79 100644
      }
  
      static Task fromWindowContainerToken(WindowContainerToken token) {
-@@ -1648,6 +1653,7 @@ class Task extends TaskFragment {
+@@ -1659,6 +1664,7 @@ class Task extends TaskFragment {
                          !REMOVE_FROM_RECENTS, reason);
              }
          } else if (!mReuseTask && shouldRemoveSelfOnLastChildRemoval()) {
@@ -8686,7 +8686,7 @@ index b5698711e..9346b0e79 100644
              reason += ", last child = " + r + " in " + this;
              removeIfPossible(reason);
          }
-@@ -2136,9 +2142,11 @@ class Task extends TaskFragment {
+@@ -2147,9 +2153,11 @@ class Task extends TaskFragment {
              mTaskSupervisor.scheduleUpdateMultiWindowMode(this);
          }
  
@@ -8701,7 +8701,7 @@ index b5698711e..9346b0e79 100644
  
          // If the configuration supports persistent bounds (eg. Freeform), keep track of the
          // current (non-fullscreen) bounds for persistence.
-@@ -2215,6 +2223,7 @@ class Task extends TaskFragment {
+@@ -2226,6 +2234,7 @@ class Task extends TaskFragment {
  
          if (prevWindowingMode != getWindowingMode()) {
              taskDisplayArea.onRootTaskWindowingModeChanged(this);
@@ -8709,7 +8709,7 @@ index b5698711e..9346b0e79 100644
          }
  
          if (!isOrganized() && !getRequestedOverrideBounds().isEmpty() && mDisplayContent != null) {
-@@ -2234,6 +2243,10 @@ class Task extends TaskFragment {
+@@ -2245,6 +2254,10 @@ class Task extends TaskFragment {
              // placed properly when always on top state changes.
              taskDisplayArea.positionChildAt(POSITION_TOP, this, false /* includingParents */);
          }
@@ -8720,7 +8720,7 @@ index b5698711e..9346b0e79 100644
      }
  
      void resolveLeafTaskOnlyOverrideConfigs(Configuration newParentConfig, Rect previousBounds) {
-@@ -2404,6 +2417,9 @@ class Task extends TaskFragment {
+@@ -2415,6 +2428,9 @@ class Task extends TaskFragment {
              return prevWinMode != newWinMode || prevBounds.width() != newBounds.width()
                      || prevBounds.height() != newBounds.height();
          }
@@ -8730,7 +8730,7 @@ index b5698711e..9346b0e79 100644
          // Only do an animation into and out-of freeform mode for now. Other mode
          // transition animations are currently handled by system-ui.
          return (prevWinMode == WINDOWING_MODE_FREEFORM) != (newWinMode == WINDOWING_MODE_FREEFORM);
-@@ -3002,6 +3018,7 @@ class Task extends TaskFragment {
+@@ -3016,6 +3032,7 @@ class Task extends TaskFragment {
          if (forceResizable) return true;
          if (mForceNonResizeOverride) return false;
          return mForceResizeOverride || ActivityInfo.isResizeableMode(mResizeMode)
@@ -8738,21 +8738,16 @@ index b5698711e..9346b0e79 100644
                  || (mSupportsPictureInPicture && checkPictureInPictureSupport);
      }
  
-@@ -3369,6 +3386,13 @@ class Task extends TaskFragment {
-         return inMultiWindowMode() || !isTranslucentAndVisible();
-     }
- 
-+    @Override
-+    void prepareSurfaces() {
-+        super.prepareSurfaces();
+@@ -3396,6 +3413,8 @@ class Task extends TaskFragment {
+             mTaskInputSink.applyChangesToSurfaceIfChanged(getPendingTransaction());
+         }
+         super.prepareSurfaces();
 +        final SurfaceControl.Transaction t = getSyncTransaction();
 +        PopUpWindowController.getInstance().onPrepareSurfaces(this, t);
-+    }
-+
-     @Override
-     void updateSurfaceVisibility(SurfaceControl.Transaction t) {
-         t.setVisibility(mSurfaceControl, isVisible());
-@@ -4911,6 +4935,8 @@ class Task extends TaskFragment {
+     }
+ 
+     /**
+@@ -4935,6 +4954,8 @@ class Task extends TaskFragment {
                  super.setWindowingMode(windowingMode);
              }
  
@@ -8761,7 +8756,7 @@ index b5698711e..9346b0e79 100644
              if (creating) {
                  // Nothing else to do if we don't have a window container yet. E.g. call from ctor.
                  return;
-@@ -5250,7 +5276,7 @@ class Task extends TaskFragment {
+@@ -5274,7 +5295,7 @@ class Task extends TaskFragment {
              mInResumeTopActivity = true;
  
              if (isLeafTask()) {
@@ -8770,7 +8765,7 @@ index b5698711e..9346b0e79 100644
                      someActivityResumed = resumeTopActivityInnerLocked(prev, options, deferPause);
                  }
              } else {
-@@ -5869,7 +5895,7 @@ class Task extends TaskFragment {
+@@ -5893,7 +5914,7 @@ class Task extends TaskFragment {
          if (DEBUG_SWITCH) Slog.v(TAG_SWITCH, "moveTaskToFront: " + tr);
  
          final ActivityRecord pipCandidate = findEnterPipOnTaskSwitchCandidate(
@@ -8779,7 +8774,7 @@ index b5698711e..9346b0e79 100644
  
          if (tr != this && !tr.isDescendantOf(this)) {
              // nothing to do!
-@@ -5992,7 +6018,7 @@ class Task extends TaskFragment {
+@@ -6016,7 +6037,7 @@ class Task extends TaskFragment {
                  mAtmService.mChainTracker.endPartial();
                  return true;
              }
@@ -8788,7 +8783,7 @@ index b5698711e..9346b0e79 100644
                      mTransitionController, mWmService.mSyncEngine);
              // Guarantee that this gets its own transition by queueing on SyncEngine
              mTransitionController.startCollectOrQueue(transition,
-@@ -6009,7 +6035,9 @@ class Task extends TaskFragment {
+@@ -6033,7 +6054,9 @@ class Task extends TaskFragment {
                                  "taskToBack", transition);
                          mTransitionController.requestStartTransition(transition, tr,
                                  null /* remoteTransition */, null /* displayChange */);
@@ -8799,7 +8794,7 @@ index b5698711e..9346b0e79 100644
                          moveTaskToBackInner(tr, transition);
                          mAtmService.mChainTracker.endPartial();
                      });
-@@ -7187,4 +7215,13 @@ class Task extends TaskFragment {
+@@ -7211,4 +7234,13 @@ class Task extends TaskFragment {
                      .remove(mContainerSurface);
          }
      }
@@ -10487,7 +10482,7 @@ index 000000000..333b1d710
 +    }
 +}
 diff --git a/services/core/java/com/android/server/wm/Transition.java b/services/core/java/com/android/server/wm/Transition.java
-index ca0709864..d3c92e05b 100644
+index 9d3f453fb..fd016989a 100644
 --- a/services/core/java/com/android/server/wm/Transition.java
 +++ b/services/core/java/com/android/server/wm/Transition.java
 @@ -40,7 +40,9 @@ import static android.view.WindowManager.TRANSIT_CHANGE;
@@ -10535,7 +10530,7 @@ index ca0709864..d3c92e05b 100644
              // Ensure surfaceControls are re-parented back into the hierarchy.
              t.reparent(targetLeash, origParent);
              t.setLayer(targetLeash, target.getLastLayer());
-@@ -3174,6 +3190,12 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -3184,6 +3200,12 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
              change.setMode(info.getTransitMode(target));
              info.mReadyMode = change.getMode();
              change.setStartAbsBounds(info.mAbsoluteBounds);
@@ -10548,7 +10543,7 @@ index ca0709864..d3c92e05b 100644
              change.setFlags(info.getChangeFlags(target));
              info.mReadyFlags = change.getFlags();
              change.setDisplayId(info.mDisplayId, getDisplayId(target));
-@@ -3304,8 +3326,33 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -3314,8 +3336,33 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
                  change.setSnapshot(info.mSnapshot, info.mSnapshotLuma);
              }
  
@@ -10583,7 +10578,7 @@ index ca0709864..d3c92e05b 100644
          return out;
      }
  
-@@ -3766,6 +3813,10 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -3776,6 +3823,10 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
           */
          private static final int FLAG_BELOW_BACK_GESTURE_ANIMATION = 0x100;
  
@@ -10594,7 +10589,7 @@ index ca0709864..d3c92e05b 100644
          @IntDef(prefix = { "FLAG_" }, value = {
                  FLAG_NONE,
                  FLAG_SEAMLESS_ROTATION,
-@@ -3776,7 +3827,8 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -3786,7 +3837,8 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
                  FLAG_CHANGE_MOVED_TO_TOP,
                  FLAG_CHANGE_CONFIG_AT_END,
                  FLAG_BACK_GESTURE_ANIMATION,
@@ -10604,7 +10599,7 @@ index ca0709864..d3c92e05b 100644
          })
          @Retention(RetentionPolicy.SOURCE)
          @interface ChangeInfoFlag {}
-@@ -3826,6 +3878,11 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -3836,6 +3888,11 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
          @TransitionInfo.ChangeFlags
          int mReadyFlags;
  
@@ -10616,7 +10611,7 @@ index ca0709864..d3c92e05b 100644
          ChangeInfo(@NonNull WindowContainer origState) {
              mContainer = origState;
              mVisible = origState.isVisibleRequested();
-@@ -3892,7 +3949,7 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -3902,7 +3959,7 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
                  return TRANSIT_TO_FRONT;
              }
              final boolean nowVisible = wc.isVisibleRequested();
@@ -10625,7 +10620,7 @@ index ca0709864..d3c92e05b 100644
                  return TRANSIT_CHANGE;
              }
              if (mExistenceChanged) {
-@@ -4005,7 +4062,7 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -4015,7 +4072,7 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
              if ((mFlags & FLAG_CHANGE_CONFIG_AT_END) != 0) {
                  flags |= FLAG_CONFIG_AT_END;
              }
@@ -10634,7 +10629,7 @@ index ca0709864..d3c92e05b 100644
          }
  
          /** Whether the container fills its parent Task bounds before and after the transition. */
-@@ -4023,6 +4080,32 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
+@@ -4033,6 +4090,32 @@ class Transition implements BLASTSyncEngine.TransactionReadyListener {
              return isInvisibleOrFillingTaskBeforeTransition
                      && isInVisibleOrFillingTaskAfterTransition;
          }
@@ -12011,7 +12006,7 @@ index 000000000..854536db8
 +    }
 +}
 diff --git a/services/core/java/com/android/server/wm/WindowState.java b/services/core/java/com/android/server/wm/WindowState.java
-index 169f0592b..07a9573d8 100644
+index c90391bdb..f8edaf606 100644
 --- a/services/core/java/com/android/server/wm/WindowState.java
 +++ b/services/core/java/com/android/server/wm/WindowState.java
 @@ -1250,6 +1250,8 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
