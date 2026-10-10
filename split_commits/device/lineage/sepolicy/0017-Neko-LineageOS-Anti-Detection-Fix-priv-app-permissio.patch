@@ -1,0 +1,27 @@
+From 0e7eed84ed5c04381162cbcd899a5d7861031300 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 13:22:25 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Fix priv-app permission
+ files leak
+
+Change-Id: I3378bee03b50c5cf59148eefa4351ad019ad8aff
+---
+ common/private/file_contexts | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index 98312d4..fa3bdd5 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -23,6 +23,8 @@
+ /(product|system/product)/etc/vintf/compatibility_matrix\.system\.xml u:object_r:system_extension_vintf_file:s0
+ 
+ # Keep Lineage build metadata and feature permission XML out of untrusted app reach.
++/(system_ext|system/system_ext)/etc/permissions/Updater\.xml u:object_r:lineage_permission_file:s0
++/(system_ext|system/system_ext)/etc/permissions/privapp-permissions-dspvolume\.xml u:object_r:lineage_permission_file:s0
+ /(product|system/product)/etc/build-manifest\.xml u:object_r:lineage_permission_file:s0
+ /system/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+ /(system_ext|system/system_ext)/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+-- 
+2.43.0
+

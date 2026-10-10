@@ -1,0 +1,296 @@
+From b2077a0b6548c2a23463781de6f77b6904eb342f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 10:10:02 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection]Cleanup LineageOS feature
+ files
+
+Change-Id: I4b43d41234420e729313aa098c39e8cecd20a65e
+---
+ CleanSpec.mk                                  | 11 +++++++++
+ config/common.mk                              |  4 ----
+ config/lineage_sdk_common.mk                  | 10 ++------
+ config/permissions/org.lineageos.android.xml  | 20 ----------------
+ config/permissions/org.lineageos.hardware.xml |  4 ----
+ config/permissions/org.lineageos.health.xml   | 23 -------------------
+ .../permissions/org.lineageos.livedisplay.xml | 23 -------------------
+ config/permissions/org.lineageos.profiles.xml | 23 -------------------
+ config/permissions/org.lineageos.settings.xml | 19 ---------------
+ config/permissions/org.lineageos.trust.xml    | 23 -------------------
+ ...ions.xml => system-extension-features.xml} | 16 +++++++++----
+ 11 files changed, 24 insertions(+), 152 deletions(-)
+ create mode 100644 CleanSpec.mk
+ delete mode 100644 config/permissions/org.lineageos.android.xml
+ delete mode 100644 config/permissions/org.lineageos.hardware.xml
+ delete mode 100644 config/permissions/org.lineageos.health.xml
+ delete mode 100644 config/permissions/org.lineageos.livedisplay.xml
+ delete mode 100644 config/permissions/org.lineageos.profiles.xml
+ delete mode 100644 config/permissions/org.lineageos.settings.xml
+ delete mode 100644 config/permissions/org.lineageos.trust.xml
+ rename config/permissions/{org.lineageos.globalactions.xml => system-extension-features.xml} (57%)
+
+diff --git a/CleanSpec.mk b/CleanSpec.mk
+new file mode 100644
+index 0000000..f5539c9
+--- /dev/null
++++ b/CleanSpec.mk
+@@ -0,0 +1,11 @@
++# Remove the obsolete feature filenames from incremental product images.
++# Clean steps are append-only; do not reorder or remove existing entries.
++$(call add-clean-step, rm -f \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.android.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.globalactions.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.hardware.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.health.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.livedisplay.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.profiles.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.settings.xml \
++    $(TARGET_OUT_PRODUCT)/etc/permissions/org.lineageos.trust.xml)
+diff --git a/config/common.mk b/config/common.mk
+index e4a69fb..bf9059c 100644
+--- a/config/common.mk
++++ b/config/common.mk
+@@ -81,10 +81,6 @@ PRODUCT_PACKAGES += \
+ PRODUCT_PACKAGES += \
+     MiuiSecurityCenter
+ 
+-# This is Lineage!
+-PRODUCT_COPY_FILES += \
+-    vendor/lineage/config/permissions/org.lineageos.android.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.android.xml
+-
+ # Enforce privapp-permissions whitelist
+ PRODUCT_PRODUCT_PROPERTIES += \
+     ro.control_privapp_permissions=enforce
+diff --git a/config/lineage_sdk_common.mk b/config/lineage_sdk_common.mk
+index eb9a82f..426758a 100644
+--- a/config/lineage_sdk_common.mk
++++ b/config/lineage_sdk_common.mk
+@@ -1,13 +1,7 @@
+ # Permissions for lineage sdk services
+ PRODUCT_COPY_FILES += \
+-    vendor/lineage/config/permissions/org.lineageos.globalactions.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.globalactions.xml \
+-    vendor/lineage/config/permissions/org.lineageos.hardware.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.hardware.xml \
+-    vendor/lineage/config/permissions/org.lineageos.health.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.health.xml \
+-    vendor/lineage/config/permissions/org.lineageos.livedisplay.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.livedisplay.xml \
+-    vendor/lineage/config/permissions/com.android.pushbroker.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/com.android.pushbroker.xml \
+-    vendor/lineage/config/permissions/org.lineageos.profiles.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.profiles.xml \
+-    vendor/lineage/config/permissions/org.lineageos.settings.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.settings.xml \
+-    vendor/lineage/config/permissions/org.lineageos.trust.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/org.lineageos.trust.xml
++    vendor/lineage/config/permissions/system-extension-features.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/system-extension-features.xml \
++    vendor/lineage/config/permissions/com.android.pushbroker.xml:$(TARGET_COPY_OUT_PRODUCT)/etc/permissions/com.android.pushbroker.xml
+ 
+ # Lineage Platform Library
+ PRODUCT_PACKAGES += \
+diff --git a/config/permissions/org.lineageos.android.xml b/config/permissions/org.lineageos.android.xml
+deleted file mode 100644
+index 816ded9..0000000
+--- a/config/permissions/org.lineageos.android.xml
++++ /dev/null
+@@ -1,20 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2012 The CyanogenMod Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<!-- This feature shows that this is LineageOS -->
+-<permissions>
+-    <feature name="org.lineageos.android" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.hardware.xml b/config/permissions/org.lineageos.hardware.xml
+deleted file mode 100644
+index 7c79e82..0000000
+--- a/config/permissions/org.lineageos.hardware.xml
++++ /dev/null
+@@ -1,4 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<permissions>
+-    <feature name="org.lineageos.hardware" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.health.xml b/config/permissions/org.lineageos.health.xml
+deleted file mode 100644
+index 2825d76..0000000
+--- a/config/permissions/org.lineageos.health.xml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2023 The LineageOS Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<permissions>
+-    <!-- The feature listed here coincides with the HealthInterfaceService declared as
+-        part of the external lineage service init in SystemServer. If this xml isn't present
+-        on the device, the service will not be published as a binder service!
+-    -->
+-    <feature name="org.lineageos.health" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.livedisplay.xml b/config/permissions/org.lineageos.livedisplay.xml
+deleted file mode 100644
+index 22adee5..0000000
+--- a/config/permissions/org.lineageos.livedisplay.xml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2016 The CyanogenMod Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<permissions>
+-    <!-- The feature listed here coincides with the PerformanceManagerService declared as
+-        part of the external lineage service init in SystemServer. If this xml isn't present
+-        on the device, the service will not be published as a binder service!
+-    -->
+-    <feature name="org.lineageos.livedisplay" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.profiles.xml b/config/permissions/org.lineageos.profiles.xml
+deleted file mode 100644
+index 2e55912..0000000
+--- a/config/permissions/org.lineageos.profiles.xml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2016 The CyanogenMod Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<permissions>
+-    <!-- The feature listed here coincides with the ProfileManagerService declared as
+-         part of the external lineage service init in SystemServer. If this xml isn't present
+-         on the device, the service will not be published as a binder service!
+-     -->
+-    <feature name="org.lineageos.profiles" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.settings.xml b/config/permissions/org.lineageos.settings.xml
+deleted file mode 100644
+index f9dc00f..0000000
+--- a/config/permissions/org.lineageos.settings.xml
++++ /dev/null
+@@ -1,19 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2018 The LineageOS Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<permissions>
+-    <feature name="org.lineageos.settings" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.trust.xml b/config/permissions/org.lineageos.trust.xml
+deleted file mode 100644
+index 12b5b76..0000000
+--- a/config/permissions/org.lineageos.trust.xml
++++ /dev/null
+@@ -1,23 +0,0 @@
+-<?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2018 The LineageOS Project
+-
+-     Licensed under the Apache License, Version 2.0 (the "License");
+-     you may not use this file except in compliance with the License.
+-     You may obtain a copy of the License at
+-
+-          http://www.apache.org/licenses/LICENSE-2.0
+-
+-     Unless required by applicable law or agreed to in writing, software
+-     distributed under the License is distributed on an "AS IS" BASIS,
+-     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-     See the License for the specific language governing permissions and
+-     limitations under the License.
+--->
+-
+-<permissions>
+-    <!-- The feature listed here coincides with the TrustInterfaceService declared as
+-        part of the external lineage service init in SystemServer. If this xml isn't present
+-        on the device, the service will not be published as a binder service!
+-    -->
+-    <feature name="org.lineageos.trust" />
+-</permissions>
+diff --git a/config/permissions/org.lineageos.globalactions.xml b/config/permissions/system-extension-features.xml
+similarity index 57%
+rename from config/permissions/org.lineageos.globalactions.xml
+rename to config/permissions/system-extension-features.xml
+index 4e03183..67b7b8e 100644
+--- a/config/permissions/org.lineageos.globalactions.xml
++++ b/config/permissions/system-extension-features.xml
+@@ -1,5 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- Copyright (C) 2021 The LineageOS Project
++<!--
++     Copyright (C) 2012, 2016 The CyanogenMod Project
++     Copyright (C) 2018, 2021, 2023, 2026 The LineageOS Project
+ 
+      Licensed under the Apache License, Version 2.0 (the "License");
+      you may not use this file except in compliance with the License.
+@@ -15,9 +17,13 @@
+ -->
+ 
+ <permissions>
+-    <!-- The feature listed here coincides with the GlobalActionsManagerService declared as
+-        part of the external lineage service init in SystemServer. If this xml isn't present
+-        on the device, the service will not be published as a binder service!
+-    -->
++    <!-- Keep the declarations used to start system extension services. -->
++    <feature name="org.lineageos.android" />
+     <feature name="org.lineageos.globalactions" />
++    <feature name="org.lineageos.hardware" />
++    <feature name="org.lineageos.health" />
++    <feature name="org.lineageos.livedisplay" />
++    <feature name="org.lineageos.profiles" />
++    <feature name="org.lineageos.settings" />
++    <feature name="org.lineageos.trust" />
+ </permissions>
+-- 
+2.43.0
+

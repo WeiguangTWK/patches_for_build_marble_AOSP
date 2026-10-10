@@ -1,0 +1,28 @@
+From 3e4d19a47cf056cf4e7c0ebd2ea132ad87de8ac1 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 11:11:02 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Fix SELinux label
+ hal_lineage_backend_radio_hwservice leak
+
+Change-Id: I76b9d91895ee6c7d12bbf72ebe1ae0c384bbdb3c
+---
+ common/private/file_contexts | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index df6896d..98312d4 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -10,6 +10,9 @@
+ # Keep system_ext policy blob out of untrusted app reach.
+ /(system_ext|system/system_ext)/etc/selinux/system_ext_sepolicy\.cil u:object_r:sepolicy_file:s0
+ 
++# Label the vendor hwservice mapping for its existing SELinux consumer.
++/(vendor|system/vendor)/etc/selinux/vendor_hwservice_contexts u:object_r:hwservice_contexts_file:s0
++
+ # Keep Lineage platform framework artifacts out of untrusted app reach.
+ /system/framework/org\.system\.platform-res\.apk u:object_r:system_extension_resource_file:s0
+ /system/framework/miui-framework\.jar u:object_r:lineage_platform_framework_file:s0
+-- 
+2.43.0
+

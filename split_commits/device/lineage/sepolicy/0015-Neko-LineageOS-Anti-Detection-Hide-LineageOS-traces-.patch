@@ -1,0 +1,69 @@
+From 205c2d9170959a67343201a6966359adb83c41de Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 10:44:01 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection]Hide LineageOS traces in
+ compatibility_matrix files
+
+Change-Id: I73769bcd40535c933d65c5861202dada6613a991
+---
+ common/private/file.te                   |  1 +
+ common/private/file_contexts             |  3 +++
+ common/private/system_extension_vintf.te | 21 +++++++++++++++++++++
+ 3 files changed, 25 insertions(+)
+ create mode 100644 common/private/system_extension_vintf.te
+
+diff --git a/common/private/file.te b/common/private/file.te
+index 30618ba..74c5d09 100644
+--- a/common/private/file.te
++++ b/common/private/file.te
+@@ -3,5 +3,6 @@ type sysfs_perdev_minors, fs_type, sysfs_type;
+ type lineage_platform_framework_file, file_type, system_file_type;
+ type system_extension_resource_file, file_type, system_file_type;
+ type system_extension_feature_file, file_type, system_file_type;
++type system_extension_vintf_file, file_type, system_file_type;
+ type lineage_permission_file, file_type, system_file_type;
+ type lineage_privapp_pkg_file, file_type, system_file_type;
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index f5541a6..df6896d 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -16,6 +16,9 @@
+ /system/framework/oat/arm64/miui-framework\.vdex u:object_r:lineage_platform_framework_file:s0
+ /system/framework/oat/arm64/miui-framework\.odex u:object_r:lineage_platform_framework_file:s0
+ 
++# Keep the product framework matrix available to trusted VINTF consumers.
++/(product|system/product)/etc/vintf/compatibility_matrix\.system\.xml u:object_r:system_extension_vintf_file:s0
++
+ # Keep Lineage build metadata and feature permission XML out of untrusted app reach.
+ /(product|system/product)/etc/build-manifest\.xml u:object_r:lineage_permission_file:s0
+ /system/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+diff --git a/common/private/system_extension_vintf.te b/common/private/system_extension_vintf.te
+new file mode 100644
+index 0000000..4fb4e0f
+--- /dev/null
++++ b/common/private/system_extension_vintf.te
+@@ -0,0 +1,21 @@
++# Preserve VINTF compatibility checks and system diagnostics while restricting
++# direct access to the product framework matrix from applications.
++allow {
++    appdomain
++    coredomain
++    -untrusted_app_all
++    -isolated_app_all
++    -sdk_sandbox_all
++    -ephemeral_app
++    -app_zygote
++    -webview_zygote
++} system_extension_vintf_file:file r_file_perms;
++
++neverallow {
++    untrusted_app_all
++    isolated_app_all
++    sdk_sandbox_all
++    ephemeral_app
++    app_zygote
++    webview_zygote
++} system_extension_vintf_file:file rx_file_perms;
+-- 
+2.43.0
+

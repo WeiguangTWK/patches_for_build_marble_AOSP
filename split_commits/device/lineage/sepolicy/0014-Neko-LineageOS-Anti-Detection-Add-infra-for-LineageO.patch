@@ -1,0 +1,66 @@
+From a621178ac252d87e65800cfb120aefdfcd46d684 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 09:52:33 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Add infra for LineageOS
+ feature visibility hide
+
+Change-Id: I7e5314871a6cf4f137282577196ece9dd8929130
+---
+ common/private/file.te                      |  1 +
+ common/private/file_contexts                |  9 +--------
+ common/private/system_extension_features.te | 12 ++++++++++++
+ 3 files changed, 14 insertions(+), 8 deletions(-)
+ create mode 100644 common/private/system_extension_features.te
+
+diff --git a/common/private/file.te b/common/private/file.te
+index bd60ba3..30618ba 100644
+--- a/common/private/file.te
++++ b/common/private/file.te
+@@ -2,5 +2,6 @@ type sdcard_posix, sdcard_type, sdcard_posix_contextmount_type, fs_type, mlstrus
+ type sysfs_perdev_minors, fs_type, sysfs_type;
+ type lineage_platform_framework_file, file_type, system_file_type;
+ type system_extension_resource_file, file_type, system_file_type;
++type system_extension_feature_file, file_type, system_file_type;
+ type lineage_permission_file, file_type, system_file_type;
+ type lineage_privapp_pkg_file, file_type, system_file_type;
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index b9133d0..f5541a6 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -21,14 +21,7 @@
+ /system/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+ /(system_ext|system/system_ext)/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+ /(product|system/product)/etc/build_flags\.json u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.settings\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.trust\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.profiles\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.android\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.hardware\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.globalactions\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.livedisplay\.xml u:object_r:lineage_permission_file:s0
+-/(product|system/product)/etc/permissions/org\.lineageos\.health\.xml u:object_r:lineage_permission_file:s0
++/(product|system/product)/etc/permissions/system-extension-features\.xml u:object_r:system_extension_feature_file:s0
+ /(system_ext|system/system_ext)/etc/permissions/LineageParts\.xml u:object_r:lineage_permission_file:s0
+ /(system_ext|system/system_ext)/etc/permissions/LineageSettingsProvider\.xml u:object_r:lineage_permission_file:s0
+ /(system_ext|system/system_ext)/etc/permissions/LineageSetupWizard\.xml u:object_r:lineage_permission_file:s0
+diff --git a/common/private/system_extension_features.te b/common/private/system_extension_features.te
+new file mode 100644
+index 0000000..68ab90b
+--- /dev/null
++++ b/common/private/system_extension_features.te
+@@ -0,0 +1,12 @@
++# SystemConfig consumes these declarations; trusted system applications may also read them.
++allow { init system_server platform_app system_app } system_extension_feature_file:file r_file_perms;
++
++# Renaming the XML must not expose its feature names through file contents or child preload.
++neverallow {
++    untrusted_app_all
++    isolated_app_all
++    sdk_sandbox_all
++    ephemeral_app
++    app_zygote
++    webview_zygote
++} system_extension_feature_file:file rx_file_perms;
+-- 
+2.43.0
+

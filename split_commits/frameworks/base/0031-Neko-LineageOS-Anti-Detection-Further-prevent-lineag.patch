@@ -1,0 +1,756 @@
+From 94c49a2d6881a4fac449bc2c4e1567d1ea564400 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 08:08:01 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Further prevent
+ lineage.platform/Lineage SDK res visible from user apps
+
+Change-Id: I7b4015db84be8773033d0e6b4344d487f65f1918
+---
+ core/java/android/content/res/ApkAssets.java  |   7 +
+ .../android/content/res/AssetManager.java     | 141 +++++++----
+ .../com/android/internal/os/ExecInit.java     |   9 +-
+ .../com/android/internal/os/WrapperInit.java  |  27 ++-
+ core/java/com/android/internal/os/Zygote.java |   8 +-
+ .../android/internal/os/ZygoteConnection.java |   6 +-
+ .../com/android/internal/os/ZygoteInit.java   |   6 +-
+ core/jni/android_content_res_ApkAssets.cpp    |  27 +++
+ core/jni/com_android_internal_os_Zygote.cpp   | 223 ------------------
+ libs/androidfw/AssetManager.cpp               |   4 +
+ .../com/android/server/am/ProcessList.java    |   8 +
+ 11 files changed, 181 insertions(+), 285 deletions(-)
+
+diff --git a/core/java/android/content/res/ApkAssets.java b/core/java/android/content/res/ApkAssets.java
+index d08b876ec..8c1038abf 100644
+--- a/core/java/android/content/res/ApkAssets.java
++++ b/core/java/android/content/res/ApkAssets.java
+@@ -77,6 +77,13 @@ public final class ApkAssets {
+      */
+     private static final int PROPERTY_OVERLAY = 1 << 3;
+ 
++    // Reads only idmap metadata; it must not load the overlay APK into the process.
++    static String getOverlayTargetPath(String idmapPath) throws IOException {
++        return nativeGetOverlayTargetPath(idmapPath);
++    }
++
++    private static native String nativeGetOverlayTargetPath(String idmapPath) throws IOException;
++
+     /**
+      * The apk assets is owned by the application running in this process and incremental crash
+      * protections for this APK must be disabled.
+diff --git a/core/java/android/content/res/AssetManager.java b/core/java/android/content/res/AssetManager.java
+index 5ad67845a..075ad8c5a 100644
+--- a/core/java/android/content/res/AssetManager.java
++++ b/core/java/android/content/res/AssetManager.java
+@@ -40,8 +40,6 @@ import android.os.ParcelFileDescriptor;
+ import android.ravenwood.annotation.RavenwoodKeepWholeClass;
+ import android.ravenwood.annotation.RavenwoodReplace;
+ import android.ravenwood.annotation.RavenwoodThrow;
+-import android.system.ErrnoException;
+-import android.system.Os;
+ import android.util.ArrayMap;
+ import android.util.ArraySet;
+ import android.util.Log;
+@@ -51,7 +49,6 @@ import android.util.TypedValue;
+ import com.android.internal.annotations.GuardedBy;
+ import com.android.internal.annotations.VisibleForTesting;
+ import com.android.internal.content.om.OverlayConfig;
+-import com.android.internal.os.ExecInit;
+ import com.android.internal.ravenwood.RavenwoodHelperBridge;
+ 
+ import java.io.FileDescriptor;
+@@ -272,11 +269,72 @@ public final class AssetManager implements AutoCloseable {
+         }
+     }
+ 
+-    /** Cached by system_server for app processes that discard Zygote state through exec. @hide */
++    /** Cached immutable idmap metadata for fresh application runtimes. @hide */
+     public static volatile String[] systemIdmapPaths_;
+ 
++    @GuardedBy("sSync") private static boolean sExtensionResourcesEnabled;
++    @GuardedBy("sSync") private static boolean sFreshRuntime;
++    @GuardedBy("sSync") private static String[] sFreshIdmapPaths;
++    @GuardedBy("sSync") private static String[] sExtensionIdmapPaths = new String[0];
++
++    /** Restore resource policy before a fresh runtime starts preloading. @hide */
++    public static void initializeSystemExtensionResources(boolean enabled) {
++        initializeSystemExtensionResources(enabled, null);
++    }
++
++    /** A wrapper may start system_server before ActivityManager is available. @hide */
++    public static void initializeSystemExtensionResources(boolean enabled, String[] idmapPaths) {
++        synchronized (sSync) {
++            sFreshRuntime = true;
++            sFreshIdmapPaths = idmapPaths == null ? null : idmapPaths.clone();
++            enableSystemExtensionResources(enabled);
++        }
++    }
++
++    /** Called after specializing a child, before application code or child-zygote preload. @hide */
++    public static void enableSystemExtensionResources(boolean enabled) {
++        synchronized (sSync) {
++            if (!enabled || sExtensionResourcesEnabled) {
++                return;
++            }
++            if (sSystem != null) {
++                try {
++                    final ArrayList<ApkAssets> assets = new ArrayList<>(
++                            Arrays.asList(sSystemApkAssets));
++                    appendSystemExtensionAssets(assets);
++                    // Preserve every inherited framework cookie by appending to the end.
++                    sSystemApkAssets = assets.toArray(new ApkAssets[0]);
++                    sSystemApkAssetsSet = new ArraySet<>(assets);
++                    sSystem.setApkAssets(sSystemApkAssets, true /* invalidateCaches */);
++                } catch (IOException e) {
++                    throw new IllegalStateException("Failed to append system resources", e);
++                }
++            }
++            sExtensionResourcesEnabled = true;
++        }
++    }
++
++    @GuardedBy("sSync")
++    private static void appendSystemExtensionAssets(ArrayList<ApkAssets> assets)
++            throws IOException {
++        final int flags = ApkAssets.PROPERTY_SYSTEM | ApkAssets.PROPERTY_LINEAGE_SYSTEM;
++        final int originalSize = assets.size();
++        try {
++            assets.add(ApkAssets.loadFromPath(getLineageApkPath(), flags));
++            for (String path : sExtensionIdmapPaths) {
++                assets.add(ApkAssets.loadOverlayFromPath(path, ApkAssets.PROPERTY_SYSTEM));
++            }
++        } catch (IOException e) {
++            for (int i = assets.size() - 1; i >= originalSize; i--) {
++                assets.remove(i).close();
++            }
++            throw e;
++        }
++    }
++
+     /**
+-     * This must be called from Zygote so that system assets are shared by all applications.
++     * The primary Zygote loads only framework resources. Extension resources are opened
++     * in authorized children, so other children never inherit their mappings or caches.
+      * @hide
+      */
+     @GuardedBy("sSync")
+@@ -286,62 +344,45 @@ public final class AssetManager implements AutoCloseable {
+         if (sSystem != null && !reinitialize) {
+             return;
+         }
+-
+         try {
+-            final ArrayList<ApkAssets> apkAssets = new ArrayList<>();
+-            apkAssets.add(ApkAssets.loadFromPath(frameworkPath, ApkAssets.PROPERTY_SYSTEM));
+-
+-            // TODO(Ravenwood): overlay support?
+-            final String[] systemIdmapPaths;
++            final ArrayList<ApkAssets> assets = new ArrayList<>();
++            assets.add(ApkAssets.loadFromPath(frameworkPath, ApkAssets.PROPERTY_SYSTEM));
++            final String[] paths;
+             if (RavenwoodHelperBridge.getInstance().isRunningOnRavenwood()) {
+-                systemIdmapPaths = new String[0];
+-            } else if (ExecInit.isExecSpawned) {
+-                String[] cachedPaths;
++                paths = new String[0];
++            } else if (sFreshIdmapPaths != null) {
++                paths = sFreshIdmapPaths;
++            } else if (sFreshRuntime) {
+                 try {
+-                    cachedPaths = ActivityManager.getService().getSystemIdmapPaths();
+-                    Objects.requireNonNull(cachedPaths);
+-                } catch (Throwable t) {
+-                    Log.e(TAG, "Unable to retrieve system idmap paths", t);
+-                    cachedPaths = new String[0];
++                    paths = Objects.requireNonNull(
++                            ActivityManager.getService().getSystemIdmapPaths());
++                } catch (android.os.RemoteException e) {
++                    throw new IOException("Unable to retrieve system idmap metadata", e);
+                 }
+-                systemIdmapPaths = cachedPaths;
+             } else {
+-                systemIdmapPaths = OverlayConfig.getZygoteInstance()
++                paths = OverlayConfig.getZygoteInstance()
+                         .createImmutableFrameworkIdmapsInZygote();
+-                systemIdmapPaths_ = systemIdmapPaths;
+-            }
+-            for (String idmapPath : systemIdmapPaths) {
+-                apkAssets.add(ApkAssets.loadOverlayFromPath(idmapPath, ApkAssets.PROPERTY_SYSTEM));
+             }
+-            final int lineageFlags =
+-                    ApkAssets.PROPERTY_SYSTEM | ApkAssets.PROPERTY_LINEAGE_SYSTEM;
+-            if (ExecInit.isExecSpawned) {
+-                final String fdString = Os.getenv(ExecInit.SYSTEM_RESOURCES_FD);
+-                final String sizeString = Os.getenv(ExecInit.SYSTEM_RESOURCES_SIZE);
+-                if (fdString == null || sizeString == null) {
+-                    throw new IOException("Missing exec system resource descriptor");
+-                }
+-                final int fd = Integer.parseInt(fdString);
+-                final long size = Long.parseLong(sizeString);
+-                try {
+-                    Os.unsetenv(ExecInit.SYSTEM_RESOURCES_FD);
+-                    Os.unsetenv(ExecInit.SYSTEM_RESOURCES_SIZE);
+-                } catch (ErrnoException e) {
+-                    throw new IOException("Failed to clear system resource environment", e);
+-                }
+-                try (ParcelFileDescriptor resourceFd = ParcelFileDescriptor.adoptFd(fd)) {
+-                    apkAssets.add(ApkAssets.loadFromFd(resourceFd.getFileDescriptor(),
+-                            "system-resources", 0, size, lineageFlags, null));
++            systemIdmapPaths_ = paths;
++            final ArrayList<String> extensionPaths = new ArrayList<>();
++            for (String path : paths) {
++                if (getLineageApkPath().equals(ApkAssets.getOverlayTargetPath(path))) {
++                    // Parsing metadata does not load the overlay APK, and releases its idmap map.
++                    extensionPaths.add(path);
++                } else {
++                    assets.add(ApkAssets.loadOverlayFromPath(path, ApkAssets.PROPERTY_SYSTEM));
+                 }
+-            } else {
+-                apkAssets.add(ApkAssets.loadFromPath(getLineageApkPath(), lineageFlags));
+             }
+-            sSystemApkAssetsSet = new ArraySet<>(apkAssets);
+-            sSystemApkAssets = apkAssets.toArray(new ApkAssets[0]);
++            sExtensionIdmapPaths = extensionPaths.toArray(new String[0]);
++            if (sExtensionResourcesEnabled) {
++                appendSystemExtensionAssets(assets);
++            }
++            sSystemApkAssets = assets.toArray(new ApkAssets[0]);
++            sSystemApkAssetsSet = new ArraySet<>(assets);
+             if (sSystem == null) {
+-                sSystem = new AssetManager(true /*sentinel*/);
++                sSystem = new AssetManager(true /* sentinel */);
+             }
+-            sSystem.setApkAssets(sSystemApkAssets, false /*invalidateCaches*/);
++            sSystem.setApkAssets(sSystemApkAssets, reinitialize /* invalidateCaches */);
+         } catch (IOException e) {
+             throw new IllegalStateException("Failed to create system AssetManager", e);
+         }
+diff --git a/core/java/com/android/internal/os/ExecInit.java b/core/java/com/android/internal/os/ExecInit.java
+index 23b8b4099..18924215e 100644
+--- a/core/java/com/android/internal/os/ExecInit.java
++++ b/core/java/com/android/internal/os/ExecInit.java
+@@ -35,15 +35,12 @@ public final class ExecInit {
+ 
+     public static final String IS_EXEC_SPAWNED_APP_PROCESS =
+             "IS_EXEC_SPAWNED_APP_PROCESS";
+-    public static final String SYSTEM_RESOURCES_FD =
+-            "EXEC_SYSTEM_RESOURCES_FD";
+-    public static final String SYSTEM_RESOURCES_SIZE =
+-            "EXEC_SYSTEM_RESOURCES_SIZE";
+-
+     public static void main(String[] args) {
+         final int targetSdkVersion = Integer.parseInt(args[0], 10);
+         final int runtimeFlags = Integer.parseInt(args[1], 10);
+         isExecSpawned = true;
++        android.content.res.AssetManager.initializeSystemExtensionResources(
++                (runtimeFlags & Zygote.USE_SYSTEM_EXTENSION_RESOURCES) != 0);
+ 
+         // The exec discarded Zygote preloaded Java state. Recreate the subset expected by apps.
+         ZygoteInit.preload(new TimingsTraceLog("ExecInitTiming", Trace.TRACE_TAG_DALVIK), false);
+@@ -52,7 +49,7 @@ public final class ExecInit {
+         System.arraycopy(args, 2, runtimeArgs, 0, runtimeArgs.length);
+         final Runnable r = execInit(targetSdkVersion, runtimeArgs);
+ 
+-        Zygote.nativeHandleRuntimeFlags(runtimeFlags);
++        Zygote.nativeHandleRuntimeFlags(runtimeFlags & ~Zygote.USE_SYSTEM_EXTENSION_RESOURCES);
+         pendingExecInit = r;
+     }
+ 
+diff --git a/core/java/com/android/internal/os/WrapperInit.java b/core/java/com/android/internal/os/WrapperInit.java
+index 928796396..3b62284cd 100644
+--- a/core/java/com/android/internal/os/WrapperInit.java
++++ b/core/java/com/android/internal/os/WrapperInit.java
+@@ -57,14 +57,28 @@ public class WrapperInit {
+      *
+      * The second argument is the target SDK version for the app.
+      *
++     * The third argument is 1 for an authorized system resource consumer, or 0 otherwise.
++     *
++     * The fourth argument is the count of inherited idmap paths, followed by those paths.
+      * The remaining arguments are passed to the runtime.
+      *
+      * @param args The command-line arguments.
+      */
+     public static void main(String[] args) {
++        if (args.length < 4) {
++            throw new IllegalArgumentException("Missing wrapper resource policy metadata");
++        }
+         // Parse our mandatory arguments.
+         int fdNum = Integer.parseInt(args[0], 10);
+         int targetSdkVersion = Integer.parseInt(args[1], 10);
++        final int idmapCount = Integer.parseInt(args[3], 10);
++        if (idmapCount < 0 || idmapCount > args.length - 4) {
++            throw new IllegalArgumentException("Invalid inherited idmap count");
++        }
++        final int runtimeArgsStart = 4 + idmapCount;
++        final String[] idmapPaths = java.util.Arrays.copyOfRange(args, 4, runtimeArgsStart);
++        android.content.res.AssetManager.initializeSystemExtensionResources(
++                "1".equals(args[2]), idmapPaths);
+ 
+         // Tell the Zygote what our actual PID is (since it only knows about the
+         // wrapper that it directly forked).
+@@ -87,8 +101,8 @@ public class WrapperInit {
+                 Trace.TRACE_TAG_DALVIK));
+ 
+         // Launch the application.
+-        String[] runtimeArgs = new String[args.length - 2];
+-        System.arraycopy(args, 2, runtimeArgs, 0, runtimeArgs.length);
++        String[] runtimeArgs = new String[args.length - runtimeArgsStart];
++        System.arraycopy(args, runtimeArgsStart, runtimeArgs, 0, runtimeArgs.length);
+         Runnable r = wrapperInit(targetSdkVersion, runtimeArgs);
+ 
+         r.run();
+@@ -103,10 +117,11 @@ public class WrapperInit {
+      * @param targetSdkVersion The target SDK version for the app.
+      * @param pipeFd The pipe to which the application's pid should be written, or null if none.
+      * @param args Arguments for {@link RuntimeInit#main}.
++     * @param useExtensionResources Whether to restore the authorized resource policy.
+      */
+     public static void execApplication(String invokeWith, String niceName,
+             int targetSdkVersion, String instructionSet, FileDescriptor pipeFd,
+-            String[] args) {
++            String[] args, boolean useExtensionResources) {
+         StringBuilder command = new StringBuilder(invokeWith);
+ 
+         final String appProcess;
+@@ -134,6 +149,12 @@ public class WrapperInit {
+         command.append(pipeFd != null ? pipeFd.getInt$() : 0);
+         command.append(' ');
+         command.append(targetSdkVersion);
++        command.append(useExtensionResources ? " 1" : " 0");
++        // Include metadata explicitly: a system_server wrapper cannot call its own AMS yet.
++        final String[] idmapPaths = java.util.Objects.requireNonNull(
++                android.content.res.AssetManager.systemIdmapPaths_);
++        command.append(' ').append(idmapPaths.length);
++        Zygote.appendQuotedShellArgs(command, idmapPaths);
+         Zygote.appendQuotedShellArgs(command, args);
+         preserveCapabilities();
+         Zygote.execShell(command.toString());
+diff --git a/core/java/com/android/internal/os/Zygote.java b/core/java/com/android/internal/os/Zygote.java
+index 51847c647..de85c5b44 100644
+--- a/core/java/com/android/internal/os/Zygote.java
++++ b/core/java/com/android/internal/os/Zygote.java
+@@ -207,6 +207,9 @@ public final class Zygote {
+     /** Start this process with Scudo instead of the default native allocator. */
+     public static final int USE_SCUDO_ALLOCATOR = 1 << 29;
+ 
++    /** Preserve system extension resources for an authorized system consumer. @hide */
++    public static final int USE_SYSTEM_EXTENSION_RESOURCES = 1 << 27;
++
+     // Keep this in sync with isSimpleForkCommand() in ZygoteCommandBuffer.cpp.
+     public static final int RUNTIME_FLAGS_DEPENDENT_ON_EXEC_SPAWNING = USE_SCUDO_ALLOCATOR;
+ 
+@@ -1181,8 +1184,11 @@ public final class Zygote {
+     @SuppressWarnings("unused")
+     private static void callPostForkChildHooks(int runtimeFlags, boolean isSystemServer,
+             boolean isZygote, String instructionSet) {
+-        runtimeFlags &= ~USE_SCUDO_ALLOCATOR;
++        final boolean useExtensionResources = isSystemServer || (!isZygote
++                && (runtimeFlags & USE_SYSTEM_EXTENSION_RESOURCES) != 0);
++        runtimeFlags &= ~(USE_SCUDO_ALLOCATOR | USE_SYSTEM_EXTENSION_RESOURCES);
+         ZygoteHooks.postForkChild(runtimeFlags, isSystemServer, isZygote, instructionSet);
++        android.content.res.AssetManager.enableSystemExtensionResources(useExtensionResources);
+     }
+ 
+     /**
+diff --git a/core/java/com/android/internal/os/ZygoteConnection.java b/core/java/com/android/internal/os/ZygoteConnection.java
+index 0a3364521..a954be3f7 100644
+--- a/core/java/com/android/internal/os/ZygoteConnection.java
++++ b/core/java/com/android/internal/os/ZygoteConnection.java
+@@ -190,6 +190,9 @@ class ZygoteConnection {
+                 }
+ 
+                 Zygote.applyUidSecurityPolicy(parsedArgs, peer);
++                if (peer.getUid() != Process.SYSTEM_UID) {
++                    parsedArgs.mRuntimeFlags &= ~Zygote.USE_SYSTEM_EXTENSION_RESOURCES;
++                }
+                 Zygote.applyInvokeWithSecurityPolicy(parsedArgs, peer);
+ 
+                 Zygote.applyDebuggerSystemProperty(parsedArgs);
+@@ -524,7 +527,8 @@ class ZygoteConnection {
+             WrapperInit.execApplication(parsedArgs.mInvokeWith,
+                     parsedArgs.mNiceName, parsedArgs.mTargetSdkVersion,
+                     VMRuntime.getCurrentInstructionSet(),
+-                    pipeFd, parsedArgs.mRemainingArgs);
++                    pipeFd, parsedArgs.mRemainingArgs,
++                    (parsedArgs.mRuntimeFlags & Zygote.USE_SYSTEM_EXTENSION_RESOURCES) != 0);
+ 
+             // Should not get here.
+             throw new IllegalStateException("WrapperInit.execApplication unexpectedly returned");
+diff --git a/core/java/com/android/internal/os/ZygoteInit.java b/core/java/com/android/internal/os/ZygoteInit.java
+index 5d780bb78..542af62de 100644
+--- a/core/java/com/android/internal/os/ZygoteInit.java
++++ b/core/java/com/android/internal/os/ZygoteInit.java
+@@ -550,7 +550,7 @@ public class ZygoteInit {
+ 
+             WrapperInit.execApplication(parsedArgs.mInvokeWith,
+                     parsedArgs.mNiceName, parsedArgs.mTargetSdkVersion,
+-                    VMRuntime.getCurrentInstructionSet(), null, args);
++                    VMRuntime.getCurrentInstructionSet(), null, args, true);
+ 
+             throw new IllegalStateException("Unexpected return from WrapperInit.execApplication");
+         } else {
+@@ -902,6 +902,10 @@ public class ZygoteInit {
+                 bootTimingsTraceLog.traceEnd(); // ZygotePreload
+             }
+ 
++            // Even a lazy Zygote must prepare immutable idmap metadata before specialization.
++            // This loads framework assets only; extension resources remain absent in the parent.
++            android.content.res.AssetManager.getSystem();
++
+             // Do an initial gc to clean up after startup
+             bootTimingsTraceLog.traceBegin("PostZygoteInitGC");
+             gcAndFinalize();
+diff --git a/core/jni/android_content_res_ApkAssets.cpp b/core/jni/android_content_res_ApkAssets.cpp
+index cf06908c1..94dca313e 100644
+--- a/core/jni/android_content_res_ApkAssets.cpp
++++ b/core/jni/android_content_res_ApkAssets.cpp
+@@ -25,6 +25,7 @@
+ #include "android-base/stringprintf.h"
+ #include "android-base/unique_fd.h"
+ #include "androidfw/ApkAssets.h"
++#include "androidfw/Idmap.h"
+ #include "core_jni_helpers.h"
+ #include "jni.h"
+ #include "nativehelper/ScopedUtfChars.h"
+@@ -598,8 +599,34 @@ static jboolean NativeDefinesOverlayable(JNIEnv* env, jclass /*clazz*/, jlong pt
+   return overlayable_infos.empty() ? JNI_FALSE : JNI_TRUE;
+ }
+ 
++static jstring NativeGetOverlayTargetPath(JNIEnv* env, jclass, jstring path) {
++  ScopedUtfChars idmap_path(env, path);
++  if (idmap_path.c_str() == nullptr) return nullptr;
++  auto asset = AssetsProvider::CreateAssetFromFile(idmap_path.c_str());
++  if (asset == nullptr) {
++    jniThrowException(env, "java/io/IOException", "Unable to read overlay target");
++    return nullptr;
++  }
++  const auto* buffer = static_cast<const char*>(asset->getBuffer(true));
++  if (buffer == nullptr) {
++    jniThrowException(env, "java/io/IOException", "Unable to read idmap data");
++    return nullptr;
++  }
++  auto idmap = LoadedIdmap::Load(
++      idmap_path.c_str(), StringPiece(buffer, static_cast<size_t>(asset->getLength())));
++  if (idmap == nullptr) {
++    jniThrowException(env, "java/io/IOException", "Invalid overlay target metadata");
++    return nullptr;
++  }
++  // Copy before the metadata and its temporary mapping are destroyed.
++  const std::string target(idmap->TargetApkPath());
++  return env->NewStringUTF(target.c_str());
++}
++
+ // JNI registration.
+ static const JNINativeMethod gApkAssetsMethods[] = {
++        {"nativeGetOverlayTargetPath", "(Ljava/lang/String;)Ljava/lang/String;",
++         (void*)NativeGetOverlayTargetPath},
+         {"nativeLoad", "(ILjava/lang/String;ILandroid/content/res/loader/AssetsProvider;)J",
+          (void*)NativeLoad},
+         {"nativeLoadEmpty", "(ILandroid/content/res/loader/AssetsProvider;)J",
+diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
+index f1a7dd68a..63a4b494e 100644
+--- a/core/jni/com_android_internal_os_Zygote.cpp
++++ b/core/jni/com_android_internal_os_Zygote.cpp
+@@ -65,10 +65,8 @@
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
+ #include <android-base/properties.h>
+-#include <android-base/scopeguard.h>
+ #include <android-base/stringprintf.h>
+ #include <android-base/unique_fd.h>
+-#include <androidfw/ResourceTypes.h>
+ #include <bionic/malloc.h>
+ #include <bionic/mte.h>
+ #include <cutils/fs.h>
+@@ -82,8 +80,6 @@
+ #include <stats_socket.h>
+ #include <utils/String8.h>
+ #include <utils/Trace.h>
+-#include <ziparchive/zip_archive.h>
+-#include <ziparchive/zip_writer.h>
+ 
+ #include <nativehelper/JNIHelp.h>
+ #include <nativehelper/ScopedLocalRef.h>
+@@ -185,217 +181,6 @@ static constexpr const char* kCurProfileDirPath = "/data/misc/profiles/cur";
+ static constexpr const char* kRefProfileDirPath = "/data/misc/profiles/ref";
+ 
+ 
+-static constexpr jint kUseScudoAllocator = 1 << 29;
+-static constexpr const char* kExecSystemResourcesFd = "EXEC_SYSTEM_RESOURCES_FD";
+-static constexpr const char* kExecSystemResourcesSize = "EXEC_SYSTEM_RESOURCES_SIZE";
+-static constexpr const char* kSystemResourcesPath =
+-        "/system/framework/org.system.platform-res.apk";
+-static constexpr const char* kSystemResourcesDebugName = "system-resources";
+-
+-static bool RewriteSystemResourcePackageName(std::vector<uint8_t>* data, std::string* error) {
+-    using android::ResChunk_header;
+-    using android::ResTable_header;
+-    using android::ResTable_package;
+-
+-    if (data->size() < sizeof(ResTable_header)) {
+-        *error = "resources.arsc is smaller than its table header";
+-        return false;
+-    }
+-    auto* table = reinterpret_cast<ResTable_header*>(data->data());
+-    const size_t table_size = dtohl(table->header.size);
+-    size_t offset = dtohs(table->header.headerSize);
+-    if (dtohs(table->header.type) != android::RES_TABLE_TYPE ||
+-        offset < sizeof(ResTable_header) || table_size > data->size()) {
+-        *error = "resources.arsc has an invalid table header";
+-        return false;
+-    }
+-
+-    constexpr uint32_t kPackageId = 0x3f;
+-    constexpr std::string_view kOriginalName = "lineageos.platform";
+-    constexpr std::string_view kPublicName = "org.system.platform";
+-    size_t rewritten = 0;
+-    while (offset < table_size) {
+-        if (table_size - offset < sizeof(ResChunk_header)) {
+-            *error = "resources.arsc contains a truncated chunk header";
+-            return false;
+-        }
+-        auto* chunk = reinterpret_cast<ResChunk_header*>(data->data() + offset);
+-        const size_t chunk_size = dtohl(chunk->size);
+-        const size_t header_size = dtohs(chunk->headerSize);
+-        if (chunk_size < header_size || chunk_size > table_size - offset) {
+-            *error = "resources.arsc contains an invalid chunk";
+-            return false;
+-        }
+-        if (dtohs(chunk->type) == android::RES_TABLE_PACKAGE_TYPE) {
+-            if (header_size < sizeof(ResTable_package)) {
+-                *error = "resources.arsc contains a truncated package header";
+-                return false;
+-            }
+-            auto* package = reinterpret_cast<ResTable_package*>(chunk);
+-            if (dtohl(package->id) == kPackageId) {
+-                std::string current_name;
+-                for (uint16_t code_unit : package->name) {
+-                    const uint16_t value = dtohs(code_unit);
+-                    if (value == 0) break;
+-                    if (value > 0x7f) {
+-                        *error = "0x3f resource package has a non-ASCII name";
+-                        return false;
+-                    }
+-                    current_name.push_back(static_cast<char>(value));
+-                }
+-                if (current_name != kOriginalName) {
+-                    *error = StringPrintf("unexpected 0x3f resource package name: %s",
+-                                          current_name.c_str());
+-                    return false;
+-                }
+-                std::fill(std::begin(package->name), std::end(package->name), 0);
+-                for (size_t i = 0; i < kPublicName.size(); ++i) {
+-                    package->name[i] = htods(static_cast<uint16_t>(kPublicName[i]));
+-                }
+-                ++rewritten;
+-            }
+-        }
+-        offset += chunk_size;
+-    }
+-    if (offset != table_size || rewritten != 1) {
+-        *error = StringPrintf("expected one 0x3f resource package, rewrote %zu", rewritten);
+-        return false;
+-    }
+-    return true;
+-}
+-
+-static bool PrepareExecSystemResources(std::string* error) {
+-    ZipArchiveHandle archive = nullptr;
+-    int32_t result = OpenArchive(kSystemResourcesPath, &archive);
+-    if (result != 0) {
+-        *error = StringPrintf("failed to open system resources: %s", ErrorCodeString(result));
+-        return false;
+-    }
+-    auto archive_guard = android::base::make_scope_guard([&]() { CloseArchive(archive); });
+-
+-    android::base::unique_fd resource_fd(
+-            memfd_create(kSystemResourcesDebugName, MFD_ALLOW_SEALING));
+-    if (resource_fd.get() == -1) {
+-        *error = StringPrintf("memfd_create failed: %s", strerror(errno));
+-        return false;
+-    }
+-    const int output_fd = dup(resource_fd.get());
+-    if (output_fd == -1) {
+-        *error = StringPrintf("dup resource memfd failed: %s", strerror(errno));
+-        return false;
+-    }
+-    FILE* output = fdopen(output_fd, "w+b");
+-    if (output == nullptr) {
+-        close(output_fd);
+-        *error = StringPrintf("fdopen resource memfd failed: %s", strerror(errno));
+-        return false;
+-    }
+-    auto output_guard = android::base::make_scope_guard([&]() { fclose(output); });
+-
+-    bool found_table = false;
+-    {
+-        ZipWriter writer(output);
+-        void* cookie = nullptr;
+-        result = StartIteration(archive, &cookie);
+-        if (result != 0) {
+-            *error = StringPrintf("failed to iterate system resources: %s",
+-                                  ErrorCodeString(result));
+-            return false;
+-        }
+-        auto iteration_guard =
+-                android::base::make_scope_guard([&]() { EndIteration(cookie); });
+-
+-        ZipEntry64 entry;
+-        std::string name;
+-        while ((result = Next(cookie, &entry, &name)) == 0) {
+-            const bool is_table = name == "resources.arsc";
+-            const bool is_resource = name.compare(0, 4, "res/") == 0;
+-            const bool is_asset = name.compare(0, 7, "assets/") == 0;
+-            if ((!is_table && !is_resource && !is_asset) ||
+-                (!name.empty() && name.back() == '/')) {
+-                continue;
+-            }
+-            if (entry.uncompressed_length > std::numeric_limits<uint32_t>::max()) {
+-                *error = StringPrintf("system resource entry is too large: %s", name.c_str());
+-                return false;
+-            }
+-            std::vector<uint8_t> contents(static_cast<size_t>(entry.uncompressed_length));
+-            result = ExtractToMemory(archive, &entry, contents.data(), contents.size());
+-            if (result != 0) {
+-                *error = StringPrintf("failed to extract %s: %s", name.c_str(),
+-                                      ErrorCodeString(result));
+-                return false;
+-            }
+-            if (is_table) {
+-                if (found_table) {
+-                    *error = "system resource APK contains duplicate resources.arsc";
+-                    return false;
+-                }
+-                if (!RewriteSystemResourcePackageName(&contents, error)) return false;
+-                found_table = true;
+-                result = writer.StartAlignedEntry(name, 0, 4);
+-            } else {
+-                result = writer.StartEntry(
+-                        name, ZipWriter::kCompress | ZipWriter::kDefaultCompression);
+-            }
+-            if (result == 0) result = writer.WriteBytes(contents.data(), contents.size());
+-            if (result == 0) result = writer.FinishEntry();
+-            if (result != 0) {
+-                *error = StringPrintf("failed to write %s: %s", name.c_str(),
+-                                      ZipWriter::ErrorCodeString(result));
+-                return false;
+-            }
+-        }
+-        if (result != -1) {
+-            *error = StringPrintf("failed while iterating system resources: %s",
+-                                  ErrorCodeString(result));
+-            return false;
+-        }
+-        if (!found_table) {
+-            *error = "system resource APK has no resources.arsc";
+-            return false;
+-        }
+-        result = writer.Finish();
+-        if (result != 0) {
+-            *error = StringPrintf("failed to finish system resource ZIP: %s",
+-                                  ZipWriter::ErrorCodeString(result));
+-            return false;
+-        }
+-    }
+-
+-    if (fflush(output) != 0) {
+-        *error = StringPrintf("failed to flush system resource ZIP: %s", strerror(errno));
+-        return false;
+-    }
+-    const off64_t resource_size = ftello64(output);
+-    if (resource_size <= 0) {
+-        *error = StringPrintf("failed to determine system resource ZIP size: %s", strerror(errno));
+-        return false;
+-    }
+-    output_guard.Disable();
+-    if (fclose(output) != 0) {
+-        *error = StringPrintf("failed to close system resource ZIP: %s", strerror(errno));
+-        return false;
+-    }
+-
+-    const int seals = F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL;
+-    if (fcntl(resource_fd.get(), F_ADD_SEALS, seals) == -1) {
+-        *error = StringPrintf("failed to seal system resource memfd: %s", strerror(errno));
+-        return false;
+-    }
+-    const std::string fd_string = std::to_string(resource_fd.get());
+-    const std::string size_string = std::to_string(resource_size);
+-    if (setenv(kExecSystemResourcesFd, fd_string.c_str(), 1) == -1 ||
+-        setenv(kExecSystemResourcesSize, size_string.c_str(), 1) == -1) {
+-        *error = StringPrintf("failed to export system resource memfd: %s", strerror(errno));
+-        unsetenv(kExecSystemResourcesFd);
+-        unsetenv(kExecSystemResourcesSize);
+-        return false;
+-    }
+-    (void)resource_fd.release();
+-    return true;
+-}
+-
+ /**
+  * The maximum value that the gUSAPPoolSizeMax variable may take.  This value
+  * is a mirror of ZygoteServer.USAP_POOL_SIZE_MAX_LIMIT
+@@ -2193,14 +1978,6 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+     auto instruction_set = extract_fn(managed_instruction_set);
+     auto app_data_dir = extract_fn(managed_app_data_dir);
+ 
+-    if (!is_system_server && (runtime_flags & kUseScudoAllocator) != 0) {
+-        std::string resource_error;
+-        if (!PrepareExecSystemResources(&resource_error)) {
+-            fail_fn(CREATE_ERROR("failed to prepare exec system resources: %s",
+-                                 resource_error.c_str()));
+-        }
+-    }
+-
+     // Permit bounding capabilities
+     permitted_capabilities |= bounding_capabilities;
+ 
+diff --git a/libs/androidfw/AssetManager.cpp b/libs/androidfw/AssetManager.cpp
+index 4362bbc7f..b84984a43 100644
+--- a/libs/androidfw/AssetManager.cpp
++++ b/libs/androidfw/AssetManager.cpp
+@@ -63,7 +63,9 @@ static const bool kIsDebug = false;
+ static const char* kAssetsRoot = "assets";
+ static const char* kAppZipName = NULL; //"classes.jar";
+ static const char* kSystemAssets = "framework/framework-res.apk";
++#ifndef __ANDROID__
+ static const char* kLineageAssets = "framework/" "org.system." "platform-res.apk";
++#endif
+ static const char* kResourceCache = "resource-cache";
+ 
+ static const char* kExcludeExtension = ".EXCLUDE";
+@@ -374,11 +376,13 @@ bool AssetManager::addDefaultAssets()
+        appendPath(path, kSystemAssets);
+        success &= addAssetPath(path, NULL, false /* appAsLib */, true /* isSystemAsset */);
+     }
++#ifndef __ANDROID__
+     {
+        String8 path(root);
+        appendPath(path, kLineageAssets);
+        success &= addAssetPath(path, NULL, false /* appAsLib */, true /* isSystemAsset */);
+     }
++#endif
+     return success;
+ }
+ 
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index cd619ea61..f3b512adf 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -1961,6 +1961,14 @@ public final class ProcessList implements ProcessStateController.ProcessLruUpdat
+             }
+             int runtimeFlags = 0;
+ 
++            // Use package-manager identity, not a process name or numeric UID threshold.
++            // Isolated and SDK sandbox children never inherit the host's resource access.
++            if (!app.isolated && !app.isSdkSandbox && !UserHandle.isIsolated(uid)
++                    && (app.info.isSystemApp() || app.info.isUpdatedSystemApp())
++                    && app.info.isSignedWithPlatformKey()) {
++                runtimeFlags |= Zygote.USE_SYSTEM_EXTENSION_RESOURCES;
++            }
++
+             boolean debuggableFlag = (app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+             boolean isProfileableByShell = app.info.isProfileableByShell();
+             boolean isProfileable = app.info.isProfileable();
+-- 
+2.43.0
+

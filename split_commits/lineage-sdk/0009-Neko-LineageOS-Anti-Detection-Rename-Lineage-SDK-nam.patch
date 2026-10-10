@@ -1,0 +1,70 @@
+From c23e3be69f7b8c2b2f19d7a5d72a334a91965be8 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 12:03:56 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Rename Lineage SDK namespace
+
+Change-Id: I624ece78b7a670a31cb8e8b0b178e423ee2f8e3b
+---
+ lineage/res/AndroidManifest.xml                             | 6 +++---
+ .../java/lineageos/preference/RemotePreference.java         | 2 +-
+ sdk/src/java/lineageos/app/ProfileManager.java              | 4 ++--
+ 3 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/lineage/res/AndroidManifest.xml b/lineage/res/AndroidManifest.xml
+index 204d28a..40b5e7a 100644
+--- a/lineage/res/AndroidManifest.xml
++++ b/lineage/res/AndroidManifest.xml
+@@ -14,12 +14,12 @@
+     <protected-broadcast android:name="lineageos.intent.action.SCREEN_CAMERA_GESTURE" />
+     <protected-broadcast android:name="lineageos.intent.action.INITIALIZE_LINEAGE_HARDWARE" />
+     <protected-broadcast android:name="lineageos.intent.action.INITIALIZE_LIVEDISPLAY" />
+-    <protected-broadcast android:name="lineageos.platform.intent.action.PROFILE_SELECTED" />
++    <protected-broadcast android:name="org.system.platform.intent.action.PROFILE_SELECTED" />
+ 
+     <protected-broadcast android:name="lineageos.intent.action.UPDATE_PREFERENCE" />
+-    <protected-broadcast android:name="lineageos.intent.action.REFRESH_PREFERENCE" />
++    <protected-broadcast android:name="org.system.intent.action.REFRESH_PREFERENCE" />
+ 
+-    <protected-broadcast android:name="lineageos.platform.intent.action.PROFILE_UPDATED" />
++    <protected-broadcast android:name="org.system.platform.intent.action.PROFILE_UPDATED" />
+     <protected-broadcast android:name="lineageos.platform.intent.action.INTENT_ACTION_PROFILE_TRIGGER_STATE_CHANGED" />
+ 
+     <protected-broadcast android:name="lineageos.platform.intent.action.UPDATE_TWILIGHT_STATE" />
+diff --git a/packages/LineagePreferenceLib/java/lineageos/preference/RemotePreference.java b/packages/LineagePreferenceLib/java/lineageos/preference/RemotePreference.java
+index 211cc17..68023e1 100644
+--- a/packages/LineagePreferenceLib/java/lineageos/preference/RemotePreference.java
++++ b/packages/LineagePreferenceLib/java/lineageos/preference/RemotePreference.java
+@@ -54,7 +54,7 @@ public class RemotePreference extends SelfRemovingPreference
+     private static final boolean DEBUG = Log.isLoggable(TAG, Log.VERBOSE);
+ 
+     public static final String ACTION_REFRESH_PREFERENCE =
+-            "lineageos.intent.action.REFRESH_PREFERENCE";
++            "org.system.intent.action.REFRESH_PREFERENCE";
+ 
+     public static final String ACTION_UPDATE_PREFERENCE =
+             "lineageos.intent.action.UPDATE_PREFERENCE";
+diff --git a/sdk/src/java/lineageos/app/ProfileManager.java b/sdk/src/java/lineageos/app/ProfileManager.java
+index c36edae..d7f93e4 100644
+--- a/sdk/src/java/lineageos/app/ProfileManager.java
++++ b/sdk/src/java/lineageos/app/ProfileManager.java
+@@ -55,7 +55,7 @@ public class ProfileManager {
+      * or by calls to the ProfileManagerService / Profile.</p>
+      */
+     public static final String INTENT_ACTION_PROFILE_SELECTED =
+-            "lineageos.platform.intent.action.PROFILE_SELECTED";
++            "org.system.platform.intent.action.PROFILE_SELECTED";
+ 
+     /**
+      * <p>Broadcast Action: Current profile has been updated. This is triggered every time the
+@@ -64,7 +64,7 @@ public class ProfileManager {
+      * trigger a profile selection, but causes its name to change.</p>
+      */
+     public static final String INTENT_ACTION_PROFILE_UPDATED =
+-            "lineageos.platform.intent.action.PROFILE_UPDATED";
++            "org.system.platform.intent.action.PROFILE_UPDATED";
+ 
+ 
+     /**
+-- 
+2.43.0
+

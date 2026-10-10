@@ -1,0 +1,251 @@
+From c4bb903f82679a6321d37e08241c1143cf39616b Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 09:57:09 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Hide feature of LineageOS
+ SDK
+
+Known exposed:
+org.lineageos.livedisplay
+org.lineageos.profiles
+org.lineageos.hardware
+org.lineageos.globalactions
+org.lineageos.trust
+org.lineageos.health
+org.lineageos.android
+org.lineageos.settings
+
+Change-Id: Ie1e6f66c73c8e8b74a31bab8431958e53fb20ad6
+---
+ .../app/ApplicationPackageManager.java        | 10 ++
+ .../server/pm/IPackageManagerBase.java        |  2 +-
+ .../server/pm/PackageManagerNative.java       |  2 +-
+ .../server/pm/PackageManagerService.java      | 23 ++++-
+ .../pm/SystemExtensionFeatureVisibility.java  | 95 +++++++++++++++++++
+ 5 files changed, 127 insertions(+), 5 deletions(-)
+ create mode 100644 services/core/java/com/android/server/pm/SystemExtensionFeatureVisibility.java
+
+diff --git a/core/java/android/app/ApplicationPackageManager.java b/core/java/android/app/ApplicationPackageManager.java
+index 71477f5ac..00344dce4 100644
+--- a/core/java/android/app/ApplicationPackageManager.java
++++ b/core/java/android/app/ApplicationPackageManager.java
+@@ -94,6 +94,7 @@ import android.graphics.Rect;
+ import android.graphics.drawable.BitmapDrawable;
+ import android.graphics.drawable.Drawable;
+ import android.graphics.drawable.LayerDrawable;
++import android.os.Binder;
+ import android.os.Build;
+ import android.os.Bundle;
+ import android.os.Handler;
+@@ -785,6 +786,9 @@ public class ApplicationPackageManager extends PackageManager {
+     @Override
+     @SuppressWarnings("unchecked")
+     public FeatureInfo[] getSystemAvailableFeatures() {
++        // The system process uses a local service. Its capability query must not inherit
++        // the identity of an application whose Binder request it is handling.
++        final long identity = Binder.clearCallingIdentity();
+         try {
+             ParceledListSlice<FeatureInfo> parceledList =
+                     mPM.getSystemAvailableFeatures();
+@@ -799,6 +803,8 @@ public class ApplicationPackageManager extends PackageManager {
+             return res;
+         } catch (RemoteException e) {
+             throw e.rethrowFromSystemServer();
++        } finally {
++            Binder.restoreCallingIdentity(identity);
+         }
+     }
+ 
+@@ -828,11 +834,15 @@ public class ApplicationPackageManager extends PackageManager {
+ 
+                 @Override
+                 public Boolean recompute(HasSystemFeatureQuery query) {
++                    // This cache belongs to the process, not to its incoming Binder callers.
++                    final long identity = Binder.clearCallingIdentity();
+                     try {
+                         return ActivityThread.currentActivityThread().getPackageManager().
+                             hasSystemFeature(query.name, query.version);
+                     } catch (RemoteException e) {
+                         throw e.rethrowFromSystemServer();
++                    } finally {
++                        Binder.restoreCallingIdentity(identity);
+                     }
+                 }
+             };
+diff --git a/services/core/java/com/android/server/pm/IPackageManagerBase.java b/services/core/java/com/android/server/pm/IPackageManagerBase.java
+index bebf8d8e8..f319f916a 100644
+--- a/services/core/java/com/android/server/pm/IPackageManagerBase.java
++++ b/services/core/java/com/android/server/pm/IPackageManagerBase.java
+@@ -881,7 +881,7 @@ public abstract class IPackageManagerBase extends IPackageManager.Stub {
+     @Override
+     @Deprecated
+     public final boolean hasSystemFeature(String name, int version) {
+-        return mService.hasSystemFeature(name, version);
++        return mService.hasSystemFeatureForCaller(name, version);
+     }
+ 
+     @Override
+diff --git a/services/core/java/com/android/server/pm/PackageManagerNative.java b/services/core/java/com/android/server/pm/PackageManagerNative.java
+index 04d353fd8..e7b42c06d 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerNative.java
++++ b/services/core/java/com/android/server/pm/PackageManagerNative.java
+@@ -253,7 +253,7 @@ final class PackageManagerNative extends IPackageManagerNative.Stub {
+ 
+     @Override
+     public boolean hasSystemFeature(String featureName, int version) {
+-        return mPm.hasSystemFeature(featureName, version);
++        return mPm.hasSystemFeatureForCaller(featureName, version);
+     }
+ 
+     @Override
+diff --git a/services/core/java/com/android/server/pm/PackageManagerService.java b/services/core/java/com/android/server/pm/PackageManagerService.java
+index fb3e19f18..0a1232b92 100644
+--- a/services/core/java/com/android/server/pm/PackageManagerService.java
++++ b/services/core/java/com/android/server/pm/PackageManagerService.java
+@@ -1257,6 +1257,8 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+             Log.i(TAG, "snapshot: onChange(" + what + ")");
+         }
+         sSnapshotPendingVersion.incrementAndGet();
++        // Feature visibility also depends on package identity and per-user installation state.
++        ApplicationPackageManager.invalidateHasSystemFeatureCache();
+     }
+ 
+     /**
+@@ -2979,6 +2981,14 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+         }
+     }
+ 
++    boolean hasSystemFeatureForCaller(String name, int version) {
++        final int callingUid = Binder.getCallingUid();
++        return hasSystemFeature(name, version)
++                && (!SystemExtensionFeatureVisibility.isExtensionFeature(name)
++                        || SystemExtensionFeatureVisibility.canAccess(
++                                snapshotComputer(), callingUid));
++    }
++
+     // NOTE: Can't remove due to unsupported app usage
+     public int checkPermission(String permName, String pkgName, int userId) {
+         return mPermissionManager.checkPermission(pkgName, permName,
+@@ -5482,9 +5492,16 @@ public class PackageManagerService implements PackageSender, TestUtilityService
+         @Override
+         public @NonNull ParceledListSlice<FeatureInfo> getSystemAvailableFeatures() {
+             // allow instant applications
+-            ArrayList<FeatureInfo> res;
+-            res = new ArrayList<>(mAvailableFeatures.size() + 1);
+-            res.addAll(mAvailableFeatures.values());
++            final int callingUid = Binder.getCallingUid();
++            final boolean includeExtensions = SystemExtensionFeatureVisibility.canAccess(
++                    snapshotComputer(), callingUid);
++            final ArrayList<FeatureInfo> res = new ArrayList<>(mAvailableFeatures.size() + 1);
++            for (FeatureInfo feature : mAvailableFeatures.values()) {
++                if (includeExtensions
++                        || !SystemExtensionFeatureVisibility.isExtensionFeature(feature.name)) {
++                    res.add(feature);
++                }
++            }
+             final FeatureInfo fi = new FeatureInfo();
+             fi.reqGlEsVersion = SystemProperties.getInt("ro.opengles.version",
+                     FeatureInfo.GL_ES_VERSION_UNDEFINED);
+diff --git a/services/core/java/com/android/server/pm/SystemExtensionFeatureVisibility.java b/services/core/java/com/android/server/pm/SystemExtensionFeatureVisibility.java
+new file mode 100644
+index 000000000..249e514c2
+--- /dev/null
++++ b/services/core/java/com/android/server/pm/SystemExtensionFeatureVisibility.java
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.pm;
++
++import android.os.Process;
++import android.os.UserHandle;
++import android.util.ArraySet;
++import android.util.Pair;
++
++import com.android.server.pm.pkg.PackageStateInternal;
++import com.android.server.pm.pkg.SharedUserApi;
++
++import java.util.Set;
++
++/** Caller policy for system extension features; internal capability checks remain unfiltered. */
++final class SystemExtensionFeatureVisibility {
++    private static final Set<String> FEATURES = Set.of(
++            "org.lineageos.android",
++            "org.lineageos.globalactions",
++            "org.lineageos.hardware",
++            "org.lineageos.health",
++            "org.lineageos.livedisplay",
++            "org.lineageos.profiles",
++            "org.lineageos.settings",
++            "org.lineageos.trust");
++
++    private SystemExtensionFeatureVisibility() {}
++
++    static boolean isExtensionFeature(String name) {
++        return name != null && FEATURES.contains(name);
++    }
++
++    static boolean canAccess(Computer snapshot, int callingUid) {
++        if (callingUid == Process.ROOT_UID || callingUid == Process.SYSTEM_UID
++                || callingUid == Process.SHELL_UID) {
++            return true;
++        }
++        // Do not resolve sandbox or isolated identities through their host application.
++        if (!UserHandle.isApp(callingUid) || Process.isIsolatedUid(callingUid)
++                || Process.isSdkSandboxUid(callingUid)) {
++            return false;
++        }
++
++        final int userId = UserHandle.getUserId(callingUid);
++        final Pair<PackageStateInternal, SharedUserApi> identity =
++                snapshot.getPackageOrSharedUser(UserHandle.getAppId(callingUid));
++        if (identity == null) {
++            return false;
++        }
++        if (identity.first != null) {
++            return identity.first.getUserStateOrDefault(userId).isInstalled()
++                    && isTrustedPackage(identity.first, userId);
++        }
++        if (identity.second == null) {
++            return false;
++        }
++
++        // Binder identifies a shared UID, not the individual package issuing the query.
++        // Require every installed member to qualify rather than using merged UID flags.
++        final ArraySet<? extends PackageStateInternal> packages =
++                identity.second.getPackageStates();
++        boolean hasInstalledPackage = false;
++        for (int i = 0; i < packages.size(); i++) {
++            final PackageStateInternal state = packages.valueAt(i);
++            if (!state.getUserStateOrDefault(userId).isInstalled()) {
++                continue;
++            }
++            hasInstalledPackage = true;
++            if (!isTrustedPackage(state, userId)) {
++                return false;
++            }
++        }
++        return hasInstalledPackage;
++    }
++
++    private static boolean isTrustedPackage(PackageStateInternal state, int userId) {
++        return !state.getUserStateOrDefault(userId).isInstantApp()
++                && (state.isSystem() || state.isUpdatedSystemApp())
++                && state.getPkg() != null && state.getPkg().isSignedWithPlatformKey();
++    }
++}
+-- 
+2.43.0
+

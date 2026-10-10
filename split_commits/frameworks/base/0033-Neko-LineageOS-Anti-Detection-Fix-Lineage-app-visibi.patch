@@ -1,0 +1,278 @@
+From 25ecc16d945642874cf27bb9964137feadf48c95 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 10 Oct 2026 13:30:57 +0800
+Subject: [PATCH] Neko LineageOS: [Anti Detection] Fix Lineage app visibility
+ policy and caches
+
+Invalidate package/application info, UID package-list and intent-query
+caches when the visibility policy changes. Previously, a running app
+could retain hidden package names through getPackagesForUid() until
+its process restarted.
+
+Change-Id: Ibac8207249dc04cd011f730a72583e305f26f8ed
+---
+ .../java/com/android/server/pm/Computer.java  |  3 ++
+ .../com/android/server/pm/ComputerEngine.java | 45 ++++++++++++-------
+ .../LineageAppVisibilityManagerInternal.java  |  7 ++-
+ .../pm/LineageAppVisibilityService.java       | 45 ++++++++++++-------
+ .../android/server/wm/ActivityStarter.java    |  9 ++--
+ 5 files changed, 69 insertions(+), 40 deletions(-)
+
+diff --git a/services/core/java/com/android/server/pm/Computer.java b/services/core/java/com/android/server/pm/Computer.java
+index a2a825921..8d59a45ed 100644
+--- a/services/core/java/com/android/server/pm/Computer.java
++++ b/services/core/java/com/android/server/pm/Computer.java
+@@ -667,6 +667,9 @@ public interface Computer extends PackageDataSnapshot {
+     @Nullable
+     Pair<PackageStateInternal, SharedUserApi> getPackageOrSharedUser(int appId);
+ 
++    /** Applies the caller's Lineage app visibility policy without granting other access. */
++    boolean shouldHideLineageTargetForCaller(@Nullable String targetPackageName, int callingUid);
++
+     @Nullable
+     SharedUserApi getSharedUser(int sharedUserAppIde);
+ 
+diff --git a/services/core/java/com/android/server/pm/ComputerEngine.java b/services/core/java/com/android/server/pm/ComputerEngine.java
+index b5d06d42e..17865f1cc 100644
+--- a/services/core/java/com/android/server/pm/ComputerEngine.java
++++ b/services/core/java/com/android/server/pm/ComputerEngine.java
+@@ -1226,6 +1226,11 @@ public class ComputerEngine implements Computer {
+         final boolean blockInstant = intent.isWebIntent() && areWebInstantAppsDisabled(userId);
+         for (int i = resolveInfos.size() - 1; i >= 0; i--) {
+             final ResolveInfo info = resolveInfos.get(i);
++            if (info.activityInfo != null && shouldHideLineageTargetForCaller(
++                    info.activityInfo.packageName, filterCallingUid)) {
++                resolveInfos.remove(i);
++                continue;
++            }
+             // remove locally resolved instant app web results when disabled
+             if (info.isInstantAppAvailable && blockInstant) {
+                 resolveInfos.remove(i);
+@@ -1282,11 +1287,6 @@ public class ComputerEngine implements Computer {
+                         mSettings.getSettingBase(UserHandle.getAppId(filterCallingUid));
+                 PackageStateInternal resolvedSetting =
+                         getPackageStateInternal(info.activityInfo.packageName, 0);
+-                if (shouldFilterLineageTargetPackage(resolvedSetting, filterCallingUid,
+-                        callingSetting, userId)) {
+-                    resolveInfos.remove(i);
+-                    continue;
+-                }
+                 if (resolveForStart
+                         || !mAppsFilter.shouldFilterApplication(this,
+                         filterCallingUid, callingSetting, resolvedSetting, userId)) {
+@@ -2643,6 +2643,9 @@ public class ComputerEngine implements Computer {
+         if (isCallerSameApp(ps.getPackageName(), callingUid)) {
+             return false;
+         }
++        if (shouldHideLineageTargetForCaller(ps.getPackageName(), callingUid)) {
++            return true;
++        }
+         if (callerIsInstantApp) {
+             // both caller and target are both instant, but, different applications, filter
+             if (ps.getUserStateOrDefault(userId).isInstantApp()) {
+@@ -2678,21 +2681,33 @@ public class ComputerEngine implements Computer {
+         }
+         int appId = UserHandle.getAppId(callingUid);
+         final SettingBase callingPs = mSettings.getSettingBase(appId);
+-        if (shouldFilterLineageTargetPackage(ps, callingUid, callingPs, userId)) {
+-            return true;
+-        }
+         return mAppsFilter.shouldFilterApplication(this, callingUid, callingPs, ps, userId);
+     }
+ 
+-    private boolean shouldFilterLineageTargetPackage(@Nullable PackageStateInternal targetPs,
+-            int callingUid, @Nullable SettingBase callingPs, @UserIdInt int userId) {
+-        if (targetPs == null) {
+-            return false;
+-        }
++    @Override
++    public boolean shouldHideLineageTargetForCaller(@Nullable String targetPackageName,
++            int callingUid) {
+         final LineageAppVisibilityManagerInternal visibilityManager =
+                 LocalServices.getService(LineageAppVisibilityManagerInternal.class);
+-        return visibilityManager != null && visibilityManager.shouldHideForCallingSetting(
+-                targetPs.getPackageName(), callingPs, callingUid, userId);
++        if (visibilityManager == null
++                || !visibilityManager.isLineageVisibilityTargetPackage(targetPackageName)) {
++            return false;
++        }
++        // Resolve only the visibility policy owner; normal access checks keep their identity.
++        int policyUid = callingUid;
++        if (Process.isSdkSandboxUid(policyUid)) {
++            policyUid = Process.getAppUidForSdkSandboxUid(policyUid);
++        }
++        if (Process.isIsolated(policyUid)) {
++            policyUid = getIsolatedOwner(policyUid);
++        }
++        if (isSystemOrRootOrShell(policyUid)
++                || isCallerSameApp(targetPackageName, policyUid)) {
++            return false;
++        }
++        final SettingBase callingPs = mSettings.getSettingBase(UserHandle.getAppId(policyUid));
++        return visibilityManager.shouldHideForCallingSetting(targetPackageName, callingPs,
++                policyUid);
+     }
+ 
+     private ArraySet<String> getPlayStoreInstallSpoofPackages(@UserIdInt int userId) {
+diff --git a/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java b/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java
+index ad83464cc..8f3efd171 100644
+--- a/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java
++++ b/services/core/java/com/android/server/pm/LineageAppVisibilityManagerInternal.java
+@@ -17,7 +17,6 @@
+ package com.android.server.pm;
+ 
+ import android.annotation.Nullable;
+-import android.annotation.UserIdInt;
+ 
+ /**
+  * Internal visibility policy for hiding LineageOS packages from selected callers.
+@@ -28,9 +27,9 @@ public abstract class LineageAppVisibilityManagerInternal {
+ 
+     public abstract boolean isLineageVisibilityTargetPackage(@Nullable String packageName);
+ 
+-    public abstract boolean shouldHideForCallingPackage(@Nullable String targetPackageName,
+-            @Nullable String callingPackage, int callingUid, @UserIdInt int userId);
++    public abstract boolean shouldHideForCallingUid(@Nullable String targetPackageName,
++            int callingUid);
+ 
+     public abstract boolean shouldHideForCallingSetting(@Nullable String targetPackageName,
+-            @Nullable SettingBase callingSetting, int callingUid, @UserIdInt int userId);
++            @Nullable SettingBase callingSetting, int callingUid);
+ }
+diff --git a/services/core/java/com/android/server/pm/LineageAppVisibilityService.java b/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
+index 24140e6c1..9a6ca0909 100644
+--- a/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
++++ b/services/core/java/com/android/server/pm/LineageAppVisibilityService.java
+@@ -21,7 +21,10 @@ import static com.android.server.pm.PackageManagerServiceUtils.isSystemOrRootOrS
+ import android.annotation.NonNull;
+ import android.annotation.Nullable;
+ import android.annotation.UserIdInt;
++import android.app.ApplicationPackageManager;
+ import android.content.Context;
++import android.content.pm.PackageManager;
++import android.content.pm.PackageManagerInternal;
+ import android.content.pm.UserInfo;
+ import android.database.ContentObserver;
+ import android.net.Uri;
+@@ -72,34 +75,33 @@ public final class LineageAppVisibilityService extends SystemService {
+                 }
+ 
+                 @Override
+-                public boolean shouldHideForCallingPackage(@Nullable String targetPackageName,
+-                        @Nullable String callingPackage, int callingUid, @UserIdInt int userId) {
+-                    if (!isLineageVisibilityTargetPackage(targetPackageName)) {
+-                        return false;
+-                    }
+-                    if (!UserHandle.isApp(callingUid) || TextUtils.isEmpty(callingPackage)) {
+-                        return false;
+-                    }
+-                    return getBlockedPackages(userId).contains(callingPackage);
++                public boolean shouldHideForCallingUid(@Nullable String targetPackageName,
++                        int callingUid) {
++                    final Computer snapshot = (Computer) LocalServices.getService(
++                            PackageManagerInternal.class).snapshot();
++                    return snapshot.shouldHideLineageTargetForCaller(
++                            targetPackageName, callingUid);
+                 }
+ 
+                 @Override
+                 public boolean shouldHideForCallingSetting(@Nullable String targetPackageName,
+-                        @Nullable SettingBase callingSetting, int callingUid,
+-                        @UserIdInt int userId) {
++                        @Nullable SettingBase callingSetting, int callingUid) {
+                     if (!isLineageVisibilityTargetPackage(targetPackageName)) {
+                         return false;
+                     }
+                     if (isSystemOrRootOrShell(callingUid) || callingSetting == null) {
+                         return false;
+                     }
+-                    final ArraySet<String> blockedPackages = getBlockedPackages(userId);
++                    // The query's target user does not select the caller's policy.
++                    final int callingUserId = UserHandle.getUserId(callingUid);
++                    final ArraySet<String> blockedPackages = getBlockedPackages(callingUserId);
+                     if (blockedPackages.isEmpty()) {
+                         return false;
+                     }
+                     if (callingSetting instanceof PackageSetting) {
+-                        return blockedPackages.contains(
+-                                ((PackageSetting) callingSetting).getPackageName());
++                        final PackageSetting state = (PackageSetting) callingSetting;
++                        return state.getUserStateOrDefault(callingUserId).isInstalled()
++                                && blockedPackages.contains(state.getPackageName());
+                     }
+                     if (callingSetting instanceof SharedUserSetting) {
+                         @SuppressWarnings("unchecked")
+@@ -107,8 +109,9 @@ public final class LineageAppVisibilityService extends SystemService {
+                                 (ArraySet<PackageStateInternal>)
+                                         ((SharedUserSetting) callingSetting).getPackageStates();
+                         for (int i = packageStates.size() - 1; i >= 0; i--) {
+-                            if (blockedPackages.contains(
+-                                    packageStates.valueAt(i).getPackageName())) {
++                            final PackageStateInternal state = packageStates.valueAt(i);
++                            if (state.getUserStateOrDefault(callingUserId).isInstalled()
++                                    && blockedPackages.contains(state.getPackageName())) {
+                                 return true;
+                             }
+                         }
+@@ -132,6 +135,7 @@ public final class LineageAppVisibilityService extends SystemService {
+         LocalServices.getService(UserManagerInternal.class)
+                 .addUserLifecycleListener(mUserLifecycleListener);
+         publishLocalService(LineageAppVisibilityManagerInternal.class, mLocalService);
++        invalidateClientCaches();
+     }
+ 
+     private boolean isLineageVisibilityTargetPackage(@Nullable String packageName) {
+@@ -175,12 +179,21 @@ public final class LineageAppVisibilityService extends SystemService {
+         synchronized (mLock) {
+             mBlockedPackagesByUser.remove(userId);
+         }
++        invalidateClientCaches();
+     }
+ 
+     private void invalidateAllBlockedPackages() {
+         synchronized (mLock) {
+             mBlockedPackagesByUser.clear();
+         }
++        invalidateClientCaches();
++    }
++
++    private static void invalidateClientCaches() {
++        // PackageInfo and ApplicationInfo share the package-info cache key.
++        PackageManager.invalidatePackageInfoCache();
++        ApplicationPackageManager.invalidateGetPackagesForUidCache();
++        ApplicationPackageManager.invalidateQueryIntentActivitiesCache();
+     }
+ 
+     @NonNull
+diff --git a/services/core/java/com/android/server/wm/ActivityStarter.java b/services/core/java/com/android/server/wm/ActivityStarter.java
+index 1e58b0c71..6961066f1 100644
+--- a/services/core/java/com/android/server/wm/ActivityStarter.java
++++ b/services/core/java/com/android/server/wm/ActivityStarter.java
+@@ -1044,11 +1044,11 @@ class ActivityStarter {
+     }
+ 
+     private boolean shouldHideLineageTargetForCaller(@Nullable String targetPackageName,
+-            @Nullable String callingPackage, int callingUid, @UserIdInt int userId) {
++            int callingUid) {
+         final LineageAppVisibilityManagerInternal visibilityManager =
+                 LocalServices.getService(LineageAppVisibilityManagerInternal.class);
+-        return visibilityManager != null && visibilityManager.shouldHideForCallingPackage(
+-                targetPackageName, callingPackage, callingUid, userId);
++        return visibilityManager != null && visibilityManager.shouldHideForCallingUid(
++                targetPackageName, callingUid);
+     }
+ 
+     /**
+@@ -1109,8 +1109,7 @@ class ActivityStarter {
+         final int launchMode = aInfo != null ? aInfo.launchMode : 0;
+         if (err == ActivityManager.START_SUCCESS) {
+             final String targetPackageName = getTargetPackageNameForVisibilityCheck(intent);
+-            if (shouldHideLineageTargetForCaller(targetPackageName, callingPackage, callingUid,
+-                    request.userId)) {
++            if (shouldHideLineageTargetForCaller(targetPackageName, callingUid)) {
+                 err = ActivityManager.START_CLASS_NOT_FOUND;
+             }
+         }
+-- 
+2.43.0
+
