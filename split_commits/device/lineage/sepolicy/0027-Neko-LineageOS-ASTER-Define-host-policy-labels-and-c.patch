@@ -1,0 +1,126 @@
+From 6384c1d0dfd877531a3103253b63ea0298deefe1 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 16:27:50 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Define host policy labels and
+ consumer access
+
+Include ASTER's system_ext policy directories and label the integrity service,
+feature policy, endpoint receipts and FAS boot records.
+
+Grant the framework, Keystore and FAS consumers the properties and bounded
+collector operations required by the host integration. Publish compatibility
+entries for the new public types while keeping collector implementation policy
+under external/aster.
+
+Change-Id: I04667b45d4fa0c3dc9fdb2bd744a8e510ca2d0fa
+---
+ .../private/compat/202404/202404.ignore.cil   |  4 ++++
+ common/private/platform_integrity.te          | 21 +++++++++++++++++++
+ common/private/property_contexts              |  9 ++++++++
+ common/private/service_contexts               |  2 ++
+ common/public/property.te                     |  5 +++++
+ common/sepolicy.mk                            |  5 +++++
+ 6 files changed, 46 insertions(+)
+ create mode 100644 common/private/platform_integrity.te
+
+diff --git a/common/private/compat/202404/202404.ignore.cil b/common/private/compat/202404/202404.ignore.cil
+index ac8b827..0a6913f 100644
+--- a/common/private/compat/202404/202404.ignore.cil
++++ b/common/private/compat/202404/202404.ignore.cil
+@@ -5,6 +5,10 @@
+ (typeattribute new_objects)
+ (typeattributeset new_objects
+   ( new_objects
++    platform_integrity_device
++    platform_integrity_config_prop
++    platform_integrity_fasd_boot_prop
++    platform_integrity_policy_prop
+     iso9660
+     udf
+     usb_uvc_config_prop
+diff --git a/common/private/platform_integrity.te b/common/private/platform_integrity.te
+new file mode 100644
+index 0000000..edd0241
+--- /dev/null
++++ b/common/private/platform_integrity.te
+@@ -0,0 +1,21 @@
++# Host integration: feature policy, endpoint receipts and ASTER consumers.
++get_prop(domain, platform_integrity_config_prop)
++get_prop(domain, platform_integrity_policy_prop)
++set_prop(keystore, platform_integrity_tee_ack_prop)
++allow platform_app platform_integrity_service:service_manager find;
++system_internal_prop(platform_integrity_tee_ack_prop)
++type platform_integrity_service, service_manager_type, system_server_service;
++allow system_app platform_integrity_service:service_manager find;
++unix_socket_connect(system_server, platform_integrity, platform_integrityd)
++add_service(system_server, platform_integrity_service)
++set_prop(system_server, platform_integrity_policy_prop)
++get_prop(system_server, platform_integrity_tee_ack_prop)
++get_prop(platform_integrityd, custom_version_prop)
++allow appdomain proc_platform_integrity:file r_file_perms;
++allow shell proc_platform_integrity:file r_file_perms;
++set_prop(fasd, platform_integrity_fasd_boot_prop)
++get_prop(system_server, platform_integrity_fasd_boot_prop)
++# Host FAS control reads only the boot-sticky submission marker/status.
++allow fasd platform_integrity_device:chr_file { open read getattr ioctl };
++allowxperm fasd platform_integrity_device:chr_file ioctl { 0x4970 0x4984 };
++allow init platform_integrity_boot_record:dir create_dir_perms;
+diff --git a/common/private/property_contexts b/common/private/property_contexts
+index 8163a77..cb033f0 100644
+--- a/common/private/property_contexts
++++ b/common/private/property_contexts
+@@ -57,3 +57,12 @@ persist.sysui.disable_mirroring_confirmation_dialog u:object_r:hdmi_config_prop:
+ # USB
+ ro.usb.uvc.disable_video_encode_flag   u:object_r:usb_uvc_config_prop:s0
+ vendor.usb.uvc.payload_transfer_size   u:object_r:usb_uvc_config_prop:s0
++
++ro.platform.integrity.enabled u:object_r:platform_integrity_config_prop:s0 exact bool
++sys.integrity.policy u:object_r:platform_integrity_policy_prop:s0 exact string
++sys.integrity.tee_ack u:object_r:platform_integrity_tee_ack_prop:s0 exact string
++
++sys.integrity.fasd_boot u:object_r:platform_integrity_fasd_boot_prop:s0 exact string
++
++
++sys.integrity.tee_status u:object_r:platform_integrity_tee_ack_prop:s0 exact string
+diff --git a/common/private/service_contexts b/common/private/service_contexts
+index 6426d26..3aa73cf 100644
+--- a/common/private/service_contexts
++++ b/common/private/service_contexts
+@@ -5,3 +5,5 @@ displayservice                            u:object_r:lineage_livedisplay_service
+ trustinterface                            u:object_r:lineage_trust_service:s0
+ profile                                   u:object_r:lineage_profile_service:s0
+ pushbroker                                u:object_r:lineage_pushbroker_service:s0
++
++platform_integrity u:object_r:platform_integrity_service:s0
+diff --git a/common/public/property.te b/common/public/property.te
+index 17c5cd0..741ed70 100644
+--- a/common/public/property.te
++++ b/common/public/property.te
+@@ -9,3 +9,8 @@ system_vendor_config_prop(usb_uvc_config_prop)
+ 
+ # xtra-daemon control
+ system_restricted_prop(xtra_control_prop)
++
++system_restricted_prop(platform_integrity_config_prop)
++system_restricted_prop(platform_integrity_policy_prop)
++
++system_restricted_prop(platform_integrity_fasd_boot_prop)
+diff --git a/common/sepolicy.mk b/common/sepolicy.mk
+index 9a1620d..a34110f 100644
+--- a/common/sepolicy.mk
++++ b/common/sepolicy.mk
+@@ -15,6 +15,11 @@ SYSTEM_EXT_PUBLIC_SEPOLICY_DIRS += \
+ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += \
+     device/lineage/sepolicy/common/private
+ 
++# ASTER definitions retain their system_ext public/private partition identity.
++# Host/vendor consumer grants still reference these types even when disabled.
++SYSTEM_EXT_PUBLIC_SEPOLICY_DIRS += external/aster/sepolicy/system_ext/public
++SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += external/aster/sepolicy/system_ext/private
++
+ ifeq ($(TARGET_USES_PREBUILT_VENDOR_SEPOLICY), true)
+ SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS += \
+     device/lineage/sepolicy/common/dynamic \
+-- 
+2.43.0
+

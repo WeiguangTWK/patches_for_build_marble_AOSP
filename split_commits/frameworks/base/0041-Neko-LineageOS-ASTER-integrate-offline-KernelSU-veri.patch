@@ -1,0 +1,452 @@
+From a0ac52fb2956730e6821c7fbc1620ace890e286f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:52:27 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] integrate offline KernelSU
+ verification and resident evidence
+
+Extend KernelSU source requests with an offline manager-APK channel.
+Resolve the installed manager APK as an input locator and leave source
+authentication and module extraction to the ASTER executor.
+
+Distinguish complete loading-input evidence from partial resident
+evidence. Bind requests and reports to the appropriate load_id or
+resident_id and reject mixed instance identifiers.
+
+Integrate verified KernelSU evidence into effective classification and
+the existing mode-specific policy. Allow verified KSU findings to be
+reconciled with compromise-mode history while retaining unrelated
+alarms and verification failures.
+
+Parse explicit resident sampling progress and present CHECKING while
+supported comparisons are pending. Preserve higher-priority findings,
+evidence-loss handling and existing permit conditions.
+
+Change-Id: I12b220a0ae5049c9e575f6b408c86e57053f5ae1
+---
+ .../EnvironmentSnapshot.java                  | 161 ++++++++++++++++--
+ .../KernelSuSourceVerifier.java               |  26 ++-
+ .../PlatformIntegrityService.java             |  54 +++++-
+ 3 files changed, 214 insertions(+), 27 deletions(-)
+
+diff --git a/services/core/java/com/android/server/platformintegrity/EnvironmentSnapshot.java b/services/core/java/com/android/server/platformintegrity/EnvironmentSnapshot.java
+index bdce840c1..01f1715f2 100644
+--- a/services/core/java/com/android/server/platformintegrity/EnvironmentSnapshot.java
++++ b/services/core/java/com/android/server/platformintegrity/EnvironmentSnapshot.java
+@@ -31,6 +31,16 @@ final class EnvironmentSnapshot {
+     final ArrayList<Bundle> tsaCandidates = new ArrayList<>();
+     final TreeSet<String> tsaResolvedNames = new TreeSet<>();
+     final TreeSet<String> tsaOfficialReasons = new TreeSet<>(), tsaCommunityReasons = new TreeSet<>();
++    final java.util.HashMap<Long, JSONObject> tsaResidentProofs = new java.util.HashMap<>();
++    long tsaLocalUntilNs;
++
++    private static boolean validSourceRoot(JSONObject source, String repository) throws Exception {
++        String root = text(source, "release_root");
++        if (!root.isEmpty()) return root.equals("https://github.com/" + repository + "/releases");
++        String pkg = text(source, "manager_package");
++        return pkg.length() <= 200 && pkg.matches("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+")
++                && repository.equals("apk/" + pkg);
++    }
+ 
+     static long integer(JSONObject value, String key, long min, long max) throws Exception {
+         Object n = value.get(key);
+@@ -184,7 +194,7 @@ final class EnvironmentSnapshot {
+         Object token = value.get("resident_token");
+         if (!(token instanceof String) || !((String) token).matches("|[0-9a-f]{64}"))
+             throw new IOException("Invalid resident binding");
+-        facts.put("resident_green", false).put("resident_until_ms", 0)
++        facts.put("resident_green", false).put("resident_in_progress", false).put("resident_until_ms", 0)
+                 .put("resident_changed_names", new JSONArray());
+         if (backend.equals("later_digest")) {
+             JSONObject resident = value.getJSONObject("resident");
+@@ -200,6 +210,11 @@ final class EnvironmentSnapshot {
+             integer(resident, "pm_epoch", 0, Long.MAX_VALUE);
+             String state = text(resident, "status");
+             if (!state.matches("green|pending|difference|unavailable")) throw new IOException("Resident state");
++            // Optional presentation hint from newer daemons; it grants no permit.
++            boolean inProgress = resident.has("in_progress") && bool(resident, "in_progress");
++            if (inProgress && (!state.equals("pending") || unknown == 0 || different != 0))
++                throw new IOException("Invalid resident progress");
++            facts.put("resident_in_progress", inProgress);
+             if ((state.equals("green") || state.equals("difference"))
+                     && (required != facts.getInt("early_name_only_rows")
+                         || !text(resident, "target_set_sha256").matches("[0-9a-f]{64}")))
+@@ -234,6 +249,7 @@ final class EnvironmentSnapshot {
+                 throw new IOException("Unbound effective syscall classification");
+             return;
+         }
++        if (backend.equals("later_digest")) { readTsaLocalEffective(value); return; }
+         if (!backend.equals("full") || !text(value, "classification_token").matches("[0-9a-f]{64}"))
+             throw new IOException("Invalid effective classification binding");
+         JSONObject effective = value.getJSONObject("tsa").getJSONObject("effective");
+@@ -256,7 +272,7 @@ final class EnvironmentSnapshot {
+             String name = text(proof, "module_name"), repo = text(proof, "repository");
+             if (!name.matches("[A-Za-z0-9_][A-Za-z0-9_.-]{0,54}")
+                     || !repo.matches("[A-Za-z0-9_.-]{1,255}/[A-Za-z0-9_.-]{1,255}")
+-                    || !text(proof, "release_root").equals("https://github.com/" + repo + "/releases")
++                    || !validSourceRoot(proof, repo)
+                     || !instances.add(integer(proof, "load_id", 1, Long.MAX_VALUE)))
+                 throw new IOException("Invalid proof identity");
+             for (String field : new String[]{"manager_certificate_sha256", "input_sha256", "source_sha256"})
+@@ -293,6 +309,77 @@ final class EnvironmentSnapshot {
+         facts.put("raw_syscall_changed", raw).put("syscall_changed", active);
+     }
+ 
++    private void readTsaLocalEffective(JSONObject value) throws Exception {
++        if (!text(value, "classification_token").matches("[0-9a-f]{64}")
++                || value.getJSONObject("classification").has("syscall_changed"))
++            throw new IOException("Invalid local classification binding");
++        JSONObject effective = value.getJSONObject("tsa").getJSONObject("effective");
++        integer(effective, "version", 2, 2);
++        expect(effective, "evidence_kind", "partial_resident");
++        if (integer(effective, "sequence", 1, Long.MAX_VALUE) != facts.getLong("sequence"))
++            throw new IOException("Stale local classification");
++        JSONArray proofs = effective.getJSONArray("proofs");
++        if (proofs.length() < 1 || proofs.length() > 8) throw new IOException("Local proof count");
++        TreeSet<String> proved = new TreeSet<>();
++        long now = android.os.SystemClock.elapsedRealtimeNanos(), until = Long.MAX_VALUE;
++        for (int i = 0; i < proofs.length(); ++i) {
++            JSONObject proof = proofs.getJSONObject(i);
++            expect(proof, "evidence_kind", "partial_resident");
++            if (proof.has("load_id") || proof.has("input_length") || proof.has("input_sha256"))
++                throw new IOException("Mixed local proof kinds");
++            String module = text(proof, "module_name"), repo = text(proof, "repository");
++            long id = integer(proof, "resident_id", 1, Long.MAX_VALUE);
++            if (!module.matches("[A-Za-z0-9_][A-Za-z0-9_.-]{0,54}") || !proved.add(module)
++                    || !repo.matches("[A-Za-z0-9_.-]{1,255}/[A-Za-z0-9_.-]{1,255}")
++                    || !validSourceRoot(proof, repo)
++                    || tsaResidentProofs.put(id, proof) != null) throw new IOException("Local proof identity");
++            for (String field : new String[]{"manager_certificate_sha256", "source_sha256", "plan_id"})
++                if (!text(proof, field).matches("[0-9a-f]{64}")) throw new IOException("Local proof digest");
++            integer(proof, "source_length", 64, 8 * 1024 * 1024);
++            integer(proof, "module_epoch", 1, Long.MAX_VALUE);
++            integer(proof, "pm_epoch", 0, Long.MAX_VALUE);
++            long length = integer(proof, "body_length", 32, 1024);
++            long compared = integer(proof, "body_compared", 32, length);
++            long entry = integer(proof, "entry_compared", 4, 8);
++            if (compared * 4 < length * 3 || (entry != 4 && entry != 8)) throw new IOException("Local proof coverage");
++            integer(proof, "native_slot", 0, 1023);
++            expect(proof, "transform_profile", "ksu-orig-undef-abs-v1");
++            expect(proof, "syscall_profile", "ksu-native-unused-dispatcher-v1");
++            long start = integer(proof, "started_ns", 1, Long.MAX_VALUE);
++            long end = integer(proof, "completed_ns", start, Long.MAX_VALUE);
++            long deadline = integer(proof, "valid_until_ns", end, Long.MAX_VALUE);
++            if (end - start >= 20_000_000L || now < end || deadline <= now
++                    || end / 1_000_000L > completed || deadline != Math.addExact(start, 10_000_000_000L))
++                throw new IOException("Local sample lifetime");
++            until = Math.min(until, deadline);
++        }
++        JSONArray resolved = boundedNames(new JSONObject().put("unknown_names", effective.getJSONArray("resolved_names")));
++        TreeSet<String> resolvedNames = new TreeSet<>();
++        for (int i = 0; i < resolved.length(); ++i) {
++            String name = resolved.getString(i);
++            if (!proved.contains(name)) throw new IOException("Unproved local resolution");
++            resolvedNames.add(name);
++        }
++        for (String scope : new String[]{"official", "community"}) {
++            JSONArray raw = boundedNames(new JSONObject().put("unknown_names", effective.getJSONObject("raw_unknown_names").getJSONArray(scope)));
++            TreeSet<String> remaining = new TreeSet<>();
++            for (int i = 0; i < raw.length(); ++i) if (!resolvedNames.contains(raw.getString(i))) remaining.add(raw.getString(i));
++            JSONObject classification = value.getJSONObject("classification").getJSONObject(scope);
++            JSONArray active = names(classification);
++            TreeSet<String> current = new TreeSet<>();
++            for (int i = 0; i < active.length(); ++i) current.add(active.getString(i));
++            if (!remaining.equals(current)) throw new IOException("Invalid local name reduction");
++            JSONArray reasons = effective.getJSONObject("resolved_reasons").getJSONArray(scope);
++            if (reasons.length() > 1) throw new IOException("Local reason count");
++            for (int i = 0; i < reasons.length(); ++i) {
++                if (!"UNKNOWN_MODULE".equals(reasons.getString(i)) || raw.length() == 0 || !current.isEmpty())
++                    throw new IOException("Invalid local reason reduction");
++                (scope.equals("community") ? tsaCommunityReasons : tsaOfficialReasons).add("UNKNOWN_MODULE");
++            }
++        }
++        tsaResolvedNames.addAll(resolvedNames); tsaLocalUntilNs = until;
++    }
++
+     private void readTsa(JSONObject tsa, String backend) {
+         if (tsa == null) return;
+         try {
+@@ -304,7 +391,9 @@ final class EnvironmentSnapshot {
+                 tsaStatus = status;
+                 return;
+             }
+-            if (!backend.equals("full")
++            boolean resident = backend.equals("later_digest")
++                    && "partial_resident".equals(text(tsa, "evidence_kind"));
++            if ((!backend.equals("full") && !resident)
+                     || integer(tsa, "sequence", 1, Long.MAX_VALUE) != facts.getLong("sequence")
+                     || (bool(tsa, "overflow") && !status.equals("partial")))
+                 throw new IOException("Unbound TSA candidates");
+@@ -317,16 +406,41 @@ final class EnvironmentSnapshot {
+                 if (!candidateStatus.matches("source_pending|source_verified")) throw new IOException("Candidate state");
+                 String module = text(row, "module_name");
+                 String manager = text(row, "manager_certificate_sha256");
+-                String input = text(row, "input_sha256");
+-                long load = integer(row, "load_id", 1, Long.MAX_VALUE);
+                 if (!module.matches("[A-Za-z0-9_][A-Za-z0-9_.-]{0,54}")
+-                        || !manager.matches("[0-9a-f]{64}") || !input.matches("[0-9a-f]{64}")
+-                        || !instances.add(load)) throw new IOException("Invalid TSA instance");
+-                long length = integer(row, "input_length", 64, 8 * 1024 * 1024);
++                        || !manager.matches("[0-9a-f]{64}")) throw new IOException("Invalid TSA instance");
++                Bundle candidate = new Bundle();
++                if (resident) {
++                    expect(row, "evidence_kind", "partial_resident");
++                    if (row.has("load_id") || row.has("input_length") || row.has("input_sha256"))
++                        throw new IOException("Mixed TSA instance kinds");
++                    long id = integer(row, "resident_id", 1, Long.MAX_VALUE);
++                    if (!instances.add(id)) throw new IOException("Duplicate TSA resident instance");
++                    long started = integer(row, "started_ns", 1, Long.MAX_VALUE);
++                    long ended = integer(row, "completed_ns", started, Long.MAX_VALUE);
++                    long now = android.os.SystemClock.elapsedRealtimeNanos();
++                    if (ended - started >= 20_000_000L || now < ended || now - started >= 2_000_000_000L)
++                        throw new IOException("Stale TSA resident observation");
++                    candidate.putString("evidence_kind", "partial_resident");
++                    candidate.putLong("resident_id", id);
++                    candidate.putLong("module_epoch", integer(row, "module_epoch", 1, Long.MAX_VALUE));
++                    candidate.putLong("pm_epoch", integer(row, "pm_epoch", 0, Long.MAX_VALUE));
++                    candidate.putLong("completed_ns", ended);
++                } else {
++                    if (row.has("resident_id") || row.has("evidence_kind"))
++                        throw new IOException("Mixed TSA input kinds");
++                    String input = text(row, "input_sha256");
++                    long load = integer(row, "load_id", 1, Long.MAX_VALUE);
++                    if (!input.matches("[0-9a-f]{64}") || !instances.add(load))
++                        throw new IOException("Invalid TSA input instance");
++                    candidate.putString("evidence_kind", "full_input");
++                    candidate.putLong("load_id", load);
++                    candidate.putLong("input_length", integer(row, "input_length", 64, 8 * 1024 * 1024));
++                    candidate.putString("input_sha256", input);
++                }
+                 integer(row, "scanned_bytes", 1, 128 * 1024);
+                 JSONArray forks = row.getJSONArray("forks");
+                 if (forks.length() < 1 || forks.length() > 8) throw new IOException("Invalid TSA Fork list");
+-                ArrayList<String> names = new ArrayList<>(), repositories = new ArrayList<>(), roots = new ArrayList<>();
++                ArrayList<String> names = new ArrayList<>(), repositories = new ArrayList<>(), roots = new ArrayList<>(), packages = new ArrayList<>();
+                 TreeSet<String> unique = new TreeSet<>();
+                 for (int j = 0; j < forks.length(); ++j) {
+                     JSONObject fork = forks.getJSONObject(j);
+@@ -335,17 +449,30 @@ final class EnvironmentSnapshot {
+                     if (name.isEmpty() || name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 96
+                             || !name.equals(name.trim()) || name.matches("(?s).*[\\x00-\\x1f\\x7f].*")
+                             || !repo.matches("[A-Za-z0-9_.-]{1,255}/[A-Za-z0-9_.-]{1,255}")
+-                            || !root.equals("https://github.com/" + repo + "/releases")
++                            || !validSourceRoot(fork, repo)
++                            || !text(fork, "manager_package").matches("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+")
++                            || text(fork, "manager_package").length() > 200
++                            || !text(fork, "apk_profile").equals("ksu-rustembed-arm64-v1")
+                             || !unique.add(repo.toLowerCase(Locale.ROOT))) throw new IOException("Invalid TSA Fork");
+-                    names.add(name); repositories.add(repo); roots.add(root);
++                    names.add(name); repositories.add(repo); roots.add(root); packages.add(text(fork, "manager_package"));
+                 }
+-                Bundle candidate = new Bundle();
+                 candidate.putString("module_name", module);
+                 candidate.putString("status", candidateStatus);
+                 if (candidateStatus.equals("source_verified")) {
+                     String verifiedRepo = text(row, "verified_repository");
+                     if (!repositories.contains(verifiedRepo) || !report.has("classification_token"))
+                         throw new IOException("Unbound verified candidate");
++                    if (resident) {
++                        JSONObject proof = tsaResidentProofs.get(candidate.getLong("resident_id"));
++                        if (proof == null || !verifiedRepo.equals(text(proof, "repository"))
++                                || !module.equals(text(proof, "module_name"))
++                                || !manager.equals(text(proof, "manager_certificate_sha256"))
++                                || candidate.getLong("module_epoch") != proof.getLong("module_epoch")
++                                || candidate.getLong("pm_epoch") != proof.getLong("pm_epoch")
++                                || !text(row, "verified_tag").equals(text(proof, "tag"))
++                                || !text(row, "verified_asset").equals(text(proof, "asset_name")))
++                            throw new IOException("Unbound resident source");
++                    }
+                     candidate.putString("verified_repository", verifiedRepo);
+                     candidate.putString("verified_name", names.get(repositories.indexOf(verifiedRepo)));
+                     String tag = text(row, "verified_tag"), asset = text(row, "verified_asset");
+@@ -353,21 +480,21 @@ final class EnvironmentSnapshot {
+                             || !asset.matches("[A-Za-z0-9_.+-]{1,200}\\.ko")) throw new IOException("Verified source version");
+                     candidate.putString("verified_tag", tag); candidate.putString("verified_asset", asset);
+                 }
+-                candidate.putLong("load_id", load);
+-                candidate.putLong("input_length", length);
+-                candidate.putString("input_sha256", input);
+                 candidate.putString("manager_certificate_sha256", manager);
+                 candidate.putStringArrayList("fork_names", names);
+                 candidate.putStringArrayList("repositories", repositories);
+                 candidate.putStringArrayList("release_roots", roots);
++                candidate.putStringArrayList("manager_packages", packages);
+                 tsaCandidates.add(candidate);
+             }
+             tsaStatus = status;
+             if (tsa.has("source_ready")) {
+                 boolean ready = bool(tsa, "source_ready");
+-                if (ready && (!backend.equals("full") || integer(tsa, "source_executor_generation", 1, Long.MAX_VALUE) < 1))
++                if (ready && ((!backend.equals("full") && !resident)
++                        || integer(tsa, "source_executor_generation", 1, Long.MAX_VALUE) < 1 || !tsa.has("source_job")))
+                     throw new IOException("Source executor binding");
+-                Bundle job = KernelSuSourceVerifier.parse(tsa.getJSONObject("source_job"));
++                Bundle job = KernelSuSourceVerifier.parse(tsa.optJSONObject("source_job") == null
++                        ? new JSONObject() : tsa.getJSONObject("source_job"));
+                 tsaSourceReady = ready;
+                 tsaSourceState = job;
+             }
+diff --git a/services/core/java/com/android/server/platformintegrity/KernelSuSourceVerifier.java b/services/core/java/com/android/server/platformintegrity/KernelSuSourceVerifier.java
+index 92cb829dc..3deddf4fa 100644
+--- a/services/core/java/com/android/server/platformintegrity/KernelSuSourceVerifier.java
++++ b/services/core/java/com/android/server/platformintegrity/KernelSuSourceVerifier.java
+@@ -8,10 +8,12 @@ import org.json.JSONObject;
+ 
+ /** UI request adapter only. No HTTP, submitted file bytes or cached approvals. */
+ final class KernelSuSourceVerifier {
+-    interface Binding { Bundle get(long loadId, String repository) throws Exception; }
++    interface Binding { Bundle get(String kind, long id, String repository) throws Exception; }
++    interface ManagerApk { String get(String packageName) throws Exception; }
+     private final Binding mBinding;
++    private final ManagerApk mManagerApk;
+     private Bundle mState = new Bundle();
+-    KernelSuSourceVerifier(Binding binding) { mBinding = binding; }
++    KernelSuSourceVerifier(Binding binding, ManagerApk managerApk) { mBinding = binding; mManagerApk = managerApk; }
+     synchronized Bundle state() { return new Bundle(mState); }
+     synchronized void offer(Bundle state) { mState = state == null ? new Bundle() : new Bundle(state); }
+     Bundle request(Bundle request) {
+@@ -20,14 +22,20 @@ final class KernelSuSourceVerifier {
+         try {
+             JSONObject packet = new JSONObject();
+             String action = request.getString("action", ""); packet.put("action", action);
+-            if (action.equals("list")) {
+-                Bundle binding = mBinding.get(request.getLong("load_id"), request.getString("repository", ""));
++            if (action.equals("list") || action.equals("offline_list")) {
++                String kind = request.getString("evidence_kind", "full_input");
++                if (!kind.equals("full_input") && !kind.equals("partial_resident")) return result;
++                String idKey = kind.equals("partial_resident") ? "resident_id" : "load_id";
++                if (request.containsKey(kind.equals("partial_resident") ? "load_id" : "resident_id")) return result;
++                Bundle binding = mBinding.get(kind, request.getLong(idKey), request.getString("repository", ""));
+                 if (!binding.getBoolean("source_ready")) throw new IOException("Source executor unavailable");
+                 JSONObject identity = new JSONObject();
+                 for (String key : new String[]{"boot_id", "collector_instance", "classifier_instance", "baseline_sha256"})
+                     identity.put(key, binding.getString(key));
+-                packet.put("identity", identity).put("load_id", binding.getLong("load_id"))
+-                        .put("repository", binding.getString("repository")).put("tag", request.getString("tag", ""));
++                packet.put("identity", identity).put(idKey, binding.getLong(idKey))
++                        .put("repository", binding.getString("repository"));
++                if (action.equals("offline_list")) packet.put("apk_path", mManagerApk.get(binding.getString("manager_package")));
++                else packet.put("tag", request.getString("tag", ""));
+             } else if (action.equals("download") || action.equals("cancel")) {
+                 packet.put("token", request.getString("token", ""));
+                 if (action.equals("download")) packet.put("asset_id", request.getLong("asset_id"));
+@@ -47,13 +55,17 @@ final class KernelSuSourceVerifier {
+             if (!token.matches("[0-9a-f]{32}")) throw new IOException("Source job token");
+             result.putString("token", token);
+         }
+-        for (String field : new String[]{"repository", "tag"}) {
++        for (String field : new String[]{"repository", "tag", "channel", "current_kmi"}) {
+             String text = value.optString(field, "");
+             if (text.length() > 512 || text.indexOf('\0') >= 0 || text.indexOf('\n') >= 0 || text.indexOf('\r') >= 0)
+                 throw new IOException("Source job field");
+             result.putString(field, text);
+         }
+         if (value.has("load_id")) result.putLong("load_id", EnvironmentSnapshot.integer(value, "load_id", 1, Long.MAX_VALUE));
++        if (value.has("resident_id")) {
++            if (value.has("load_id")) throw new IOException("Mixed source instance kinds");
++            result.putLong("resident_id", EnvironmentSnapshot.integer(value, "resident_id", 1, Long.MAX_VALUE));
++        }
+         if (value.has("assets")) {
+             var assets = value.getJSONArray("assets");
+             if (assets.length() > 256) throw new IOException("Source asset count");
+diff --git a/services/core/java/com/android/server/platformintegrity/PlatformIntegrityService.java b/services/core/java/com/android/server/platformintegrity/PlatformIntegrityService.java
+index c37bbccb8..7d1fb0a02 100644
+--- a/services/core/java/com/android/server/platformintegrity/PlatformIntegrityService.java
++++ b/services/core/java/com/android/server/platformintegrity/PlatformIntegrityService.java
+@@ -120,19 +120,31 @@ public final class PlatformIntegrityService extends SystemService {
+     private final AtomicBoolean mNotificationWorkQueued = new AtomicBoolean();
+     private final Runnable mNotificationWork = this::handleNotification;
+     private AsterNotificationClient mNotifications;
+-    private final KernelSuSourceVerifier mKsuSource = new KernelSuSourceVerifier(this::sourceBinding);
++    private final KernelSuSourceVerifier mKsuSource = new KernelSuSourceVerifier(this::sourceBinding, this::managerApkPath);
+ 
+-    private Bundle sourceBinding(long loadId, String repository) throws Exception {
++    private String managerApkPath(String packageName) throws Exception {
++        // Package lookup is outside mLock; it only supplies an untrusted locator.
++        android.content.pm.ApplicationInfo app = getContext().getPackageManager().getApplicationInfo(packageName, 0);
++        if (app.splitSourceDirs != null && app.splitSourceDirs.length != 0)
++            throw new IOException("Split manager APK unsupported");
++        return app.sourceDir;
++    }
++
++    private Bundle sourceBinding(String kind, long id, String repository) throws Exception {
+         synchronized (mLock) {
+             if (mShutdown.closing() || mCurrentFindings == null || mCurrentFindingsTicket == null)
+                 throw new IOException("Candidate unavailable");
+             mNotificationGate.verify(mCurrentFindingsTicket, mCurrentFindings, SystemClock.elapsedRealtime());
+             for (Bundle row : mCurrentFindings.tsaCandidates) {
+                 java.util.ArrayList<String> repos = row.getStringArrayList("repositories");
+-                if (row.getLong("load_id") != loadId || repos == null || !repos.contains(repository)) continue;
++                String idKey = kind.equals("partial_resident") ? "resident_id" : "load_id";
++                if (!kind.equals(row.getString("evidence_kind"))
++                        || id <= 0 || row.getLong(idKey) != id
++                        || repos == null || !repos.contains(repository)) continue;
+                 Bundle binding = new Bundle(row);
+                 binding.putString("repository", repository);
+                 binding.putString("release_root", row.getStringArrayList("release_roots").get(repos.indexOf(repository)));
++                binding.putString("manager_package", row.getStringArrayList("manager_packages").get(repos.indexOf(repository)));
+                 binding.putString("boot_id", mCurrentFindings.bootId);
+                 binding.putBoolean("source_ready", mCurrentFindings.tsaSourceReady);
+                 for (String key : new String[]{"collector_instance", "classifier_instance", "baseline_sha256"})
+@@ -288,8 +300,36 @@ public final class PlatformIntegrityService extends SystemService {
+         if (mCurrentFindings == null || mCurrentFindingsTicket == null || mShutdown.closing()) return false;
+         try {
+             mNotificationGate.verify(mCurrentFindingsTicket, mCurrentFindings, SystemClock.elapsedRealtime());
++            if (mCurrentFindings.tsaLocalUntilNs != 0
++                    && SystemClock.elapsedRealtimeNanos() >= mCurrentFindings.tsaLocalUntilNs) return false;
+             Object stored = reason ? mReasonEvidence.get(value) : mAlarmEvidence.optJSONObject(value);
+             JSONObject evidence = stored instanceof JSONObject ? (JSONObject) stored : null;
++            // Compromise-mode local KSU proof may cover older name-only history.
++            // Keep the record: losing the current proof immediately restores the latch.
++            if (evidence != null && mRequested.equals("COMPROMISE")
++                    && mCurrentFindings.tsaLocalUntilNs != 0
++                    && mLatchedReasons.contains("UNKNOWN_MODULE")
++                    && !mLatchedReasons.contains("UNAPPROVED_VERSION")) {
++                if (!reason && mCurrentFindings.tsaResolvedNames.contains(value)
++                        && !evidence.has("resident_token")) return true;
++                if (reason && value.equals("UNKNOWN_MODULE")
++                        && mCurrentFindings.tsaCommunityReasons.contains(value)
++                        && !mAlarms.isEmpty()) {
++                    boolean covered = true, sameEpisode = false;
++                    for (String name : mAlarms) {
++                        JSONObject alarm = mAlarmEvidence.optJSONObject(name);
++                        if (alarm == null || alarm.has("resident_token")
++                                || !mCurrentFindings.tsaResolvedNames.contains(name)) {
++                            covered = false;
++                            break;
++                        }
++                        sameEpisode |= evidence.optString("boot").equals(alarm.optString("boot"))
++                                && evidence.optString("collector").equals(alarm.optString("collector"))
++                                && evidence.optString("classifier").equals(alarm.optString("classifier"));
++                    }
++                    if (covered && sameEpisode) return true;
++                }
++            }
+             if (evidence == null || !mBoot.equals(evidence.optString("boot"))
+                     || !mCurrentFindings.facts.getString("collector_instance").equals(evidence.optString("collector"))
+                     || !mCurrentFindings.classifier.equals(evidence.optString("classifier"))) return false;
+@@ -1564,14 +1604,22 @@ public final class PlatformIntegrityService extends SystemService {
+                     : "unknown_modules") != 0;
+             boolean mismatch = facts.getInt(communityScope ? "compromise_unapproved_versions"
+                     : "normal_unapproved_versions") != 0;
++            boolean resampling = facts.optBoolean("resident_in_progress")
++                    && (mRequested.equals("COMPROMISE") || (mRequested.equals("ENTER_COMPROMISE")
++                        && !mBoot.equals(mRequestBoot)))
++                    && facts.getInt("unapproved_candidate_rows") == 0
++                    && !facts.getBoolean("compromise_unknown_overflow")
++                    && !facts.getBoolean("compromise_unapproved_names_overflow");
+             mReasonCode = mInterrupted ? "CONTROL_INTERRUPTED"
+                     : mEvidenceLost ? "EVIDENCE_LOST"
+                     : hasAlarmsLocked() ? "HISTORICAL_ALERTS"
+                     : unknown ? "UNKNOWN_MODULE" : mismatch ? "HASH_MISMATCH"
++                    : resampling ? "CHECKING"
+                     : mEarlyNameOnlyRows != 0 ? "COVERAGE_INCOMPLETE" : "POLICY_PENDING";
+             mReason = mInterrupted ? "Collector or classifier changed; restart required"
+                     : hasAlarmsLocked() ? "Retained evidence requires normal-mode recovery"
+                     : unknown || mismatch ? "Selected reference scope has unapproved module evidence"
++                    : resampling ? "Resident comparison is in progress"
+                     : mEarlyNameOnlyRows != 0
+                             ? "Initial resident module versions are unverified"
+                             : "Execution authorization is not established";
+-- 
+2.43.0
+

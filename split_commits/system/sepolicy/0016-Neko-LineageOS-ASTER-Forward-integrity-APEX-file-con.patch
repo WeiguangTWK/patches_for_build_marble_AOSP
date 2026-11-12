@@ -1,0 +1,33 @@
+From 005bbbcd0adbbd5f2b2b158523e5d79eb53df1b5 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 16:25:42 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Forward integrity APEX file contexts
+
+Provide the com.android.platform.integrity-file_contexts module through the
+existing APEX policy discovery location. Forward the context source maintained
+under external/aster instead of duplicating its labels in the host tree.
+
+Change-Id: Ice72a7328936edf1e9ef03f820c10e9064590ac8
+---
+ apex/Android.bp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/apex/Android.bp b/apex/Android.bp
+index eafda15..efcc860 100644
+--- a/apex/Android.bp
++++ b/apex/Android.bp
+@@ -22,6 +22,11 @@ package {
+ 
+ // TODO(b/236681553): Remove com.android.bluetooth-file_contexts
+ 
++filegroup {
++    name: "com.android.platform.integrity-file_contexts",
++    srcs: [":aster_apex_file_contexts_source"],
++}
++
+ filegroup {
+     name: "apex.test-file_contexts",
+     srcs: [
+-- 
+2.43.0
+

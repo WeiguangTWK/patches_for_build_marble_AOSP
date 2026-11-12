@@ -1,0 +1,132 @@
+From 6c0b18649e6aa2d4da0ab5748d7e0de3c6425f1b Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 19:00:54 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Start early selection and delegate
+ the source executor
+
+Run the bounded ASTER bootstrap after early APEX service discovery and expose
+the collector device with the intended ownership.
+
+Before forking the exact platform_integrityd service, let PID1 prepare the
+kernel's real-task delegation. Cancel preparation on fork failure while keeping
+source authorization unavailable when binding fails.
+
+Supply the shared UAPI headers to both device and host init builds, since
+service.cpp is compiled in both configurations.
+
+Change-Id: I76d6437cc110e3b9c294712ab64498e6606bc92b
+---
+ init/Android.bp    |  3 ++-
+ init/service.cpp   | 24 ++++++++++++++++++++++++
+ rootdir/init.rc    |  7 +++++++
+ rootdir/ueventd.rc |  2 ++
+ 4 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/init/Android.bp b/init/Android.bp
+index 3e2fb07..a8fd8a1 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -213,7 +213,7 @@ libinit_cc_defaults {
+         "libutils",
+         "libvendorsupport",
+     ],
+-    header_libs: ["bionic_libc_platform_headers"],
++    header_libs: ["bionic_libc_platform_headers", "libplatform_integrity_uapi"],
+     bootstrap: true,
+     visibility: [":__subpackages__"],
+ }
+@@ -630,6 +630,7 @@ genrule {
+ cc_defaults {
+     name: "init_host_defaults",
+     host_supported: true,
++    header_libs: ["libplatform_integrity_uapi"],
+     cflags: [
+         "-Wall",
+         "-Wextra",
+diff --git a/init/service.cpp b/init/service.cpp
+index dbae8a7..b6b0387 100644
+--- a/init/service.cpp
++++ b/init/service.cpp
+@@ -22,6 +22,8 @@
+ #include <linux/securebits.h>
+ #include <sched.h>
+ #include <sys/prctl.h>
++#include <sys/ioctl.h>
++#include <platform_integrity.h>
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ #include <termios.h>
+@@ -34,6 +36,7 @@
+ #include <android-base/scopeguard.h>
+ #include <android-base/stringprintf.h>
+ #include <android-base/strings.h>
++#include <android-base/unique_fd.h>
+ #include <cutils/android_get_control_file.h>
+ #include <cutils/sockets.h>
+ #include <processgroup/processgroup.h>
+@@ -695,6 +698,19 @@ Result<void> Service::Start() {
+         }
+     }
+ 
++    // Only PID1 may delegate the real ASTER service fork. Kernel binding occurs
++    // before publication/wakeup, so a reparented or label-spoofed process cannot
++    // claim this role. Failure leaves source authorization unavailable.
++    android::base::unique_fd source_actor;
++    if (name_ == "platform_integrityd" &&
++        args_[0] == "/apex/com.android.platform.integrity/bin/platform_integrityd") {
++        source_actor.reset(open("/dev/platform_integrity", O_RDWR | O_CLOEXEC));
++        pi_source_actor request{};
++        request.version = PI_SOURCE_ACTOR_VERSION; request.struct_size = sizeof(request);
++        request.action = PI_SOURCE_ACTOR_PREPARE;
++        if (source_actor < 0 || ioctl(source_actor.get(), PI_IOC_SOURCE_ACTOR, &request) != 0)
++            source_actor.reset();
++    }
+     pid_t pid = -1;
+     if (namespaces_.flags) {
+         pid = clone(nullptr, nullptr, namespaces_.flags | SIGCHLD, nullptr);
+@@ -714,6 +730,14 @@ Result<void> Service::Start() {
+     }
+ 
+     if (pid < 0) {
++        const int fork_error = errno;
++        if (source_actor >= 0) {
++            pi_source_actor request{};
++            request.version = PI_SOURCE_ACTOR_VERSION; request.struct_size = sizeof(request);
++            request.action = PI_SOURCE_ACTOR_CANCEL;
++            ioctl(source_actor.get(), PI_IOC_SOURCE_ACTOR, &request);
++        }
++        errno = fork_error;
+         pid_ = 0;
+         return ErrnoError() << "Failed to fork";
+     }
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 92dcdd0..2c02edf 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -103,6 +103,13 @@ on early-init
+     chown shell shell /tmp
+     chmod 0771 /tmp
+ 
++on early-init && property:ro.platform.integrity.enabled=true
++    # The preceding early-init action has completed apexd-bootstrap and parsed
++    # APEX service definitions. Bound userspace waiting, never require success
++    # to boot Android. The late classifier must not retry a failed selection.
++    mkdir /dev/aster 0750 root system
++    exec_start platform_integrity_bootstrap
++
+ on init
+     sysclktz 0
+ 
+diff --git a/rootdir/ueventd.rc b/rootdir/ueventd.rc
+index 2ff86a5..b24b9c0 100644
+--- a/rootdir/ueventd.rc
++++ b/rootdir/ueventd.rc
+@@ -95,3 +95,5 @@ subsystem vfio
+ /sys/devices/system/cpu/cpu*   cpufreq/scaling_min_freq   0664  system system
+ /sys/devices/virtual/misc/uhid/*/leds/* brightness   0664  system system
+ /sys/devices/virtual/misc/uhid/*/leds/* multi_intensity   0664  system system
++
++/dev/platform_integrity 0660 system system
+-- 
+2.43.0
+

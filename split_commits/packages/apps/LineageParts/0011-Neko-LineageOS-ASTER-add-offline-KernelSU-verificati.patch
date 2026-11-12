@@ -1,0 +1,323 @@
+From c2e0400c73a633f5d5bd8fdc9b06097fb5926a0c Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:54:57 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] add offline KernelSU verification and
+ refine status UI
+
+Add an offline verification entry alongside online verification in the
+KernelSU dialog. Reuse the existing source-job progress and result
+presentation, and disable online verification when no Release root is
+configured.
+
+Present module choices when the running kernel KMI cannot be resolved.
+Allow the user to reopen an outstanding selection after dismissing the
+dialog or returning to the page, while retaining automatic selection
+for a unique matching KMI.
+
+Place Cancel first without changing its appearance. Render both
+verification actions as text buttons with consistent styling.
+
+Change-Id: I2a3f15da9c7d6a4b7d0ab7e485968c86cac68e35
+---
+ res/values-zh-rCN/integrity_strings.xml       |  13 +-
+ res/values/integrity_strings.xml              |  13 +-
+ .../integrity/IntegritySettings.java          | 111 +++++++++++++++---
+ 3 files changed, 113 insertions(+), 24 deletions(-)
+
+diff --git a/res/values-zh-rCN/integrity_strings.xml b/res/values-zh-rCN/integrity_strings.xml
+index 8e3539d..d13f627 100644
+--- a/res/values-zh-rCN/integrity_strings.xml
++++ b/res/values-zh-rCN/integrity_strings.xml
+@@ -8,7 +8,7 @@
+     <string name="integrity_card_hash">模块内容与批准基线不一致</string>
+     <string name="integrity_card_lost">采集证据存在缺口</string>
+     <string name="integrity_ksu_source_title">来源验证</string>
+-    <string name="integrity_ksu_verify_action">验证来源</string>
++    <string name="integrity_ksu_verify_action">联网验证</string>
+     <string name="integrity_ksu_cancel">取消验证</string>
+     <string name="integrity_ksu_choose_fork">选择候选来源</string>
+     <string name="integrity_ksu_release_title">Release 版本</string>
+@@ -26,13 +26,14 @@
+     <string name="integrity_ksu_unsupported_file">该文件的加载方式暂不支持</string>
+     <string name="integrity_ksu_asset_limit">该版本的文件列表超出本轮处理范围</string>
+     <string name="integrity_ksu_verified">%1$s · 来源已验证</string>
+-    <string name="integrity_ksu_release_info">来源 Release：%1$s</string>
+-    <string name="integrity_ksu_file_info">发布文件：%1$s</string>
++    <string name="integrity_ksu_release_info">来源版本：%1$s</string>
++    <string name="integrity_ksu_file_info">模块文件：%1$s</string>
+     <string name="integrity_ksu_title">KernelSU 识别</string>
+     <string name="integrity_ksu_pending">%1$s 候选 · 待来源验证</string>
+     <string name="integrity_ksu_none">候选检查已完成</string>
+     <string name="integrity_ksu_unavailable">等待候选识别</string>
+     <string name="integrity_ksu_manager_hash">管理器证书 hash 声明：%1$s</string>
++    <string name="integrity_ksu_resident_candidate">通过驻留只读数据识别</string>
+     <string name="integrity_ksu_partial">已完成部分候选识别</string>
+     <string name="integrity_title">环境完整性</string>
+     <string name="integrity_state_title">当前状态</string>
+@@ -44,7 +45,7 @@
+     <string name="integrity_feature_blocked">已被环境策略禁用</string>
+     <string name="integrity_feature_waiting">已配置，但当前被禁用或正在等待确认</string>
+     <string name="integrity_change_failed">无法更改策略，请检查环境状态</string>
+-    <string name="integrity_ksu_request_rejected">无法发起来源验证，请核对版本标签和当前环境状态后重试</string>
++    <string name="integrity_ksu_request_rejected">无法发起来源验证，请核对验证输入和当前环境状态后重试</string>
+     <string name="integrity_unavailable">此产品不支持环境完整性功能</string>
+     <string name="integrity_ready">环境检查通过</string>
+     <string name="integrity_enter_pending">已请求进入妥协模式</string>
+@@ -114,4 +115,8 @@
+     <string name="integrity_partial_resident_coverage">驻留内容局部校验通过</string>
+     <string name="integrity_current_modules">本次检查发现的模块：%1$d</string>
+     <string name="integrity_current_modules_pending">等待当前模块检查结果</string>
++    <string name="integrity_ksu_offline_action">离线验证（推荐）</string>
++    <string name="integrity_ksu_apk_listing">正在验证管理器并读取内核模块…</string>
++    <string name="integrity_ksu_choose_kmi">选择内核 KMI</string>
++    <string name="integrity_ksu_apk_verify">验证所选模块</string>
+ </resources>
+diff --git a/res/values/integrity_strings.xml b/res/values/integrity_strings.xml
+index 9ee7ff5..ff3acfe 100644
+--- a/res/values/integrity_strings.xml
++++ b/res/values/integrity_strings.xml
+@@ -8,7 +8,7 @@
+     <string name="integrity_card_hash">Module content differs from the approved baseline</string>
+     <string name="integrity_card_lost">Collection evidence is incomplete</string>
+     <string name="integrity_ksu_source_title">Source verification</string>
+-    <string name="integrity_ksu_verify_action">Verify source</string>
++    <string name="integrity_ksu_verify_action">Online verification</string>
+     <string name="integrity_ksu_cancel">Cancel verification</string>
+     <string name="integrity_ksu_choose_fork">Choose a candidate source</string>
+     <string name="integrity_ksu_release_title">Release version</string>
+@@ -26,13 +26,14 @@
+     <string name="integrity_ksu_unsupported_file">This file’s loading format is currently unsupported</string>
+     <string name="integrity_ksu_asset_limit">This Release has too many file entries for this verification session</string>
+     <string name="integrity_ksu_verified">%1$s · Source verified</string>
+-    <string name="integrity_ksu_release_info">Source Release: %1$s</string>
+-    <string name="integrity_ksu_file_info">Release asset: %1$s</string>
++    <string name="integrity_ksu_release_info">Source version: %1$s</string>
++    <string name="integrity_ksu_file_info">Module file: %1$s</string>
+     <string name="integrity_ksu_title">KernelSU identification</string>
+     <string name="integrity_ksu_pending">%1$s candidate · Source verification pending</string>
+     <string name="integrity_ksu_none">Candidate check complete</string>
+     <string name="integrity_ksu_unavailable">Waiting for candidate identification</string>
+     <string name="integrity_ksu_manager_hash">Manager certificate hash declaration: %1$s</string>
++    <string name="integrity_ksu_resident_candidate">Identified from resident read-only data</string>
+     <string name="integrity_ksu_partial">Candidate identification partially complete</string>
+     <string name="integrity_title">Environment integrity</string>
+     <string name="integrity_state_title">Current status</string>
+@@ -43,7 +44,7 @@
+     <string name="integrity_feature_permitted">Permitted · Individual settings still apply</string>
+     <string name="integrity_feature_blocked">Blocked by environment policy</string>
+     <string name="integrity_change_failed">Unable to change policy. Check the environment status.</string>
+-    <string name="integrity_ksu_request_rejected">Unable to start source verification. Check the version tag and current environment status, then try again.</string>
++    <string name="integrity_ksu_request_rejected">Unable to start source verification. Check the verification input and current environment status, then try again.</string>
+     <string name="integrity_unavailable">Environment integrity is unavailable on this product</string>
+     <string name="integrity_ready">Environment checks passed</string>
+     <string name="integrity_enter_pending">Compromise mode requested</string>
+@@ -114,4 +115,8 @@
+     <string name="integrity_partial_resident_coverage">Partial resident checks passed</string>
+     <string name="integrity_current_modules">Modules flagged by the current check: %1$d</string>
+     <string name="integrity_current_modules_pending">Waiting for current module findings</string>
++    <string name="integrity_ksu_offline_action">Offline verification (recommended)</string>
++    <string name="integrity_ksu_apk_listing">Verifying the manager and reading kernel modules…</string>
++    <string name="integrity_ksu_choose_kmi">Choose kernel KMI</string>
++    <string name="integrity_ksu_apk_verify">Verify selected module</string>
+ </resources>
+diff --git a/src/org/lineageos/lineageparts/integrity/IntegritySettings.java b/src/org/lineageos/lineageparts/integrity/IntegritySettings.java
+index 16348b5..49b1d12 100644
+--- a/src/org/lineageos/lineageparts/integrity/IntegritySettings.java
++++ b/src/org/lineageos/lineageparts/integrity/IntegritySettings.java
+@@ -279,10 +279,12 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+     private String ksuSummary() {
+         Bundle source = mSnapshot.getBundle("ksu_source");
+         if (source != null) switch (source.getString("status", "")) {
+-            case "listing": return getString(R.string.integrity_ksu_listing);
++            case "listing": return getString(source.getString("channel", "").equals("apk")
++                    ? R.string.integrity_ksu_apk_listing : R.string.integrity_ksu_listing);
+             case "downloading": return getString(R.string.integrity_ksu_downloading);
+             case "verifying": case "offline": return getString(R.string.integrity_ksu_verifying);
+-            case "choose_asset": return getString(R.string.integrity_ksu_choose_asset);
++            case "choose_asset": return getString(source.getString("channel", "").equals("apk")
++                    ? R.string.integrity_ksu_choose_kmi : R.string.integrity_ksu_choose_asset);
+             case "unsupported": return getString(R.string.integrity_ksu_unsupported_file);
+             case "different": return getString(R.string.integrity_ksu_different_file);
+             case "asset_limit": return getString(R.string.integrity_ksu_asset_limit);
+@@ -306,10 +308,19 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+     }
+ 
+     private void showKsu() {
++        Bundle pendingSource = mSnapshot.getBundle("ksu_source");
++        if (pendingSource != null && "choose_asset".equals(pendingSource.getString("status", ""))) {
++            // A pending choice must remain reachable after its one-time
++            // automatic presentation, without restarting source verification.
++            maybeShowAssets(true);
++            return;
++        }
+         String text = ksuSummary();
+         java.util.ArrayList<Bundle> candidates = mSnapshot.getParcelableArrayList("ksu_candidates", Bundle.class);
+         if (candidates != null) for (Bundle candidate : candidates) {
+             text += "\n\n" + candidate.getString("module_name", "") + ".ko";
++            if ("partial_resident".equals(candidate.getString("evidence_kind")))
++                text += "\n" + getString(R.string.integrity_ksu_resident_candidate);
+             java.util.ArrayList<String> repos = candidate.getStringArrayList("repositories");
+             if (repos != null) text += "\n" + String.join(" / ", repos);
+             if (candidate.getString("status", "").equals("source_verified")) {
+@@ -323,14 +334,46 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+             text += "\n\n" + getString(R.string.integrity_ksu_partial);
+         AlertDialog.Builder dialog = new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_ksu_title)
+                 .setMessage(text).setNegativeButton(android.R.string.cancel, null)
+-                .setPositiveButton(R.string.integrity_ksu_verify_action, (d, which) -> chooseSourceFork());
+-        if (!mSnapshot.getBoolean("ksu_source_ready", false)) dialog.setPositiveButton(android.R.string.ok, null);
++                .setPositiveButton(R.string.integrity_ksu_verify_action, (d, which) -> chooseSourceFork(false))
++                .setNeutralButton(R.string.integrity_ksu_offline_action, (d, which) -> chooseSourceFork(true));
+         Bundle source = mSnapshot.getBundle("ksu_source");
+         if (source != null && source.getString("status", "").matches("listing|choose_asset|downloading|verifying|offline")) {
+             dialog.setPositiveButton(android.R.string.ok, null);
+             dialog.setNeutralButton(R.string.integrity_ksu_cancel, (d, which) -> cancelSource(source));
+         }
+-        dialog.show();
++        AlertDialog shown = dialog.create(); shown.show();
++        boolean busy = source != null && source.getString("status", "").matches("listing|choose_asset|downloading|verifying|offline");
++        if (!busy) {
++            android.widget.Button onlineButton = shown.getButton(AlertDialog.BUTTON_POSITIVE);
++            android.widget.Button offlineButton = shown.getButton(AlertDialog.BUTTON_NEUTRAL);
++            // Both verification actions use the existing neutral text style.
++            android.graphics.drawable.Drawable background = offlineButton.getBackground();
++            if (background != null && background.getConstantState() != null) {
++                onlineButton.setBackground(background.getConstantState()
++                        .newDrawable(getResources(), offlineButton.getContext().getTheme()).mutate());
++                onlineButton.setBackgroundTintList(offlineButton.getBackgroundTintList());
++                onlineButton.setBackgroundTintMode(offlineButton.getBackgroundTintMode());
++                onlineButton.setTextColor(offlineButton.getTextColors());
++                onlineButton.setPaddingRelative(offlineButton.getPaddingStart(), offlineButton.getPaddingTop(),
++                        offlineButton.getPaddingEnd(), offlineButton.getPaddingBottom());
++                onlineButton.setMinHeight(offlineButton.getMinHeight());
++            }
++            android.widget.Button cancelButton = shown.getButton(AlertDialog.BUTTON_NEGATIVE);
++            if (cancelButton.getParent() == offlineButton.getParent()
++                    && cancelButton.getParent() instanceof android.view.ViewGroup) {
++                android.view.ViewGroup buttons = (android.view.ViewGroup) cancelButton.getParent();
++                buttons.removeView(cancelButton);
++                buttons.addView(cancelButton, buttons.indexOfChild(offlineButton));
++            }
++            boolean online = false;
++            if (candidates != null) for (Bundle row : candidates) {
++                java.util.ArrayList<String> roots = row.getStringArrayList("release_roots");
++                if (roots != null) for (String root : roots) online |= !root.isEmpty();
++            }
++            boolean ready = mSnapshot.getBoolean("ksu_source_ready", false);
++            onlineButton.setEnabled(ready && online);
++            offlineButton.setEnabled(ready);
++        }
+     }
+ 
+     private void sourceRequest(Bundle request) {
+@@ -354,7 +397,7 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+         Bundle request = new Bundle(); request.putString("action", "cancel");
+         request.putString("token", source.getString("token", "")); sourceRequest(request);
+     }
+-    private void chooseSourceFork() {
++    private void chooseSourceFork(boolean offline) {
+         java.util.ArrayList<Bundle> rows = mSnapshot.getParcelableArrayList("ksu_candidates", Bundle.class);
+         if (rows == null || rows.isEmpty()) return;
+         java.util.ArrayList<Bundle> choices = new java.util.ArrayList<>();
+@@ -363,15 +406,23 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+             java.util.ArrayList<String> repos = row.getStringArrayList("repositories"), names = row.getStringArrayList("fork_names");
+             if (repos == null || names == null) continue;
+             for (int i = 0; i < repos.size(); ++i) {
+-                Bundle choice = new Bundle(); choice.putLong("load_id", row.getLong("load_id"));
++                if (!offline && row.getStringArrayList("release_roots").get(i).isEmpty()) continue;
++                Bundle choice = new Bundle();
++                String kind = row.getString("evidence_kind", "full_input");
++                String idKey = kind.equals("partial_resident") ? "resident_id" : "load_id";
++                choice.putString("evidence_kind", kind); choice.putLong(idKey, row.getLong(idKey));
+                 choice.putString("repository", repos.get(i)); choices.add(choice);
+                 labels.add(names.get(i) + " · " + repos.get(i));
+             }
+         }
+-        if (choices.size() == 1) enterReleaseTag(choices.get(0));
++        if (choices.size() == 1) startSourceChoice(choices.get(0), offline);
+         else if (!choices.isEmpty()) new AlertDialog.Builder(requireContext())
+                 .setTitle(R.string.integrity_ksu_choose_fork).setItems(labels.toArray(new String[0]),
+-                    (d, which) -> enterReleaseTag(choices.get(which))).setNegativeButton(android.R.string.cancel, null).show();
++                    (d, which) -> startSourceChoice(choices.get(which), offline)).setNegativeButton(android.R.string.cancel, null).show();
++    }
++    private void startSourceChoice(Bundle choice, boolean offline) {
++        if (!offline) { enterReleaseTag(choice); return; }
++        Bundle request = new Bundle(choice); request.putString("action", "offline_list"); sourceRequest(request);
+     }
+     private void enterReleaseTag(Bundle choice) {
+         EditText tag = new EditText(requireContext());
+@@ -386,29 +437,56 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+                 }).show();
+     }
+     private void maybeShowAssets() {
++        maybeShowAssets(false);
++    }
++    private void maybeShowAssets(boolean requested) {
+         Bundle source = mSnapshot.getBundle("ksu_source");
+-        if (!isResumed() || source == null || !source.getString("status", "").equals("choose_asset")) return;
++        if (!isResumed() || mChanging || source == null || !source.getString("status", "").equals("choose_asset")) return;
+         String token = source.getString("token", "");
+-        if (token.isEmpty() || token.equals(mShownAssetsToken)) return;
++        if (token.isEmpty()) return;
++        if (mAssetsDialog != null && mAssetsDialog.isShowing()
++                && token.equals(mShownAssetsToken)) return;
++        if (!requested && token.equals(mShownAssetsToken)) return;
+         java.util.ArrayList<Bundle> assets = source.getParcelableArrayList("assets", Bundle.class);
+         if (assets == null) return;
+-        mShownAssetsToken = token;
++        final boolean apk = source.getString("channel", "").equals("apk");
++        if (apk) {
++            String kmi = source.getString("current_kmi", "");
++            Bundle match = null;
++            for (Bundle asset : assets) if (!kmi.isEmpty() && asset.getString("name", "").equals(kmi + "_kernelsu.ko")) {
++                if (match != null) { match = null; break; }
++                match = asset;
++            }
++            if (match != null) {
++                mShownAssetsToken = token;
++                Bundle request = new Bundle(); request.putString("action", "download");
++                request.putString("token", token); request.putLong("asset_id", match.getLong("id")); sourceRequest(request);
++                return;
++            }
++        }
+         String[] labels = new String[assets.size()];
+         for (int i = 0; i < assets.size(); ++i) labels[i] = assets.get(i).getString("name", "");
+         int[] selected = {-1};
+-        AlertDialog.Builder dialog = new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_ksu_choose_asset)
++        AlertDialog.Builder dialog = new AlertDialog.Builder(requireContext()).setTitle(apk ? R.string.integrity_ksu_choose_kmi : R.string.integrity_ksu_choose_asset)
+                 .setOnCancelListener(d -> cancelSource(source))
+                 .setNegativeButton(android.R.string.cancel, (d, which) -> cancelSource(source));
+         if (assets.isEmpty()) dialog.setMessage(R.string.integrity_ksu_no_assets);
+         else dialog.setSingleChoiceItems(labels, -1, (d, which) -> {
+             selected[0] = which; ((AlertDialog) d).getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+-        }).setPositiveButton(R.string.integrity_ksu_download_action, (d, which) -> {
++        }).setPositiveButton(apk ? R.string.integrity_ksu_apk_verify : R.string.integrity_ksu_download_action, (d, which) -> {
+             if (selected[0] < 0) return;
+             Bundle request = new Bundle(); request.putString("action", "download");
+             request.putString("token", token); request.putLong("asset_id", assets.get(selected[0]).getLong("id"));
+             sourceRequest(request);
+         });
+-        mAssetsDialog = dialog.create(); mAssetsDialog.show();
++        if (mAssetsDialog != null) mAssetsDialog.dismiss();
++        final AlertDialog shown = dialog.create();
++        shown.setOnDismissListener(d -> {
++            if (mAssetsDialog == shown) mAssetsDialog = null;
++        });
++        mAssetsDialog = shown;
++        shown.show();
++        mShownAssetsToken = token;
+         if (!assets.isEmpty()) mAssetsDialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+     }
+ 
+@@ -471,7 +549,8 @@ case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break
+     }
+     @Override public void onPause() {
+         ++mGeneration; mHandler.removeCallbacks(mRefresh);
+-        if (mAssetsDialog != null) { mAssetsDialog.dismiss(); mAssetsDialog = null; mShownAssetsToken = ""; }
++        if (mAssetsDialog != null) { mAssetsDialog.dismiss(); mAssetsDialog = null; }
++        mShownAssetsToken = "";
+         super.onPause();
+     }
+     @Override public void onDestroy() { mWorker.shutdown(); super.onDestroy(); }
+-- 
+2.43.0
+

@@ -1,0 +1,51 @@
+From 980a593703a3e2ff2a7ba4fce5a95f9a74ea63e8 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sun, 8 Nov 2026 17:25:41 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Enable the integrity runtime and
+ collector for marble
+
+Enable the source-built integrity runtime and optional collector selection in
+the marble product configuration.
+
+Package the non-updatable ASTER APEX and generated baseline, publish the product
+enable property and forward the collector choice to Soong.
+
+Change-Id: I79a93c979c891665277294b89fbfc97f3b7b9f6e
+---
+ BoardConfig.mk | 10 ++++++++++
+ device.mk      |  4 ++++
+ 2 files changed, 14 insertions(+)
+
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 8792748..9e7ea55 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -30,3 +30,13 @@ TARGET_VENDOR_PROP += $(DEVICE_PATH)/properties/vendor.prop
+ TARGET_SCREEN_DENSITY := 440
+ 
+ TARGET_KERNEL_ADDITIONAL_FLAGS += LOCALVERSION=
++
++# Built-in early evidence, with policy and baseline delivered on system.
++TARGET_PLATFORM_INTEGRITY := true
++
++# Build the optional name-only fallback against this product's official kernel.
++# Static validation is part of the build; runtime compatibility is not assumed.
++TARGET_PLATFORM_INTEGRITY_COLLECTOR ?= true
++ifeq ($(TARGET_PLATFORM_INTEGRITY_COLLECTOR),true)
++$(call soong_config_set,platform_integrity,collector,true)
++endif
+diff --git a/device.mk b/device.mk
+index e8a0214..5a395e6 100644
+--- a/device.mk
++++ b/device.mk
+@@ -74,3 +74,7 @@ PRODUCT_COPY_FILES += \
+ # Vibrator
+ $(call soong_config_set,qti_vibrator,effect_lib,libqtivibratoreffect.xiaomi)
+ $(call soong_config_set_bool,qti_vibrator,use_effect_stream,true)
++
++# Platform integrity policy (source-built, non-updatable system APEX).
++PRODUCT_PACKAGES += com.android.platform.integrity platform_integrity_baseline
++PRODUCT_SYSTEM_PROPERTIES += ro.platform.integrity.enabled=true
+-- 
+2.43.0
+

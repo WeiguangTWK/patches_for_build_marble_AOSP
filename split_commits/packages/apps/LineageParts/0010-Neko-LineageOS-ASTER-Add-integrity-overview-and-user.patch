@@ -1,0 +1,1266 @@
+From e4f354e06fd29f49cc74e3cf4ccf4480f6cf8ec8 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sun, 8 Nov 2026 17:21:55 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Add integrity overview and
+ user-driven KSU verification
+
+Add an environment integrity page with mode controls, current evidence,
+retained alarms and manual rechecks. Show KernelSU candidates between the
+overview and managed features only when candidates exist.
+
+Let the user explicitly query a version and select a Release asset through the
+ASTER service. Use grouped status rows, dedicated source-request feedback and
+English/Chinese resources.
+
+Keep existing FAS and TEE user settings while displaying effective restrictions
+and waiting states. Add the Trust and search entries only where supported.
+
+Change-Id: I38bd3607e87efde3c36a4de7eec08a1835016d85
+---
+ AndroidManifest.xml                           |   5 +
+ res/drawable/ic_integrity_check.xml           |   4 +
+ res/drawable/ic_integrity_info.xml            |   4 +
+ res/drawable/ic_integrity_kernel.xml          |   4 +
+ res/drawable/ic_integrity_wait.xml            |   4 +
+ res/drawable/ic_integrity_warning.xml         |   4 +
+ res/drawable/integrity_row_background.xml     |   5 +
+ res/layout/integrity_preference_row.xml       |  27 +
+ res/layout/integrity_status_card.xml          |  32 ++
+ res/values-zh-rCN/integrity_strings.xml       | 117 +++++
+ res/values/integrity_strings.xml              | 117 +++++
+ res/xml/integrity_settings.xml                |  31 ++
+ res/xml/parts_catalog.xml                     |   4 +
+ res/xml/trust_preferences.xml                 |   3 +
+ .../lineageparts/fas/FasSettings.java         |  37 +-
+ .../integrity/IntegritySettings.java          | 478 ++++++++++++++++++
+ .../integrity/IntegrityStatusPreference.java  |  66 +++
+ .../LineagePartsSearchIndexablesProvider.java |   7 +
+ .../teedebug/TeeSoftDebugSettings.java        |  43 ++
+ .../lineageparts/trust/TrustPreferences.java  |   4 +
+ 20 files changed, 995 insertions(+), 1 deletion(-)
+ create mode 100644 res/drawable/ic_integrity_check.xml
+ create mode 100644 res/drawable/ic_integrity_info.xml
+ create mode 100644 res/drawable/ic_integrity_kernel.xml
+ create mode 100644 res/drawable/ic_integrity_wait.xml
+ create mode 100644 res/drawable/ic_integrity_warning.xml
+ create mode 100644 res/drawable/integrity_row_background.xml
+ create mode 100644 res/layout/integrity_preference_row.xml
+ create mode 100644 res/layout/integrity_status_card.xml
+ create mode 100644 res/values-zh-rCN/integrity_strings.xml
+ create mode 100644 res/values/integrity_strings.xml
+ create mode 100644 res/xml/integrity_settings.xml
+ create mode 100644 src/org/lineageos/lineageparts/integrity/IntegritySettings.java
+ create mode 100644 src/org/lineageos/lineageparts/integrity/IntegrityStatusPreference.java
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index cae2bc7..659c247 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -16,6 +16,7 @@
+     <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+     <uses-permission android:name="android.permission.DEVICE_POWER" />
++    <uses-permission android:name="android.permission.REBOOT" />
+     <uses-permission android:name="android.permission.CHANGE_CONFIGURATION" />
+     <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+@@ -183,6 +184,10 @@
+             <meta-data android:name="com.android.settings.summary" android:resource="@string/fas_description" />
+         </activity-alias>
+ 
++        <activity-alias android:name=".integrity.IntegritySettings"
++            android:exported="true" android:permission="android.permission.WRITE_SECURE_SETTINGS"
++            android:label="@string/integrity_title" android:targetActivity="PartsActivity" />
++
+         <!-- TEE soft debug settings (System category) -->
+         <activity-alias
+             android:name=".teedebug.TeeSoftDebugSettings"
+diff --git a/res/drawable/ic_integrity_check.xml b/res/drawable/ic_integrity_check.xml
+new file mode 100644
+index 0000000..f066426
+--- /dev/null
++++ b/res/drawable/ic_integrity_check.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="@color/trust_status_good" android:fillType="evenOdd" android:pathData="M12,2a10,10 0,1 0,0 20a10,10 0,1 0,0 -20M10,17l-5,-5l1.4,-1.4L10,14.2l7.6,-7.6L19,8z" />
++</vector>
+diff --git a/res/drawable/ic_integrity_info.xml b/res/drawable/ic_integrity_info.xml
+new file mode 100644
+index 0000000..7fba344
+--- /dev/null
++++ b/res/drawable/ic_integrity_info.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="?android:attr/textColorPrimary" android:fillType="evenOdd" android:pathData="M12,2a10,10 0,1 0,0 20a10,10 0,1 0,0 -20M13,17h-2v-6h2zM13,9h-2V7h2z" />
++</vector>
+diff --git a/res/drawable/ic_integrity_kernel.xml b/res/drawable/ic_integrity_kernel.xml
+new file mode 100644
+index 0000000..a9e1f5f
+--- /dev/null
++++ b/res/drawable/ic_integrity_kernel.xml
+@@ -0,0 +1,4 @@
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="#FF000000" android:pathData="M9,3h2v2h2V3h2v2h2c1.1,0 2,0.9 2,2v2h2v2h-2v2h2v2h-2v2c0,1.1 -0.9,2 -2,2h-2v2h-2v-2h-2v2H9v-2H7c-1.1,0 -2,-0.9 -2,-2v-2H3v-2h2v-2H3V9h2V7c0,-1.1 0.9,-2 2,-2h2V3zM7,7v10h10V7H7zM9,9h6v6H9V9z" />
++</vector>
+diff --git a/res/drawable/ic_integrity_wait.xml b/res/drawable/ic_integrity_wait.xml
+new file mode 100644
+index 0000000..705ce65
+--- /dev/null
++++ b/res/drawable/ic_integrity_wait.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="?android:attr/textColorPrimary" android:fillType="evenOdd" android:pathData="M12,2a10,10 0,1 0,0 20a10,10 0,1 0,0 -20M13,7v5.2l3.4,2l-1,1.7L11,13V7z" />
++</vector>
+diff --git a/res/drawable/ic_integrity_warning.xml b/res/drawable/ic_integrity_warning.xml
+new file mode 100644
+index 0000000..e40c517
+--- /dev/null
++++ b/res/drawable/ic_integrity_warning.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
++    <path android:fillColor="?android:attr/textColorPrimary" android:fillType="evenOdd" android:pathData="M1,21h22L12,2zM13,18h-2v-2h2zM13,14h-2v-4h2z" />
++</vector>
+diff --git a/res/drawable/integrity_row_background.xml b/res/drawable/integrity_row_background.xml
+new file mode 100644
+index 0000000..f2ffddd
+--- /dev/null
++++ b/res/drawable/integrity_row_background.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android">
++    <solid android:color="?android:attr/colorBackgroundFloating" />
++    <corners android:radius="20dp" />
++</shape>
+diff --git a/res/layout/integrity_preference_row.xml b/res/layout/integrity_preference_row.xml
+new file mode 100644
+index 0000000..bdd7872
+--- /dev/null
++++ b/res/layout/integrity_preference_row.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent" android:layout_height="wrap_content"
++    android:paddingStart="16dp" android:paddingEnd="16dp"
++    android:paddingTop="3dp" android:paddingBottom="3dp">
++    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
++        android:orientation="horizontal" android:gravity="center_vertical"
++        android:minHeight="80dp" android:padding="16dp" android:clipToOutline="true"
++        android:duplicateParentState="true"
++        android:background="@drawable/integrity_row_background"
++        android:foreground="?android:attr/selectableItemBackground">
++        <ImageView android:id="@android:id/icon" android:layout_width="24dp"
++            android:layout_height="24dp" android:layout_marginEnd="20dp"
++            android:importantForAccessibility="no" android:tint="?android:attr/colorAccent" />
++        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content"
++            android:layout_weight="1" android:orientation="vertical">
++            <TextView android:id="@android:id/title" android:layout_width="match_parent"
++                android:layout_height="wrap_content" android:textSize="18sp"
++                android:textColor="?android:attr/textColorPrimary" />
++            <TextView android:id="@android:id/summary" android:layout_width="match_parent"
++                android:layout_height="wrap_content" android:layout_marginTop="4dp"
++                android:textSize="14sp" android:textColor="?android:attr/textColorSecondary" />
++        </LinearLayout>
++        <FrameLayout android:id="@android:id/widget_frame" android:layout_width="wrap_content"
++            android:layout_height="wrap_content" android:layout_marginStart="12dp" />
++    </LinearLayout>
++</FrameLayout>
+diff --git a/res/layout/integrity_status_card.xml b/res/layout/integrity_status_card.xml
+new file mode 100644
+index 0000000..7e6e9dd
+--- /dev/null
++++ b/res/layout/integrity_status_card.xml
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="utf-8"?>
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent" android:layout_height="wrap_content"
++    android:padding="16dp">
++    <LinearLayout android:id="@+id/integrity_card" android:orientation="vertical"
++        android:layout_width="match_parent" android:layout_height="wrap_content"
++        android:padding="24dp" android:duplicateParentState="true" android:clipToOutline="true"
++        android:foreground="?android:attr/selectableItemBackground">
++        <LinearLayout android:orientation="horizontal" android:gravity="center_vertical"
++            android:layout_width="match_parent" android:layout_height="wrap_content">
++            <ImageView android:id="@+id/integrity_card_icon" android:importantForAccessibility="no"
++                android:layout_width="32dp" android:layout_height="32dp" />
++            <TextView android:id="@+id/integrity_card_mode" android:layout_marginStart="12dp"
++                android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
++                android:textAppearance="?android:attr/textAppearanceSmall" />
++        </LinearLayout>
++        <TextView android:id="@android:id/title" android:layout_marginTop="20dp"
++            android:layout_width="match_parent" android:layout_height="wrap_content"
++            android:textSize="26sp" android:textColor="?android:attr/textColorPrimary" />
++        <TextView android:id="@android:id/summary" android:layout_marginTop="8dp"
++            android:layout_width="match_parent" android:layout_height="wrap_content"
++            android:textSize="16sp" android:textColor="?android:attr/textColorPrimary" />
++        <TextView android:id="@+id/integrity_card_metrics" android:layout_marginTop="16dp"
++            android:layout_width="match_parent" android:layout_height="wrap_content"
++            android:textColor="?android:attr/textColorSecondary"
++            android:textAppearance="?android:attr/textAppearanceSmall" />
++        <TextView android:id="@+id/integrity_card_action" android:layout_marginTop="8dp"
++            android:layout_width="match_parent" android:layout_height="wrap_content"
++            android:minHeight="48dp" android:gravity="center_vertical" android:textStyle="bold"
++            android:textColor="?android:attr/textColorPrimary" />
++    </LinearLayout>
++</FrameLayout>
+diff --git a/res/values-zh-rCN/integrity_strings.xml b/res/values-zh-rCN/integrity_strings.xml
+new file mode 100644
+index 0000000..8e3539d
+--- /dev/null
++++ b/res/values-zh-rCN/integrity_strings.xml
+@@ -0,0 +1,117 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="integrity_card_checking">正在核对当前环境</string>
++    <string name="integrity_card_ready">环境校验已通过</string>
++    <string name="integrity_card_compromise">符合妥协模式条件</string>
++    <string name="integrity_card_unknown">存在待验证的内核模块</string>
++    <string name="integrity_card_syscall">检测到系统调用表变化</string>
++    <string name="integrity_card_hash">模块内容与批准基线不一致</string>
++    <string name="integrity_card_lost">采集证据存在缺口</string>
++    <string name="integrity_ksu_source_title">来源验证</string>
++    <string name="integrity_ksu_verify_action">验证来源</string>
++    <string name="integrity_ksu_cancel">取消验证</string>
++    <string name="integrity_ksu_choose_fork">选择候选来源</string>
++    <string name="integrity_ksu_release_title">Release 版本</string>
++    <string name="integrity_ksu_release_help">仓库：%1$s\n填写 Release tag。查询将连接 GitHub，随后由你选择验证文件。</string>
++    <string name="integrity_ksu_tag_hint">Release tag，例如 v3.3.1</string>
++    <string name="integrity_ksu_query_action">联网查询发布文件</string>
++    <string name="integrity_ksu_choose_asset">选择验证文件</string>
++    <string name="integrity_ksu_download_action">下载并验证</string>
++    <string name="integrity_ksu_no_assets">该版本没有当前支持的独立 KO 资产，请选择其他版本。</string>
++    <string name="integrity_ksu_listing">正在查询发布文件…</string>
++    <string name="integrity_ksu_downloading">正在下载所选文件…</string>
++    <string name="integrity_ksu_verifying">正在校验已加载模块…</string>
++    <string name="integrity_ksu_retry">验证尚未完成 · 查看详情或选择其他文件</string>
++    <string name="integrity_ksu_different_file">所选文件与已加载模块不匹配</string>
++    <string name="integrity_ksu_unsupported_file">该文件的加载方式暂不支持</string>
++    <string name="integrity_ksu_asset_limit">该版本的文件列表超出本轮处理范围</string>
++    <string name="integrity_ksu_verified">%1$s · 来源已验证</string>
++    <string name="integrity_ksu_release_info">来源 Release：%1$s</string>
++    <string name="integrity_ksu_file_info">发布文件：%1$s</string>
++    <string name="integrity_ksu_title">KernelSU 识别</string>
++    <string name="integrity_ksu_pending">%1$s 候选 · 待来源验证</string>
++    <string name="integrity_ksu_none">候选检查已完成</string>
++    <string name="integrity_ksu_unavailable">等待候选识别</string>
++    <string name="integrity_ksu_manager_hash">管理器证书 hash 声明：%1$s</string>
++    <string name="integrity_ksu_partial">已完成部分候选识别</string>
++    <string name="integrity_title">环境完整性</string>
++    <string name="integrity_state_title">当前状态</string>
++    <string name="integrity_compromise_title">妥协模式</string>
++    <string name="integrity_compromise_summary">进入和退出均需重启。最低监测与控制要求满足时，仅允许 FAS；未知模块及检查失败仍限制全部功能。正常模式恢复验证通过后自动恢复许可，各功能原有配置会保留。</string>
++    <string name="integrity_tee_title">TEE Soft Emu</string>
++    <string name="integrity_visibility_title">Lineage 应用隐藏</string>
++    <string name="integrity_feature_permitted">已允许 · 按原功能配置生效</string>
++    <string name="integrity_feature_blocked">已被环境策略禁用</string>
++    <string name="integrity_feature_waiting">已配置，但当前被禁用或正在等待确认</string>
++    <string name="integrity_change_failed">无法更改策略，请检查环境状态</string>
++    <string name="integrity_ksu_request_rejected">无法发起来源验证，请核对版本标签和当前环境状态后重试</string>
++    <string name="integrity_unavailable">此产品不支持环境完整性功能</string>
++    <string name="integrity_ready">环境检查通过</string>
++    <string name="integrity_enter_pending">已请求进入妥协模式</string>
++    <string name="integrity_active">妥协模式已生效</string>
++    <string name="integrity_exit_pending">已请求恢复正常模式</string>
++    <string name="integrity_restricted">功能受限</string>
++    <string name="integrity_checking">正在检查环境</string>
++    <string name="integrity_alarm_count">保留的模块告警：%1$d</string>
++    <string name="integrity_alarm_overflow">告警列表容量已满，需要正常模式恢复验证</string>
++    <string name="integrity_evidence_lost">采集证据已丢失，需要正常模式恢复验证</string>
++    <string name="integrity_legacy_alarm_uncertain">旧告警未记录具体原因，需要干净重启并完成正常模式恢复验证</string>
++    <string name="integrity_normal_mode">正常模式</string>
++    <string name="integrity_state_description">请求：%1$s\n实际状态：%2$s\n%3$s</string>
++    <string name="integrity_full_coverage">完整内核测量可用</string>
++    <string name="integrity_limited_coverage">仅监测模块名称；不覆盖早期历史、摘要及系统调用表</string>
++    <string name="integrity_coverage_unavailable">采集或执行确认暂不可用</string>
++    <string name="integrity_managed_features">托管功能</string>
++    <string name="integrity_mode_category">运行模式</string>
++    <string name="integrity_recovery_category">检测与恢复</string>
++    <string name="integrity_alerts_title">历史告警</string>
++    <string name="integrity_recheck">重新检查</string>
++    <string name="integrity_recheck_summary">重新验证当前环境</string>
++    <string name="integrity_recheck_queued">重新检查已排队</string>
++    <string name="integrity_recheck_running">正在采样系统调用表</string>
++    <string name="integrity_recheck_waiting_report">等待新的检查报告</string>
++    <string name="integrity_recheck_completed">系统调用表重新采样完成</string>
++    <string name="integrity_recheck_unsupported">当前内核提供模块检查，暂不支持主动采样系统调用表</string>
++    <string name="integrity_recheck_throttled">请稍后再次检查</string>
++    <string name="integrity_recheck_failed">重新检查未完成，请重试</string>
++    <string name="integrity_cannot_verify">暂时无法验证环境</string>
++    <string name="integrity_waiting_restart">等待重启</string>
++    <string name="integrity_target_mode">目标模式：%1$s</string>
++    <string name="integrity_permit_count">功能许可：%1$d / 3</string>
++    <string name="integrity_view_details">查看详情 ›</string>
++    <string name="integrity_restart_action">重启以验证</string>
++    <string name="integrity_restart_confirm">现在重启？系统将在启动后验证目标模式和环境。</string>
++    <string name="integrity_managed_blocked">受限 · %1$s</string>
++    <string name="integrity_details_title">环境检测详情</string>
++    <string name="integrity_open_settings">前往配置</string>
++    <string name="integrity_recovery_help">恢复环境后请重启。只有正常模式完整恢复验证通过后，系统才会自动清理历史告警；妥协模式不清理。</string>
++    <string name="integrity_tee_explain">此许可控制新的 TEE Soft Emu 定制及启动状态覆盖。已有密钥仍可执行常规签名和解密，原有功能配置会保留。</string>
++    <string name="integrity_fas_explain">此许可允许 FAS 工作；是否实际运行仍由 FAS 开关和应用配置决定。</string>
++    <string name="integrity_visibility_explain">此许可允许隐藏你选定的 Lineage 应用。请在对应应用的应用信息页面管理选择。</string>
++    <string name="integrity_reason_unavailable">环境完整性服务暂不可用，功能保持受限。</string>
++    <string name="integrity_reason_checking">正在检查环境并确认功能控制状态。</string>
++    <string name="integrity_reason_ready">三项功能已获许可，并按各自配置生效。</string>
++    <string name="integrity_reason_compromise">仅允许 FAS；TEE 定制、启动状态覆盖及应用隐藏保持禁用。</string>
++    <string name="integrity_reason_unknown">检测到未认可的内核模块，三项托管功能均受限。</string>
++    <string name="integrity_reason_syscall">检测到系统调用表变化，三项托管功能均受限。</string>
++    <string name="integrity_reason_hash">内核模块内容与认可基线不一致。</string>
++    <string name="integrity_reason_lost">采集证据已丢失，无法确认检查完整性。</string>
++    <string name="integrity_reason_recovery_restart">请先恢复环境并重启，系统会验证并清理已恢复的历史告警。</string>
++    <string name="integrity_reason_historical">保留的历史告警需要在正常模式下完成恢复验证。</string>
++    <string name="integrity_reason_coverage">尚未满足必要的测量覆盖要求。早期模块的名称记录不能证明其加载版本，受管功能保持禁用。</string>
++    <string name="integrity_reason_policy_pending">采集与分类可用，执行授权尚未建立，受管功能保持禁用。</string>
++    <string name="integrity_early_unverified_count">等待版本验证的早期模块：%1$d</string>
++    <string name="integrity_reason_endpoints">正在等待功能控制服务确认状态。</string>
++    <string name="integrity_reason_restart">请重启以应用目标模式；验证完成前，三项托管功能均受限。</string>
++    <string name="integrity_reason_interrupted">控制连续性已中断，请重启并重新验证环境。</string>
++    <string name="integrity_reason_policy">无法验证已保存的策略，功能保持受限。</string>
++    <string name="integrity_reason_stale">上次验证结果已过期，正在等待新的验证。</string>
++    <string name="integrity_reason_collector">内核采集不可用或不完整。</string>
++    <string name="integrity_reason_control">无法确认 FAS 控制状态，功能保持受限。</string>
++    <string name="integrity_reason_tee">无法确认 TEE 控制状态，功能保持受限。</string>
++    <string name="integrity_reason_validation">验证或结果发布失败，功能保持受限。</string>
++    <string name="integrity_later_digest_coverage">监测模块名称与已采集的加载摘要</string>
++    <string name="integrity_partial_resident_coverage">驻留内容局部校验通过</string>
++    <string name="integrity_current_modules">本次检查发现的模块：%1$d</string>
++    <string name="integrity_current_modules_pending">等待当前模块检查结果</string>
++</resources>
+diff --git a/res/values/integrity_strings.xml b/res/values/integrity_strings.xml
+new file mode 100644
+index 0000000..9ee7ff5
+--- /dev/null
++++ b/res/values/integrity_strings.xml
+@@ -0,0 +1,117 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="integrity_card_checking">Checking the current environment</string>
++    <string name="integrity_card_ready">Environment validation passed</string>
++    <string name="integrity_card_compromise">Compromise-mode requirements satisfied</string>
++    <string name="integrity_card_unknown">Kernel modules await verification</string>
++    <string name="integrity_card_syscall">Syscall table changes detected</string>
++    <string name="integrity_card_hash">Module content differs from the approved baseline</string>
++    <string name="integrity_card_lost">Collection evidence is incomplete</string>
++    <string name="integrity_ksu_source_title">Source verification</string>
++    <string name="integrity_ksu_verify_action">Verify source</string>
++    <string name="integrity_ksu_cancel">Cancel verification</string>
++    <string name="integrity_ksu_choose_fork">Choose a candidate source</string>
++    <string name="integrity_ksu_release_title">Release version</string>
++    <string name="integrity_ksu_release_help">Repository: %1$s\nEnter a Release tag. Querying connects to GitHub; you will select the verification file next.</string>
++    <string name="integrity_ksu_tag_hint">Release tag, e.g. v3.3.1</string>
++    <string name="integrity_ksu_query_action">Query Release assets</string>
++    <string name="integrity_ksu_choose_asset">Choose a verification file</string>
++    <string name="integrity_ksu_download_action">Download and verify</string>
++    <string name="integrity_ksu_no_assets">This Release has no directly supported KO asset. Choose another version.</string>
++    <string name="integrity_ksu_listing">Querying Release assets…</string>
++    <string name="integrity_ksu_downloading">Downloading the selected file…</string>
++    <string name="integrity_ksu_verifying">Verifying the loaded module…</string>
++    <string name="integrity_ksu_retry">Verification incomplete · View details or choose another file</string>
++    <string name="integrity_ksu_different_file">The selected file differs from the loaded module</string>
++    <string name="integrity_ksu_unsupported_file">This file’s loading format is currently unsupported</string>
++    <string name="integrity_ksu_asset_limit">This Release has too many file entries for this verification session</string>
++    <string name="integrity_ksu_verified">%1$s · Source verified</string>
++    <string name="integrity_ksu_release_info">Source Release: %1$s</string>
++    <string name="integrity_ksu_file_info">Release asset: %1$s</string>
++    <string name="integrity_ksu_title">KernelSU identification</string>
++    <string name="integrity_ksu_pending">%1$s candidate · Source verification pending</string>
++    <string name="integrity_ksu_none">Candidate check complete</string>
++    <string name="integrity_ksu_unavailable">Waiting for candidate identification</string>
++    <string name="integrity_ksu_manager_hash">Manager certificate hash declaration: %1$s</string>
++    <string name="integrity_ksu_partial">Candidate identification partially complete</string>
++    <string name="integrity_title">Environment integrity</string>
++    <string name="integrity_state_title">Current status</string>
++    <string name="integrity_compromise_title">Compromise mode</string>
++    <string name="integrity_compromise_summary">Requires a restart to enter or leave. Only FAS is permitted when minimum monitoring and control requirements pass. Unknown modules and failed checks block all features. Normal-mode recovery automatically restores permits; individual feature settings are retained.</string>
++    <string name="integrity_tee_title">TEE Soft Emu</string>
++    <string name="integrity_visibility_title">Lineage app hiding</string>
++    <string name="integrity_feature_permitted">Permitted · Individual settings still apply</string>
++    <string name="integrity_feature_blocked">Blocked by environment policy</string>
++    <string name="integrity_change_failed">Unable to change policy. Check the environment status.</string>
++    <string name="integrity_ksu_request_rejected">Unable to start source verification. Check the version tag and current environment status, then try again.</string>
++    <string name="integrity_unavailable">Environment integrity is unavailable on this product</string>
++    <string name="integrity_ready">Environment checks passed</string>
++    <string name="integrity_enter_pending">Compromise mode requested</string>
++    <string name="integrity_active">Compromise mode active</string>
++    <string name="integrity_exit_pending">Return to normal mode requested</string>
++    <string name="integrity_restricted">Features restricted</string>
++    <string name="integrity_checking">Checking environment</string>
++    <string name="integrity_feature_waiting">Configured, but currently blocked or awaiting confirmation</string>
++    <string name="integrity_alarm_count">Retained module alerts: %1$d</string>
++    <string name="integrity_alarm_overflow">Alert list capacity exceeded; normal-mode recovery validation is required</string>
++    <string name="integrity_evidence_lost">Collection evidence was lost; normal-mode recovery validation is required</string>
++    <string name="integrity_legacy_alarm_uncertain">Earlier alert cause was not recorded; a clean restart and normal-mode recovery validation are required</string>
++    <string name="integrity_normal_mode">Normal mode</string>
++    <string name="integrity_state_description">Requested: %1$s\nStatus: %2$s\n%3$s</string>
++    <string name="integrity_full_coverage">Full kernel measurement available</string>
++    <string name="integrity_limited_coverage">Module names monitored; early history, hashes and syscall checks unavailable</string>
++    <string name="integrity_coverage_unavailable">Collection or execution confirmation unavailable</string>
++    <string name="integrity_managed_features">Managed features</string>
++    <string name="integrity_mode_category">Operating mode</string>
++    <string name="integrity_recovery_category">Checks and recovery</string>
++    <string name="integrity_alerts_title">Historical alerts</string>
++    <string name="integrity_recheck">Check again</string>
++    <string name="integrity_recheck_summary">Revalidate the current environment</string>
++    <string name="integrity_recheck_queued">Recheck queued</string>
++    <string name="integrity_recheck_running">Sampling the syscall tables</string>
++    <string name="integrity_recheck_waiting_report">Waiting for the updated check report</string>
++    <string name="integrity_recheck_completed">Syscall table resampling completed</string>
++    <string name="integrity_recheck_unsupported">This kernel provides module checks; active syscall table sampling is unavailable</string>
++    <string name="integrity_recheck_throttled">Please wait briefly before checking again</string>
++    <string name="integrity_recheck_failed">Recheck incomplete. Try again.</string>
++    <string name="integrity_cannot_verify">Unable to verify the environment</string>
++    <string name="integrity_waiting_restart">Waiting for restart</string>
++    <string name="integrity_target_mode">Target mode: %1$s</string>
++    <string name="integrity_permit_count">Feature permits: %1$d / 3</string>
++    <string name="integrity_view_details">View details ›</string>
++    <string name="integrity_restart_action">Restart to verify</string>
++    <string name="integrity_restart_confirm">Restart now? The requested mode and environment will be verified after startup.</string>
++    <string name="integrity_managed_blocked">Restricted · %1$s</string>
++    <string name="integrity_details_title">Environment check details</string>
++    <string name="integrity_open_settings">Open settings</string>
++    <string name="integrity_recovery_help">After restoring the environment, restart. Historical alerts are cleared automatically only after full normal-mode recovery validation. Compromise mode does not clear alerts.</string>
++    <string name="integrity_tee_explain">This permit controls new TEE Soft Emu customization and boot state overrides. Existing keys can still perform ordinary signing and decryption. Your feature configuration is retained.</string>
++    <string name="integrity_fas_explain">This permit allows FAS to operate. Your FAS switch and application profiles still determine whether it runs.</string>
++    <string name="integrity_visibility_explain">This permit allows your selected Lineage applications to be hidden. Manage the selection in each application’s App info page.</string>
++    <string name="integrity_reason_unavailable">The integrity service is unavailable. Features remain blocked.</string>
++    <string name="integrity_reason_checking">Checking the environment and confirming feature control.</string>
++    <string name="integrity_reason_ready">All three features are permitted and follow their individual settings.</string>
++    <string name="integrity_reason_compromise">Only FAS is permitted. TEE customization, boot state overrides and app hiding remain blocked.</string>
++    <string name="integrity_reason_unknown">An unrecognized kernel module was detected. All managed features are blocked.</string>
++    <string name="integrity_reason_syscall">A system call table change was detected. All managed features are blocked.</string>
++    <string name="integrity_reason_hash">Kernel module contents differ from the recognized baseline.</string>
++    <string name="integrity_reason_lost">Collection evidence was lost; a complete check cannot be confirmed.</string>
++    <string name="integrity_reason_recovery_restart">Restore the environment and restart to verify and clear retained alerts.</string>
++    <string name="integrity_reason_historical">Retained alerts require a complete recovery check in normal mode.</string>
++    <string name="integrity_reason_coverage">Required measurement coverage is incomplete. Early name-only module records do not verify the loaded versions. Managed features remain blocked.</string>
++    <string name="integrity_reason_policy_pending">Collection and classification are available. Execution authorization is not established; managed features remain blocked.</string>
++    <string name="integrity_early_unverified_count">Early modules awaiting version verification: %1$d</string>
++    <string name="integrity_reason_endpoints">Waiting for feature control services to confirm their state.</string>
++    <string name="integrity_reason_restart">Restart to apply the requested mode. All managed features remain blocked until validation.</string>
++    <string name="integrity_reason_interrupted">Control continuity was interrupted. Restart and validate the environment again.</string>
++    <string name="integrity_reason_policy">The saved policy could not be verified. Features remain blocked.</string>
++    <string name="integrity_reason_stale">The previous result has expired. Waiting for fresh verification.</string>
++    <string name="integrity_reason_collector">Kernel collection is unavailable or incomplete.</string>
++    <string name="integrity_reason_control">FAS control could not be confirmed. Features remain blocked.</string>
++    <string name="integrity_reason_tee">TEE control could not be confirmed. Features remain blocked.</string>
++    <string name="integrity_reason_validation">Validation or result publication failed. Features remain blocked.</string>
++    <string name="integrity_later_digest_coverage">Monitoring module names and captured load digests</string>
++    <string name="integrity_partial_resident_coverage">Partial resident checks passed</string>
++    <string name="integrity_current_modules">Modules flagged by the current check: %1$d</string>
++    <string name="integrity_current_modules_pending">Waiting for current module findings</string>
++</resources>
+diff --git a/res/xml/integrity_settings.xml b/res/xml/integrity_settings.xml
+new file mode 100644
+index 0000000..54399f3
+--- /dev/null
++++ b/res/xml/integrity_settings.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="utf-8"?>
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    android:title="@string/integrity_title">
++    <org.lineageos.lineageparts.integrity.IntegrityStatusPreference
++        android:key="integrity_state" android:title="@string/integrity_checking"
++        android:summary="@string/integrity_reason_checking" />
++    <PreferenceCategory android:key="integrity_ksu_group" android:title="@string/integrity_ksu_title">
++        <Preference android:key="integrity_ksu" android:title="@string/integrity_ksu_source_title"
++            android:layout="@layout/integrity_preference_row" android:icon="@drawable/ic_integrity_kernel" />
++    </PreferenceCategory>
++    <PreferenceCategory android:title="@string/integrity_managed_features">
++        <Preference android:key="integrity_tee" android:title="@string/integrity_tee_title"
++            android:layout="@layout/integrity_preference_row" />
++        <Preference android:key="integrity_fas" android:title="@string/fas_title"
++            android:layout="@layout/integrity_preference_row" />
++        <Preference android:key="integrity_visibility" android:title="@string/integrity_visibility_title"
++            android:layout="@layout/integrity_preference_row" />
++    </PreferenceCategory>
++    <PreferenceCategory android:title="@string/integrity_mode_category">
++        <SwitchPreferenceCompat android:key="integrity_compromise" android:persistent="false"
++            android:layout="@layout/integrity_preference_row"
++            android:title="@string/integrity_compromise_title" android:summary="@string/integrity_compromise_summary" />
++    </PreferenceCategory>
++    <PreferenceCategory android:title="@string/integrity_recovery_category">
++        <Preference android:key="integrity_recheck" android:title="@string/integrity_recheck"
++            android:layout="@layout/integrity_preference_row"
++            android:summary="@string/integrity_recheck_summary" />
++        <Preference android:key="integrity_alerts" android:title="@string/integrity_alerts_title"
++            android:layout="@layout/integrity_preference_row" />
++    </PreferenceCategory>
++</PreferenceScreen>
+diff --git a/res/xml/parts_catalog.xml b/res/xml/parts_catalog.xml
+index 0d42ab5..90aeba3 100644
+--- a/res/xml/parts_catalog.xml
++++ b/res/xml/parts_catalog.xml
+@@ -38,6 +38,10 @@
+           android:fragment="org.lineageos.lineageparts.fas.FasSettings"
+           lineage:xmlRes="@xml/fas_settings" />
+ 
++    <part android:key="integrity" android:title="@string/integrity_title"
++          android:fragment="org.lineageos.lineageparts.integrity.IntegritySettings"
++          lineage:xmlRes="@xml/integrity_settings" />
++
+     <part android:key="tee_soft_debug"
+           android:title="@string/tee_soft_debug_title"
+           android:summary="@string/tee_soft_debug_summary"
+diff --git a/res/xml/trust_preferences.xml b/res/xml/trust_preferences.xml
+index 045a4bd..e513c14 100644
+--- a/res/xml/trust_preferences.xml
++++ b/res/xml/trust_preferences.xml
+@@ -36,6 +36,9 @@
+             android:entryValues="@array/trust_restrict_usb_values"
+             android:defaultValue="0" />
+ 
++        <lineageos.preference.LineagePartsPreference
++            android:key="integrity" />
++
+         <lineageos.preference.LineagePartsPreference
+             android:key="lineagestats" />
+ 
+diff --git a/src/org/lineageos/lineageparts/fas/FasSettings.java b/src/org/lineageos/lineageparts/fas/FasSettings.java
+index 3ccc1e1..fe7bb94 100644
+--- a/src/org/lineageos/lineageparts/fas/FasSettings.java
++++ b/src/org/lineageos/lineageparts/fas/FasSettings.java
+@@ -36,6 +36,34 @@ public final class FasSettings extends SettingsPreferenceFragment {
+     private String mQuery = "";
+     private int mLoadVersion;
+     private boolean mLocated;
++    private int mConfigVersion;
++    private final Runnable mPolicyRefresh = new Runnable() {
++        @Override public void run() {
++            final int version = mLoadVersion;
++            final int configVersion = mConfigVersion;
++            mWorker.execute(() -> {
++                Bundle policy = android.os.PlatformIntegrity.getState();
++                Boolean configured = null;
++                try {
++                    configured = mManager.getConfiguration(UserHandle.myUserId())
++                            .getBoolean(FasManager.KEY_ENABLED);
++                } catch (Exception ignored) { }
++                final Boolean currentConfigured = configured;
++                mMain.post(() -> {
++                    if (!isAdded() || getView() == null || version != mLoadVersion
++                            || configVersion != mConfigVersion) return;
++                    if (currentConfigured != null) mEnabled.setChecked(currentConfigured);
++                    boolean supported = android.os.PlatformIntegrity.enabled();
++                    boolean allowed = !supported || (policy.getInt("allowed_features", 0) & 2) != 0;
++                    mEnabled.setEnabled(mEnabled.isChecked() || allowed);
++                    mEnabled.setSummary(!supported || android.os.PlatformIntegrity.allowed(2)
++                            ? R.string.fas_description : mEnabled.isChecked()
++                                    ? R.string.integrity_feature_waiting : R.string.integrity_feature_blocked);
++                });
++            });
++            mMain.postDelayed(this, 1000);
++        }
++    };
+ 
+     private static final class App {
+         final ApplicationInfo info;
+@@ -57,6 +85,7 @@ public final class FasSettings extends SettingsPreferenceFragment {
+         mAppList.setOrderingAsAdded(true);
+         mEnabled.setEnabled(false);
+         mEnabled.setOnPreferenceChangeListener((pref, value) -> {
++            ++mConfigVersion;
+             mEnabled.setEnabled(false);
+             mWorker.execute(() -> {
+                 boolean saved;
+@@ -75,6 +104,8 @@ public final class FasSettings extends SettingsPreferenceFragment {
+ 
+     @Override public void onResume() {
+         super.onResume();
++        mMain.removeCallbacks(mPolicyRefresh);
++        mMain.post(mPolicyRefresh);
+         final int version = ++mLoadVersion;
+         final Context context = requireContext().getApplicationContext();
+         final int user = UserHandle.myUserId();
+@@ -105,7 +136,11 @@ public final class FasSettings extends SettingsPreferenceFragment {
+         });
+     }
+ 
+-    @Override public void onPause() { ++mLoadVersion; super.onPause(); }
++    @Override public void onPause() {
++        ++mLoadVersion;
++        mMain.removeCallbacks(mPolicyRefresh);
++        super.onPause();
++    }
+     @Override public void onDestroy() { mWorker.shutdown(); super.onDestroy(); }
+ 
+     private boolean priority(App app) {
+diff --git a/src/org/lineageos/lineageparts/integrity/IntegritySettings.java b/src/org/lineageos/lineageparts/integrity/IntegritySettings.java
+new file mode 100644
+index 0000000..16348b5
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/integrity/IntegritySettings.java
+@@ -0,0 +1,478 @@
++// SPDX-License-Identifier: Apache-2.0
++package org.lineageos.lineageparts.integrity;
++
++import android.content.Intent;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.PlatformIntegrity;
++import android.os.PowerManager;
++import android.provider.Settings;
++import android.widget.Toast;
++import android.widget.EditText;
++import android.text.InputType;
++import androidx.appcompat.app.AlertDialog;
++import androidx.preference.Preference;
++import androidx.preference.SwitchPreferenceCompat;
++import lineageos.preference.PartInfo;
++import lineageos.preference.PartsList;
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++
++/** Automatic device-wide permits; individual feature configuration stays independent. */
++public final class IntegritySettings extends SettingsPreferenceFragment {
++    private final Handler mHandler = new Handler(Looper.getMainLooper());
++    private final Runnable mRefresh = new Runnable() {
++        @Override public void run() {
++            if (!isResumed()) return;
++            revokeExpiredPresentation();
++            refresh();
++            mHandler.postDelayed(this, 1000);
++        }
++    };
++    private final java.util.concurrent.ExecutorService mWorker =
++            java.util.concurrent.Executors.newSingleThreadExecutor();
++    private boolean mLoading, mChanging;
++    private int mGeneration;
++    private Bundle mSnapshot = new Bundle();
++    private SwitchPreferenceCompat mCompromise;
++    private final Preference[] mFeatures = new Preference[3];
++    private IntegrityStatusPreference mState;
++    private Preference mAlerts, mRecheck, mKsu;
++    private Preference mKsuGroup;
++    private String mShownAssetsToken = "";
++    private AlertDialog mAssetsDialog;
++
++    @Override public void onCreate(Bundle state) {
++        super.onCreate(state);
++        addPreferencesFromResource(R.xml.integrity_settings);
++        mState = findPreference("integrity_state");
++        mAlerts = findPreference("integrity_alerts");
++        mRecheck = findPreference("integrity_recheck");
++        mKsu = findPreference("integrity_ksu");
++        mKsuGroup = findPreference("integrity_ksu_group");
++        mKsuGroup.setVisible(false);
++        mKsu.setSummary(R.string.integrity_ksu_unavailable);
++        mKsu.setOnPreferenceClickListener(p -> { showKsu(); return true; });
++        mCompromise = findPreference("integrity_compromise");
++        mCompromise.setEnabled(false);
++        mRecheck.setEnabled(false);
++        mAlerts.setSummary(R.string.integrity_reason_checking);
++        mCompromise.setOnPreferenceChangeListener((preference, value) -> {
++            change(() -> PlatformIntegrity.requestCompromise((Boolean) value));
++            return false;
++        });
++        mState.setOnPreferenceClickListener(p -> {
++            if (needsReboot()) confirmReboot(); else showDetails();
++            return true;
++        });
++        mAlerts.setOnPreferenceClickListener(p -> { showDetails(); return true; });
++        mRecheck.setOnPreferenceClickListener(p -> { change(PlatformIntegrity::requestRecheck); return true; });
++        String[] keys = {"integrity_tee", "integrity_fas", "integrity_visibility"};
++        for (int i = 0; i < keys.length; i++) {
++            final int index = i;
++            mFeatures[i] = findPreference(keys[i]);
++            mFeatures[i].setSummary(R.string.integrity_reason_checking);
++            mFeatures[i].setOnPreferenceClickListener(p -> { showFeature(index); return true; });
++        }
++    }
++
++    private void failed() {
++        Toast.makeText(requireContext(), R.string.integrity_change_failed, Toast.LENGTH_LONG).show();
++    }
++
++    private void change(java.util.function.BooleanSupplier request) {
++        if (mChanging) return;
++        ++mGeneration;
++        mChanging = true;
++        mCompromise.setEnabled(false);
++        mRecheck.setEnabled(false);
++        mWorker.execute(() -> {
++            boolean result;
++            try { result = request.getAsBoolean(); }
++            catch (RuntimeException e) { result = false; }
++            final boolean saved = result;
++            mHandler.post(() -> {
++                mChanging = false;
++                if (!isAdded()) return;
++                if (!saved) failed();
++                if (isResumed()) refresh();
++            });
++        });
++    }
++
++    private void refresh() {
++        if (!isResumed() || mLoading || mChanging) return;
++        mLoading = true;
++        final int generation = mGeneration;
++        mWorker.execute(() -> {
++            Bundle state;
++            try { state = PlatformIntegrity.getState(); }
++            catch (RuntimeException e) { state = new Bundle(); }
++            final Bundle snapshot = state;
++            mHandler.post(() -> {
++                mLoading = false;
++                if (isResumed() && !mChanging && generation == mGeneration) render(snapshot);
++            });
++        });
++    }
++
++    private boolean needsReboot() {
++        String code = mSnapshot.getString("reason_code", "");
++        return mSnapshot.getBoolean("restart_required") && (code.equals("RESTART_REQUIRED")
++                || code.equals("RECOVERY_RESTART") || code.equals("CONTROL_INTERRUPTED"));
++    }
++
++    private void revokeExpiredPresentation() {
++        int shown = mSnapshot.getInt("effective_features", 0);
++        if (shown == 0 || PlatformIntegrity.current().allows(shown)) return;
++        // Binder may be slow or blocked. The local short lease must still
++        // expire the displayed permission without waiting for another reply.
++        Bundle expired = new Bundle(mSnapshot);
++        expired.putInt("effective_features", 0);
++        expired.putInt("allowed_features", 0);
++        expired.putString("state", "RESTRICTED_ERROR");
++        expired.putString("reason_code", "STALE");
++        expired.putString("coverage_code", "unavailable");
++        render(expired);
++    }
++
++    private String mode(String value) {
++        return getString(value.equals("COMPROMISE")
++                ? R.string.integrity_compromise_title : R.string.integrity_normal_mode);
++    }
++
++    private String recheckSummary() {
++        switch (mSnapshot.getString("syscall_recheck_status", "idle")) {
++            case "queued": return getString(R.string.integrity_recheck_queued);
++            case "running": return getString(R.string.integrity_recheck_running);
++            case "waiting_report": return getString(R.string.integrity_recheck_waiting_report);
++            case "completed": return getString(R.string.integrity_recheck_completed);
++            case "unsupported": return getString(R.string.integrity_recheck_unsupported);
++            case "throttled": return getString(R.string.integrity_recheck_throttled);
++            case "failed": return getString(R.string.integrity_recheck_failed);
++            default: return getString(R.string.integrity_recheck_summary);
++        }
++    }
++
++    private String coverage() {
++        if (mSnapshot.getBoolean("resident_partial_accepted", false))
++            return getString(R.string.integrity_partial_resident_coverage);
++        switch (mSnapshot.getString("coverage_code", "unavailable")) {
++            case "full": return getString(R.string.integrity_full_coverage);
++            case "limited": return getString(R.string.integrity_limited_coverage);
++            case "later_digest": return getString(R.string.integrity_later_digest_coverage);
++            default: return getString(R.string.integrity_coverage_unavailable);
++        }
++    }
++
++    private String reason() {
++        int resource;
++        switch (mSnapshot.getString("reason_code", "SERVICE_UNAVAILABLE")) {
++            case "CHECKING": resource = R.string.integrity_reason_checking; break;
++case "READY": resource = R.string.integrity_reason_ready; break;
++case "COMPROMISE_READY": resource = R.string.integrity_reason_compromise; break;
++case "UNKNOWN_MODULE": resource = R.string.integrity_reason_unknown; break;
++case "SYSCALL_CHANGED": resource = R.string.integrity_reason_syscall; break;
++case "HASH_MISMATCH": resource = R.string.integrity_reason_hash; break;
++case "EVIDENCE_LOST": resource = R.string.integrity_reason_lost; break;
++case "RECOVERY_RESTART": resource = R.string.integrity_reason_recovery_restart; break;
++case "HISTORICAL_ALERTS": resource = R.string.integrity_reason_historical; break;
++case "COVERAGE_INCOMPLETE": resource = R.string.integrity_reason_coverage; break;
++case "ENDPOINTS_UNCONFIRMED": resource = R.string.integrity_reason_endpoints; break;
++case "RESTART_REQUIRED": resource = R.string.integrity_reason_restart; break;
++case "CONTROL_INTERRUPTED": resource = R.string.integrity_reason_interrupted; break;
++case "POLICY_UNAVAILABLE": resource = R.string.integrity_reason_policy; break;
++case "POLICY_PENDING": resource = R.string.integrity_reason_policy_pending; break;
++case "STALE": resource = R.string.integrity_reason_stale; break;
++case "COLLECTOR_UNAVAILABLE": resource = R.string.integrity_reason_collector; break;
++case "CONTROL_UNAVAILABLE": resource = R.string.integrity_reason_control; break;
++case "TEE_UNAVAILABLE": resource = R.string.integrity_reason_tee; break;
++case "VALIDATION_FAILED": resource = R.string.integrity_reason_validation; break;
++            default: resource = R.string.integrity_reason_unavailable;
++        }
++        return getString(resource);
++    }
++
++    private String cardReason() {
++        switch (mSnapshot.getString("reason_code", "")) {
++            case "CHECKING": return getString(R.string.integrity_card_checking);
++            case "READY": return getString(R.string.integrity_card_ready);
++            case "COMPROMISE_READY": return getString(R.string.integrity_card_compromise);
++            case "UNKNOWN_MODULE": return getString(R.string.integrity_card_unknown);
++            case "SYSCALL_CHANGED": return getString(R.string.integrity_card_syscall);
++            case "HASH_MISMATCH": return getString(R.string.integrity_card_hash);
++            case "EVIDENCE_LOST": return getString(R.string.integrity_card_lost);
++            default: return reason();
++        }
++    }
++
++    private void render(Bundle state) {
++        mSnapshot = state;
++        String requested = state.getString("requested", "");
++        String status = state.getString("state", "BOOT_UNKNOWN");
++        String code = state.getString("reason_code", "SERVICE_UNAVAILABLE");
++        int permits = state.getInt("effective_features", 0) & state.getInt("allowed_features", 0);
++        boolean ready = permits != 0 && (status.equals("NORMAL_READY")
++                || status.equals("COMPROMISE_ACTIVE"));
++        boolean anomaly = code.equals("UNKNOWN_MODULE") || code.equals("SYSCALL_CHANGED")
++                || code.equals("HASH_MISMATCH") || code.equals("EVIDENCE_LOST");
++        boolean checking = code.equals("CHECKING");
++        int title = needsReboot() ? R.string.integrity_waiting_restart
++                : ready ? (status.equals("NORMAL_READY") ? R.string.integrity_ready : R.string.integrity_active)
++                : checking ? R.string.integrity_checking
++                : anomaly || code.equals("HISTORICAL_ALERTS") ? R.string.integrity_restricted
++                : R.string.integrity_cannot_verify;
++        int icon = ready ? R.drawable.ic_integrity_check
++                : needsReboot() || checking ? R.drawable.ic_integrity_wait
++                : anomaly ? R.drawable.ic_integrity_warning : R.drawable.ic_integrity_info;
++        String currentMode = mode(state.getString("mode", "NORMAL"));
++        String targetMode = mode(requested.equals("COMPROMISE") || requested.equals("ENTER_COMPROMISE")
++                ? "COMPROMISE" : "NORMAL");
++        String badge = requested.equals("ENTER_COMPROMISE") || requested.equals("EXIT_COMPROMISE")
++                ? getString(R.string.integrity_target_mode, targetMode) : currentMode;
++        String metrics = coverage() + "\n" + getString(R.string.integrity_permit_count,
++                Integer.bitCount(permits));
++        if (state.getBoolean("collection_healthy", false)
++                && state.getBoolean("classification_ready", false)
++                && !state.getBoolean("resident_partial_accepted", false)
++                && state.getInt("early_name_only_rows", 0) != 0) {
++            metrics += "\n" + getString(R.string.integrity_early_unverified_count,
++                    state.getInt("early_name_only_rows", 0));
++        }
++        if (state.getBoolean("current_findings_available", false)
++                && state.getInt("current_module_count", 0) != 0)
++            metrics += "\n" + getString(R.string.integrity_current_modules,
++                    state.getInt("current_module_count", 0));
++        mState.setPresentation(getString(title), cardReason(), badge, metrics,
++                getString(needsReboot() ? R.string.integrity_restart_action : R.string.integrity_view_details),
++                anomaly ? 2 : ready || checking ? 0 : 1, icon);
++        boolean supported = PlatformIntegrity.enabled() && !requested.isEmpty();
++        mCompromise.setEnabled(supported);
++        mRecheck.setEnabled(supported);
++        mRecheck.setSummary(recheckSummary());
++        mCompromise.setChecked(requested.equals("ENTER_COMPROMISE") || requested.equals("COMPROMISE"));
++        mAlerts.setSummary(alertSummary());
++        java.util.ArrayList<Bundle> candidates = state.getParcelableArrayList("ksu_candidates", Bundle.class);
++        boolean hasCandidate = state.getBoolean("current_findings_available", false)
++                && candidates != null && !candidates.isEmpty();
++        mKsuGroup.setVisible(hasCandidate);
++        mKsu.setVisible(hasCandidate);
++        mKsu.setSummary(ksuSummary());
++        maybeShowAssets();
++        for (int i = 0; i < mFeatures.length; i++) {
++            boolean allowed = (permits & (1 << i)) != 0;
++            mFeatures[i].setIcon(allowed ? R.drawable.ic_integrity_check : R.drawable.ic_integrity_info);
++            mFeatures[i].setSummary(allowed ? getString(R.string.integrity_feature_permitted)
++                    : getString(R.string.integrity_managed_blocked, reason()));
++        }
++    }
++
++    private String alertSummary() {
++        String text = getString(R.string.integrity_alarm_count, mSnapshot.getInt("historical_alarms", 0));
++        if (mSnapshot.getBoolean("alarm_overflow")) text += "\n" + getString(R.string.integrity_alarm_overflow);
++        if (mSnapshot.getBoolean("evidence_lost")) text += "\n" + getString(R.string.integrity_evidence_lost);
++        if (mSnapshot.getBoolean("legacy_alarm_uncertain")) text += "\n" + getString(R.string.integrity_legacy_alarm_uncertain);
++        return text;
++    }
++
++    private String ksuSummary() {
++        Bundle source = mSnapshot.getBundle("ksu_source");
++        if (source != null) switch (source.getString("status", "")) {
++            case "listing": return getString(R.string.integrity_ksu_listing);
++            case "downloading": return getString(R.string.integrity_ksu_downloading);
++            case "verifying": case "offline": return getString(R.string.integrity_ksu_verifying);
++            case "choose_asset": return getString(R.string.integrity_ksu_choose_asset);
++            case "unsupported": return getString(R.string.integrity_ksu_unsupported_file);
++            case "different": return getString(R.string.integrity_ksu_different_file);
++            case "asset_limit": return getString(R.string.integrity_ksu_asset_limit);
++            case "failed": case "capacity":
++                return getString(R.string.integrity_ksu_retry);
++        }
++        java.util.ArrayList<Bundle> candidates = mSnapshot.getParcelableArrayList("ksu_candidates", Bundle.class);
++        if (candidates != null && !candidates.isEmpty()) {
++            java.util.ArrayList<String> names = new java.util.ArrayList<>();
++            for (Bundle candidate : candidates) {
++                if (candidate.getString("status", "").equals("source_verified"))
++                    return getString(R.string.integrity_ksu_verified, candidate.getString("verified_name", ""));
++                java.util.ArrayList<String> forks = candidate.getStringArrayList("fork_names");
++                if (forks != null) names.add(String.join(" / ", forks));
++            }
++            return getString(R.string.integrity_ksu_pending, String.join(", ", names));
++        }
++        String status = mSnapshot.getString("ksu_candidate_status", "unavailable");
++        return getString(status.equals("observed") ? R.string.integrity_ksu_none
++                : status.equals("partial") ? R.string.integrity_ksu_partial : R.string.integrity_ksu_unavailable);
++    }
++
++    private void showKsu() {
++        String text = ksuSummary();
++        java.util.ArrayList<Bundle> candidates = mSnapshot.getParcelableArrayList("ksu_candidates", Bundle.class);
++        if (candidates != null) for (Bundle candidate : candidates) {
++            text += "\n\n" + candidate.getString("module_name", "") + ".ko";
++            java.util.ArrayList<String> repos = candidate.getStringArrayList("repositories");
++            if (repos != null) text += "\n" + String.join(" / ", repos);
++            if (candidate.getString("status", "").equals("source_verified")) {
++                text += "\n" + getString(R.string.integrity_ksu_release_info, candidate.getString("verified_tag", ""));
++                text += "\n" + getString(R.string.integrity_ksu_file_info, candidate.getString("verified_asset", ""));
++            }
++            text += "\n" + getString(R.string.integrity_ksu_manager_hash,
++                    candidate.getString("manager_certificate_sha256", ""));
++        }
++        if (mSnapshot.getString("ksu_candidate_status", "").equals("partial"))
++            text += "\n\n" + getString(R.string.integrity_ksu_partial);
++        AlertDialog.Builder dialog = new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_ksu_title)
++                .setMessage(text).setNegativeButton(android.R.string.cancel, null)
++                .setPositiveButton(R.string.integrity_ksu_verify_action, (d, which) -> chooseSourceFork());
++        if (!mSnapshot.getBoolean("ksu_source_ready", false)) dialog.setPositiveButton(android.R.string.ok, null);
++        Bundle source = mSnapshot.getBundle("ksu_source");
++        if (source != null && source.getString("status", "").matches("listing|choose_asset|downloading|verifying|offline")) {
++            dialog.setPositiveButton(android.R.string.ok, null);
++            dialog.setNeutralButton(R.string.integrity_ksu_cancel, (d, which) -> cancelSource(source));
++        }
++        dialog.show();
++    }
++
++    private void sourceRequest(Bundle request) {
++        if (mChanging) return;
++        ++mGeneration; mChanging = true;
++        mWorker.execute(() -> {
++            Bundle result;
++            try { result = PlatformIntegrity.requestKernelSuSource(request); }
++            catch (RuntimeException e) { result = new Bundle(); }
++            final boolean rejected = result.getString("status", "rejected").equals("rejected");
++            mHandler.post(() -> {
++                mChanging = false;
++                if (!isAdded()) return;
++                if (rejected) Toast.makeText(requireContext(), R.string.integrity_ksu_request_rejected,
++                        Toast.LENGTH_LONG).show();
++                if (isResumed()) refresh();
++            });
++        });
++    }
++    private void cancelSource(Bundle source) {
++        Bundle request = new Bundle(); request.putString("action", "cancel");
++        request.putString("token", source.getString("token", "")); sourceRequest(request);
++    }
++    private void chooseSourceFork() {
++        java.util.ArrayList<Bundle> rows = mSnapshot.getParcelableArrayList("ksu_candidates", Bundle.class);
++        if (rows == null || rows.isEmpty()) return;
++        java.util.ArrayList<Bundle> choices = new java.util.ArrayList<>();
++        java.util.ArrayList<String> labels = new java.util.ArrayList<>();
++        for (Bundle row : rows) {
++            java.util.ArrayList<String> repos = row.getStringArrayList("repositories"), names = row.getStringArrayList("fork_names");
++            if (repos == null || names == null) continue;
++            for (int i = 0; i < repos.size(); ++i) {
++                Bundle choice = new Bundle(); choice.putLong("load_id", row.getLong("load_id"));
++                choice.putString("repository", repos.get(i)); choices.add(choice);
++                labels.add(names.get(i) + " · " + repos.get(i));
++            }
++        }
++        if (choices.size() == 1) enterReleaseTag(choices.get(0));
++        else if (!choices.isEmpty()) new AlertDialog.Builder(requireContext())
++                .setTitle(R.string.integrity_ksu_choose_fork).setItems(labels.toArray(new String[0]),
++                    (d, which) -> enterReleaseTag(choices.get(which))).setNegativeButton(android.R.string.cancel, null).show();
++    }
++    private void enterReleaseTag(Bundle choice) {
++        EditText tag = new EditText(requireContext());
++        tag.setSingleLine(true); tag.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
++        tag.setHint(R.string.integrity_ksu_tag_hint);
++        new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_ksu_release_title)
++                .setMessage(getString(R.string.integrity_ksu_release_help, choice.getString("repository")))
++                .setView(tag).setNegativeButton(android.R.string.cancel, null)
++                .setPositiveButton(R.string.integrity_ksu_query_action, (d, which) -> {
++                    Bundle request = new Bundle(choice); request.putString("action", "list");
++                    request.putString("tag", tag.getText().toString().trim()); sourceRequest(request);
++                }).show();
++    }
++    private void maybeShowAssets() {
++        Bundle source = mSnapshot.getBundle("ksu_source");
++        if (!isResumed() || source == null || !source.getString("status", "").equals("choose_asset")) return;
++        String token = source.getString("token", "");
++        if (token.isEmpty() || token.equals(mShownAssetsToken)) return;
++        java.util.ArrayList<Bundle> assets = source.getParcelableArrayList("assets", Bundle.class);
++        if (assets == null) return;
++        mShownAssetsToken = token;
++        String[] labels = new String[assets.size()];
++        for (int i = 0; i < assets.size(); ++i) labels[i] = assets.get(i).getString("name", "");
++        int[] selected = {-1};
++        AlertDialog.Builder dialog = new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_ksu_choose_asset)
++                .setOnCancelListener(d -> cancelSource(source))
++                .setNegativeButton(android.R.string.cancel, (d, which) -> cancelSource(source));
++        if (assets.isEmpty()) dialog.setMessage(R.string.integrity_ksu_no_assets);
++        else dialog.setSingleChoiceItems(labels, -1, (d, which) -> {
++            selected[0] = which; ((AlertDialog) d).getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
++        }).setPositiveButton(R.string.integrity_ksu_download_action, (d, which) -> {
++            if (selected[0] < 0) return;
++            Bundle request = new Bundle(); request.putString("action", "download");
++            request.putString("token", token); request.putLong("asset_id", assets.get(selected[0]).getLong("id"));
++            sourceRequest(request);
++        });
++        mAssetsDialog = dialog.create(); mAssetsDialog.show();
++        if (!assets.isEmpty()) mAssetsDialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
++    }
++
++    private void showDetails() {
++        String text = reason() + "\n\n" + coverage();
++        if (mSnapshot.getBoolean("current_findings_available", false)) {
++            text += "\n\n" + getString(R.string.integrity_current_modules,
++                    mSnapshot.getInt("current_module_count", 0));
++            java.util.ArrayList<String> current = mSnapshot.getStringArrayList("current_module_names");
++            if (current != null && !current.isEmpty()) text += "\n" + String.join(", ", current);
++        } else text += "\n\n" + getString(R.string.integrity_current_modules_pending);
++        text += "\n\n" + alertSummary();
++        java.util.ArrayList<String> names = mSnapshot.getStringArrayList("alarm_names");
++        if (names != null && !names.isEmpty()) text += "\n" + String.join(", ", names);
++        text += "\n\n" + getString(R.string.integrity_recovery_help);
++        new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_details_title)
++                .setMessage(text).setPositiveButton(android.R.string.ok, null).show();
++    }
++
++    private void showFeature(int index) {
++        int[] explanations = {R.string.integrity_tee_explain, R.string.integrity_fas_explain,
++                R.string.integrity_visibility_explain};
++        new AlertDialog.Builder(requireContext()).setTitle(mFeatures[index].getTitle())
++                .setMessage(mFeatures[index].getSummary() + "\n\n" + getString(explanations[index]))
++                .setNegativeButton(android.R.string.cancel, null)
++                .setPositiveButton(R.string.integrity_open_settings, (dialog, which) -> {
++                    try {
++                        if (index == 2) startActivity(new Intent(Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS));
++                        else {
++                            PartInfo part = PartsList.get(requireContext()).getPartInfo(
++                                    index == 0 ? "tee_soft_debug" : "fas");
++                            if (part == null || !part.isAvailable()) { failed(); return; }
++                            startActivity(part.getIntentForActivity());
++                        }
++                    } catch (RuntimeException e) { failed(); }
++                }).show();
++    }
++
++    private void confirmReboot() {
++        new AlertDialog.Builder(requireContext()).setTitle(R.string.integrity_restart_action)
++                .setMessage(R.string.integrity_restart_confirm)
++                .setNegativeButton(android.R.string.cancel, null)
++                .setPositiveButton(R.string.integrity_restart_action, (dialog, which) -> {
++                    if (!needsReboot()) return;
++                    try { requireContext().getSystemService(PowerManager.class).reboot(null); }
++                    catch (RuntimeException e) { failed(); }
++                }).show();
++    }
++
++    @Override public void onViewCreated(android.view.View view, Bundle state) {
++        super.onViewCreated(view, state);
++        setDivider(null);
++    }
++
++    @Override public void onResume() {
++        super.onResume();
++        ++mGeneration;
++        mHandler.removeCallbacks(mRefresh);
++        mHandler.post(mRefresh);
++    }
++    @Override public void onPause() {
++        ++mGeneration; mHandler.removeCallbacks(mRefresh);
++        if (mAssetsDialog != null) { mAssetsDialog.dismiss(); mAssetsDialog = null; mShownAssetsToken = ""; }
++        super.onPause();
++    }
++    @Override public void onDestroy() { mWorker.shutdown(); super.onDestroy(); }
++}
+diff --git a/src/org/lineageos/lineageparts/integrity/IntegrityStatusPreference.java b/src/org/lineageos/lineageparts/integrity/IntegrityStatusPreference.java
+new file mode 100644
+index 0000000..89fad7b
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/integrity/IntegrityStatusPreference.java
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: Apache-2.0
++package org.lineageos.lineageparts.integrity;
++
++import android.content.Context;
++import android.content.res.TypedArray;
++import android.graphics.Color;
++import android.graphics.drawable.GradientDrawable;
++import android.util.AttributeSet;
++import android.widget.ImageView;
++import android.widget.TextView;
++import androidx.core.graphics.ColorUtils;
++import androidx.preference.Preference;
++import androidx.preference.PreferenceViewHolder;
++import java.util.Objects;
++import org.lineageos.lineageparts.R;
++
++/** A tonal status card, with the same lifecycle as the surrounding preference list. */
++public final class IntegrityStatusPreference extends Preference {
++    private String mMode = "", mMetrics = "", mAction = "";
++    private int mTone, mIcon = R.drawable.ic_integrity_info;
++
++    public IntegrityStatusPreference(Context context, AttributeSet attrs) {
++        super(context, attrs);
++        setLayoutResource(R.layout.integrity_status_card);
++    }
++
++    public void setPresentation(String title, String summary, String mode, String metrics,
++            String action, int tone, int icon) {
++        if (Objects.equals(getTitle(), title) && Objects.equals(getSummary(), summary)
++                && mMode.equals(mode) && mMetrics.equals(metrics) && mAction.equals(action)
++                && mTone == tone && mIcon == icon) return;
++        mMode = mode;
++        mMetrics = metrics;
++        mAction = action;
++        mTone = tone;
++        mIcon = icon;
++        setTitle(title);
++        setSummary(summary);
++        notifyChanged();
++    }
++
++    @Override public void onBindViewHolder(PreferenceViewHolder holder) {
++        super.onBindViewHolder(holder);
++        TypedArray theme = getContext().obtainStyledAttributes(new int[] {
++                android.R.attr.colorBackground, android.R.attr.colorAccent,
++                android.R.attr.textColorPrimary});
++        int background = theme.getColor(0, Color.WHITE);
++        int accent = theme.getColor(1, Color.GRAY);
++        int foreground = theme.getColor(2, Color.BLACK);
++        theme.recycle();
++        int tint = mTone == 2 ? getContext().getColor(R.color.trust_status_bad)
++                : mTone == 1 ? getContext().getColor(R.color.trust_status_poor) : accent;
++        GradientDrawable shape = new GradientDrawable();
++        shape.setColor(ColorUtils.blendARGB(background, tint, 0.16f));
++        shape.setCornerRadius(24 * getContext().getResources().getDisplayMetrics().density);
++        holder.findViewById(R.id.integrity_card).setBackground(shape);
++        ImageView icon = (ImageView) holder.findViewById(R.id.integrity_card_icon);
++        icon.setImageResource(mIcon);
++        icon.setColorFilter(foreground);
++        ((TextView) holder.findViewById(R.id.integrity_card_mode)).setText(mMode);
++        ((TextView) holder.findViewById(R.id.integrity_card_metrics)).setText(mMetrics);
++        ((TextView) holder.findViewById(R.id.integrity_card_action)).setText(mAction);
++        holder.setDividerAllowedAbove(false);
++        holder.setDividerAllowedBelow(false);
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/search/LineagePartsSearchIndexablesProvider.java b/src/org/lineageos/lineageparts/search/LineagePartsSearchIndexablesProvider.java
+index 25015cd..6e5d8e5 100644
+--- a/src/org/lineageos/lineageparts/search/LineagePartsSearchIndexablesProvider.java
++++ b/src/org/lineageos/lineageparts/search/LineagePartsSearchIndexablesProvider.java
+@@ -70,6 +70,8 @@ public class LineagePartsSearchIndexablesProvider extends SearchIndexablesProvid
+         // return all of the xml resources listed in the resource: attribute
+         // from parts_catalog.xml for indexing
+         for (String key : keys) {
++            // Environment integrity is entered through Trust only.
++            if ("integrity".equals(key)) continue;
+             PartInfo i = PartsList.get(getContext()).getPartInfo(key);
+             if (i == null || i.getXmlRes() <= 0 || !i.isAvailable()) {
+                 continue;
+@@ -98,6 +100,8 @@ public class LineagePartsSearchIndexablesProvider extends SearchIndexablesProvid
+         // we also submit keywords and metadata for all top-level items
+         // which don't have an associated XML resource
+         for (String key : keys) {
++            // Environment integrity is entered through Trust only.
++            if ("integrity".equals(key)) continue;
+             PartInfo i = PartsList.get(getContext()).getPartInfo(key);
+             if (i == null || !i.isAvailable()) {
+                 continue;
+@@ -157,8 +161,11 @@ public class LineagePartsSearchIndexablesProvider extends SearchIndexablesProvid
+ 
+         final Set<String> keys = PartsList.get(getContext()).getPartsList();
+         final Set<String> nonIndexables = new ArraySet<>();
++        nonIndexables.add("integrity");
+ 
+         for (String key : keys) {
++            // Environment integrity is entered through Trust only.
++            if ("integrity".equals(key)) continue;
+             PartInfo i = PartsList.get(getContext()).getPartInfo(key);
+             if (i == null || !i.isAvailable()) {
+                 continue;
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+index 5eaa010..9072531 100644
+--- a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+@@ -81,6 +81,35 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+     private SwitchPreferenceCompat mShowNonLauncherAppsPref;
+     private PackageListAdapter mPackageAdapter;
+ 
++    private final android.os.Handler mPolicyHandler =
++            new android.os.Handler(android.os.Looper.getMainLooper());
++    private final java.util.concurrent.ExecutorService mPolicyWorker =
++            java.util.concurrent.Executors.newSingleThreadExecutor();
++    private boolean mPolicyLoading;
++    private final Runnable mPolicyRefresh = new Runnable() {
++        @Override public void run() {
++            if (!isAdded()) return;
++            if (!mPolicyLoading) {
++                mPolicyLoading = true;
++                mPolicyWorker.execute(() -> {
++                    android.os.Bundle state = android.os.PlatformIntegrity.getState();
++                    mPolicyHandler.post(() -> {
++                        mPolicyLoading = false;
++                        if (!isResumed()) return;
++                        boolean supported = android.os.PlatformIntegrity.enabled();
++                        boolean allowed = !supported || (state.getInt("allowed_features", 0) & 1) != 0;
++                        mEnabledPref.setEnabled(mEnabled || allowed);
++                        mEnabledPref.setSummary(!supported || android.os.PlatformIntegrity.allowed(1)
++                                ? R.string.tee_soft_debug_enable_summary
++                                : mEnabled ? R.string.integrity_feature_waiting
++                                        : R.string.integrity_feature_blocked);
++                    });
++                });
++            }
++            mPolicyHandler.postDelayed(this, 1000);
++        }
++    };
++
+     private boolean mEnabled;
+     private String mMode = MODE_PATCH;
+     private String mKeyboxPath = "";
+@@ -150,13 +179,27 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+     @Override
+     public void onResume() {
+         super.onResume();
++        mPolicyHandler.removeCallbacks(mPolicyRefresh);
++        mPolicyHandler.post(mPolicyRefresh);
+         loadRuntimeConfigIntoState();
+         applyStateToUi();
+     }
+ 
++    @Override public void onDestroy() {
++        mPolicyWorker.shutdown();
++        super.onDestroy();
++    }
++
++    @Override public void onPause() {
++        mPolicyHandler.removeCallbacks(mPolicyRefresh);
++        super.onPause();
++    }
++
+     @Override
+     public boolean onPreferenceChange(Preference preference, Object newValue) {
+         if (preference == mEnabledPref) {
++            if ((Boolean) newValue && !android.os.PlatformIntegrity.allowed(
++                    android.os.PlatformIntegrity.TEE)) return false;
+             mEnabled = (Boolean) newValue;
+             persistRuntimeConfig();
+             refreshKeyboxPathSummary();
+diff --git a/src/org/lineageos/lineageparts/trust/TrustPreferences.java b/src/org/lineageos/lineageparts/trust/TrustPreferences.java
+index c76357c..5bfd8d5 100644
+--- a/src/org/lineageos/lineageparts/trust/TrustPreferences.java
++++ b/src/org/lineageos/lineageparts/trust/TrustPreferences.java
+@@ -50,6 +50,10 @@ public class TrustPreferences extends SettingsPreferenceFragment {
+         mSecurityPatchesPref = findPreference("trust_security_patch");
+         mEncryptionPref = findPreference("trust_encryption");
+         mToolsCategory = findPreference("trust_category_tools");
++        Preference integrity = findPreference("integrity");
++        if (!android.os.PlatformIntegrity.enabled() && integrity != null) {
++            mToolsCategory.removePreference(integrity);
++        }
+         mUsbRestrictorPref = mToolsCategory.findPreference("trust_restrict_usb");
+         mSmsLimitPref = mToolsCategory.findPreference("sms_security_check_limit");
+ 
+-- 
+2.43.0
+

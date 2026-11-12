@@ -1,0 +1,250 @@
+From 1c4c56368babd488235c948213cb99fb6d87e19a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 16:33:59 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Connect baseline and collector build
+ outputs
+
+Add thin Make and Soong integration for ASTER's baseline, signer and optional
+source-built collector outputs. Keep generation rules under external/aster.
+
+Track collector header inputs in kernel header generation and record the final
+installed module paths for baseline construction. Require a full kernel build
+when the source-built collector is selected and forward the nested source and
+output configuration to the kernel build.
+
+Change-Id: I9adc974d424eb906ef2a0c4475185b63d27ca7ba
+---
+ build/platform_integrity/Android.mk |  3 +
+ build/soong/Android.bp              | 33 +++++++---
+ build/soong/integrity/collector.go  | 95 +++++++++++++++++++++++++++++
+ build/tasks/kernel.mk               | 13 ++++
+ config/BoardConfigKernel.mk         |  2 +
+ 5 files changed, 136 insertions(+), 10 deletions(-)
+ create mode 100644 build/platform_integrity/Android.mk
+ create mode 100644 build/soong/integrity/collector.go
+
+diff --git a/build/platform_integrity/Android.mk b/build/platform_integrity/Android.mk
+new file mode 100644
+index 0000000..72eef51
+--- /dev/null
++++ b/build/platform_integrity/Android.mk
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: Apache-2.0
++# Host Make discovery only; all ASTER generation rules are maintained externally.
++include external/aster/build/baseline.mk
+diff --git a/build/soong/Android.bp b/build/soong/Android.bp
+index 295a6af..81e7ada 100644
+--- a/build/soong/Android.bp
++++ b/build/soong/Android.bp
+@@ -1,5 +1,17 @@
+ // LineageOS soong configs
+ 
++bootstrap_go_package {
++    name: "soong-lineage-integrity",
++    pkgPath: "lineage/soong/integrity",
++    deps: [
++        "blueprint",
++        "soong",
++        "soong-android",
++    ],
++    srcs: ["integrity/collector.go"],
++    pluginFor: ["soong_build"],
++}
++
+ bootstrap_go_package {
+     name: "soong-lineage-generator",
+     pkgPath: "lineage/soong/generator",
+@@ -20,19 +32,20 @@ bootstrap_go_package {
+ 
+ lineage_generator {
+     name: "generated_kernel_includes",
++    tool_files: [":aster_kernel_header_inputs"],
+ 
+     // The headers make command
+     cmd: "set -e; " +
+-         "if [ -n \"$(TARGET_KERNEL_PLATFORM_TARGET)\" ]; then " +
+-         "    pushd $(KERNEL_PATH); " +
+-         "    ./tools/bazel --output_user_root=$(KERNEL_BUILD_OUT_PREFIX)$(genDir)/bazel-out --output_root=$(KERNEL_BUILD_OUT_PREFIX)$(genDir)/bazel-out run --experimental_convenience_symlinks=ignore --cpu=$(KERNEL_ARCH) //$(TARGET_KERNEL_SOURCE):$(TARGET_KERNEL_PLATFORM_TARGET)_uapi_headers_dist -- --destdir=$(KERNEL_BUILD_OUT_PREFIX)$(genDir); " +
+-         "    popd; " +
+-         "    gzip -d $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/kernel-uapi-headers.tar.gz; " +
+-         "    tar -xf $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/kernel-uapi-headers.tar -C $(KERNEL_BUILD_OUT_PREFIX)$(genDir); " +
+-         "else " +
+-         "    $(PATH_OVERRIDE_SOONG) $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_FLAGS) -C $(TARGET_KERNEL_SOURCE) O=$(KERNEL_BUILD_OUT_PREFIX)$(genDir) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) headers_install; " +
+-         "fi; " +
+-         "vendor/lineage/tools/clean_headers.sh $(KERNEL_BUILD_OUT_PREFIX)$(genDir)",
++        "if [ -n \"$(TARGET_KERNEL_PLATFORM_TARGET)\" ]; then " +
++        "    pushd $(KERNEL_PATH); " +
++        "    ./tools/bazel --output_user_root=$(KERNEL_BUILD_OUT_PREFIX)$(genDir)/bazel-out --output_root=$(KERNEL_BUILD_OUT_PREFIX)$(genDir)/bazel-out run --experimental_convenience_symlinks=ignore --cpu=$(KERNEL_ARCH) //$(TARGET_KERNEL_SOURCE):$(TARGET_KERNEL_PLATFORM_TARGET)_uapi_headers_dist -- --destdir=$(KERNEL_BUILD_OUT_PREFIX)$(genDir); " +
++        "    popd; " +
++        "    gzip -d $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/kernel-uapi-headers.tar.gz; " +
++        "    tar -xf $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/kernel-uapi-headers.tar -C $(KERNEL_BUILD_OUT_PREFIX)$(genDir); " +
++        "else " +
++        "    $(PATH_OVERRIDE_SOONG) $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_FLAGS) -C $(TARGET_KERNEL_SOURCE) O=$(KERNEL_BUILD_OUT_PREFIX)$(genDir) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) headers_install; " +
++        "fi; " +
++        "vendor/lineage/tools/clean_headers.sh $(KERNEL_BUILD_OUT_PREFIX)$(genDir)",
+ 
+     // Directories that can be imported by a cc_* module generated_headers property
+     export_include_dirs: [
+diff --git a/build/soong/integrity/collector.go b/build/soong/integrity/collector.go
+new file mode 100644
+index 0000000..2a526d6
+--- /dev/null
++++ b/build/soong/integrity/collector.go
+@@ -0,0 +1,95 @@
++// SPDX-License-Identifier: Apache-2.0
++package integrity
++
++import "android/soong/android"
++
++func init() {
++	android.RegisterModuleType("integrity_collector_output", collectorFactory)
++	android.RegisterModuleType("integrity_signer_output", signerFactory)
++	android.RegisterModuleType("integrity_early_output", earlyFactory)
++}
++
++type earlyOutput struct {
++	android.ModuleBase
++	properties struct{ Filename *string }
++	srcs       android.Paths
++}
++
++func earlyFactory() android.Module {
++	m := &earlyOutput{}
++	m.AddProperties(&m.properties)
++	android.InitAndroidModule(m)
++	return m
++}
++
++func (m *earlyOutput) UseGenericConfig() bool { return false }
++
++func (m *earlyOutput) GenerateAndroidBuildActions(ctx android.ModuleContext) {
++	if !ctx.Config().HasDeviceProduct() || m.properties.Filename == nil {
++		ctx.ModuleErrorf("requires a device product and manifest filename")
++		return
++	}
++	name := *m.properties.Filename
++	if name != "collector_manifest.json" && name != "collector_manifest.sig" {
++		ctx.PropertyErrorf("filename", "unsupported early output %q", name)
++		return
++	}
++	m.srcs = android.Paths{android.PathForArbitraryOutput(ctx, "target", "product",
++		ctx.Config().DeviceName(), "obj", "platform_integrity", "early_manifest", name)}
++}
++
++func (m *earlyOutput) Srcs() android.Paths { return append(android.Paths{}, m.srcs...) }
++
++// Public C++ input generated by Make from the selected certificate only. It
++// must not depend on the kernel, signed baseline, APEX or final system image.
++type signerOutput struct {
++	android.ModuleBase
++	srcs android.Paths
++}
++
++func signerFactory() android.Module {
++	m := &signerOutput{}
++	android.InitAndroidModule(m)
++	return m
++}
++
++func (m *signerOutput) UseGenericConfig() bool { return false }
++
++func (m *signerOutput) GenerateAndroidBuildActions(ctx android.ModuleContext) {
++	if !ctx.Config().HasDeviceProduct() {
++		ctx.ModuleErrorf("requires a configured device product")
++		return
++	}
++	m.srcs = android.Paths{android.PathForArbitraryOutput(ctx, "target", "product",
++		ctx.Config().DeviceName(), "obj", "platform_integrity", "trust_anchor", "signer.cpp")}
++}
++
++func (m *signerOutput) Srcs() android.Paths { return append(android.Paths{}, m.srcs...) }
++
++// Only the fixed Make-produced collector is exposed. No source-path escape,
++// glob of existing output files, or second producer of the kernel artifacts.
++type collectorOutput struct {
++	android.ModuleBase
++	srcs android.Paths
++}
++
++func collectorFactory() android.Module {
++	m := &collectorOutput{}
++	android.InitAndroidModule(m)
++	return m
++}
++
++// The Make-produced path belongs to the selected product, not the generic
++// configuration. DeviceName() is deliberately unavailable in generic modules.
++func (m *collectorOutput) UseGenericConfig() bool { return false }
++
++func (m *collectorOutput) GenerateAndroidBuildActions(ctx android.ModuleContext) {
++	if !ctx.Config().HasDeviceProduct() {
++		ctx.ModuleErrorf("requires a configured device product")
++		return
++	}
++	m.srcs = android.Paths{android.PathForArbitraryOutput(ctx, "target", "product",
++		ctx.Config().DeviceName(), "obj", "platform_integrity", "collector", "inte.ko")}
++}
++
++func (m *collectorOutput) Srcs() android.Paths { return append(android.Paths{}, m.srcs...) }
+diff --git a/build/tasks/kernel.mk b/build/tasks/kernel.mk
+index a4846e3..986be96 100644
+--- a/build/tasks/kernel.mk
++++ b/build/tasks/kernel.mk
+@@ -251,6 +251,12 @@ else
+     endif
+ endif
+ 
++ifeq ($(TARGET_PLATFORM_INTEGRITY_COLLECTOR),true)
++ifneq ($(FULL_KERNEL_BUILD),true)
++$(error Source-built integrity collector requires FULL_KERNEL_BUILD=true)
++endif
++endif
++
+ ifeq ($(FULL_KERNEL_BUILD),true)
+ # Add host bin out dir to path
+ PATH_OVERRIDE := PATH=$(KERNEL_BUILD_OUT_PREFIX)$(HOST_OUT_EXECUTABLES):$$PATH
+@@ -394,6 +400,7 @@ ifneq ($(filter $(FULL_KERNEL_BUILD),true)$(TARGET_KERNEL_PLATFORM_TARGET),)
+ # $(8): external dependency module intermediates dir
+ # Depmod requires a well-formed kernel version so 0.0 is used as a placeholder.
+ define build-image-kernel-modules-lineage
++    $(if $(filter true,$(TARGET_PLATFORM_INTEGRITY)),for MODULE in $(1); do printf '%s\n' "$(2)/lib/modules$(6)/$$(basename $$MODULE)" >> $(PLATFORM_INTEGRITY_MODULE_MANIFEST).tmp; done)
+     mkdir -p $(2)/lib/modules$(6)
+     cp $(1) $(2)/lib/modules$(6)
+     rm -rf $(4)
+@@ -531,7 +538,11 @@ $(KERNEL_CONFIG): $(KERNEL_OUT) $(ALL_KERNEL_DEFCONFIG_SRCS)
+ 	@echo "Building Kernel Config"
+ 	$(call make-kernel-config,$(KERNEL_OUT),$(ALL_KERNEL_DEFCONFIG_SRCS))
+ 
++# ASTER owns nested source/output bookkeeping; host recipe hooks stay below.
++include external/aster/build/kernel_outputs.mk
++
+ $(TARGET_PREBUILT_INT_KERNEL): $(KERNEL_CONFIG) $(DEPMOD) $(DTC) $(KERNEL_MODULES_PARTITION_FILE_LIST) $(SYSTEM_KERNEL_MODULES_PARTITION_FILE_LIST) $(BOOT_KERNEL_MODULES_FINDER) $(RECOVERY_KERNEL_MODULES_FINDER)
++	$(if $(filter true,$(TARGET_PLATFORM_INTEGRITY)),mkdir -p $(dir $(PLATFORM_INTEGRITY_MODULE_MANIFEST)); rm -rf $(MODULES_INTERMEDIATES); : > $(PLATFORM_INTEGRITY_MODULE_MANIFEST).tmp)
+ 	@echo "Building Kernel Image ($(BOARD_KERNEL_IMAGE_NAME))"
+ 	$(call make-kernel-target,$(BOARD_KERNEL_IMAGE_NAME))
+ 	$(hide) if [ -d "$(KERNEL_SRC)/arch/$(KERNEL_ARCH)/boot/dts/" ]; then \
+@@ -625,6 +636,8 @@ $(TARGET_PREBUILT_INT_KERNEL): $(KERNEL_CONFIG) $(DEPMOD) $(DTC) $(KERNEL_MODULE
+ 			) \
+ 		fi
+ 
++	$(if $(filter true,$(TARGET_PLATFORM_INTEGRITY)),test -s $(PLATFORM_INTEGRITY_MODULE_MANIFEST).tmp && sort -u $(PLATFORM_INTEGRITY_MODULE_MANIFEST).tmp > $(PLATFORM_INTEGRITY_MODULE_MANIFEST))
++
+ .PHONY: kerneltags
+ kerneltags: $(KERNEL_CONFIG)
+ 	$(call make-kernel-target,tags)
+diff --git a/config/BoardConfigKernel.mk b/config/BoardConfigKernel.mk
+index 3d9fc0c..ea380b2 100644
+--- a/config/BoardConfigKernel.mk
++++ b/config/BoardConfigKernel.mk
+@@ -141,6 +141,8 @@ endif
+ # Clear this first to prevent accidental poisoning from env
+ KERNEL_MAKE_FLAGS :=
+ 
++include external/aster/build/kernel_config.mk
++
+ # Add back threads, ninja cuts this to $(getconf _NPROCESSORS_ONLN)/2
+ KERNEL_MAKE_FLAGS += -j$(shell getconf _NPROCESSORS_ONLN)
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,286 @@
+From 9bb8a26f528370f3996d71bda9900f0688777a3b Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:49:33 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] restrict ASTER source credential keys
+ to verified executors
+
+Add authorization for dedicated ASTER source-credential namespaces.
+Use the registered executor identity instead of relying only on the
+caller's UID or SELinux domain.
+
+Separate built-in and standalone collector credentials so the weaker
+standalone execution boundary cannot authorize built-in credentials.
+
+Validate stored descriptors when keys are accessed through KEY_ID or
+GRANT, and bind credential operations to the authorized executor
+generation. Reject protected-key import, transfer and namespace
+migration paths.
+
+Reuse existing hardware-backed key generation and HMAC operations.
+Leave unrelated key namespaces and vendor KeyMint interfaces unchanged.
+
+Change-Id: I55cf2bb2daa9432274dc7f6a8af4087dc95ebf39
+---
+ keystore2/Android.bp               |  2 +
+ keystore2/src/aster_credentials.rs | 85 ++++++++++++++++++++++++++++++
+ keystore2/src/lib.rs               |  1 +
+ keystore2/src/maintenance.rs       |  2 +
+ keystore2/src/operation.rs         | 15 +++++-
+ keystore2/src/permission.rs        |  6 +++
+ keystore2/src/security_level.rs    | 10 +++-
+ 7 files changed, 119 insertions(+), 2 deletions(-)
+ create mode 100644 keystore2/src/aster_credentials.rs
+
+diff --git a/keystore2/Android.bp b/keystore2/Android.bp
+index 3feeae6..0738d17 100644
+--- a/keystore2/Android.bp
++++ b/keystore2/Android.bp
+@@ -31,6 +31,7 @@ rust_test_host {
+ 
+ rust_defaults {
+     name: "libkeystore2_defaults",
++    static_libs: ["libaster_keystore_identity"],
+     crate_name: "keystore2",
+     srcs: ["src/lib.rs"],
+     defaults: [
+@@ -81,6 +82,7 @@ rust_defaults {
+     ],
+     shared_libs: [
+         "libcutils",
++        "libbinder",
+     ],
+     features: [
+         "watchdog",
+diff --git a/keystore2/src/aster_credentials.rs b/keystore2/src/aster_credentials.rs
+new file mode 100644
+index 0000000..1ac07a4
+--- /dev/null
++++ b/keystore2/src/aster_credentials.rs
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Only the ASTER namespace is gated; ordinary keys never query ASTER.
++use crate::error::Error;
++use anyhow::{Context, Result};
++use android_system_keystore2::aidl::android::system::keystore2::{
++    Domain::Domain, KeyDescriptor::KeyDescriptor, ResponseCode::ResponseCode,
++};
++use android_hardware_security_keymint::aidl::android::hardware::security::keymint::{
++    Algorithm::Algorithm, Digest::Digest, KeyParameter::KeyParameter,
++    KeyParameterValue::KeyParameterValue as V, KeyPurpose::KeyPurpose,
++    SecurityLevel::SecurityLevel, Tag::Tag,
++};
++
++pub(crate) const NAMESPACE: i64 = 121;
++pub(crate) const ALIAS: &str = "aster.ksu.source.hmac.v1";
++pub(crate) const LOCAL_NAMESPACE: i64 = 122;
++pub(crate) const LOCAL_ALIAS: &str = "aster.ksu.source.local.hmac.v1";
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct SourceIdentity {
++    generation: u64,
++    backend: u32,
++}
++
++unsafe extern "C" {
++    fn aster_keystore_source_identity(generation: *mut u64, backend: *mut u32) -> i32;
++}
++
++fn denied<T>() -> Result<T> {
++    Err(Error::Rc(ResponseCode::PERMISSION_DENIED)).context("ASTER credential access denied")
++}
++
++pub(crate) fn protected(key: &KeyDescriptor) -> bool {
++    (key.domain == Domain::SELINUX || key.domain == Domain::BLOB)
++        && (key.nspace == NAMESPACE || key.nspace == LOCAL_NAMESPACE)
++}
++
++pub(crate) fn generation() -> Result<SourceIdentity> {
++    let mut generation = 0;
++    let mut backend = 0;
++    // SAFETY: native helper writes only these live outputs and checks the current Binder transaction.
++    if unsafe { aster_keystore_source_identity(&mut generation, &mut backend) } != 0
++        || generation == 0 || (backend != 1 && backend != 2) {
++        return denied();
++    }
++    Ok(SourceIdentity { generation, backend })
++}
++
++pub(crate) fn authorize(key: &KeyDescriptor) -> Result<Option<SourceIdentity>> {
++    if !protected(key) { return Ok(None); }
++    if key.domain != Domain::SELINUX { return denied(); }
++    let source = generation()?;
++    let backend = if key.nspace == NAMESPACE { 1 } else { 2 };
++    // KEY_ID resolution supplies the stored namespace but may omit the alias.
++    // Enforce the single permitted alias at creation, not on that permission tuple.
++    if source.backend != backend { return denied(); }
++    Ok(Some(source))
++}
++
++pub(crate) fn reject_import(key: &KeyDescriptor) -> Result<()> {
++    if protected(key) { return denied(); }
++    Ok(())
++}
++
++pub(crate) fn check_generation(key: &KeyDescriptor, level: SecurityLevel,
++                               params: &[KeyParameter]) -> Result<()> {
++    if !protected(key) { return Ok(()); }
++    authorize(key)?;
++    let alias = if key.nspace == NAMESPACE { ALIAS } else { LOCAL_ALIAS };
++    if level != SecurityLevel::TRUSTED_ENVIRONMENT || key.alias.as_deref() != Some(alias) {
++        return denied();
++    }
++    let required = [
++        KeyParameter { tag: Tag::ALGORITHM, value: V::Algorithm(Algorithm::HMAC) },
++        KeyParameter { tag: Tag::KEY_SIZE, value: V::Integer(256) },
++        KeyParameter { tag: Tag::PURPOSE, value: V::KeyPurpose(KeyPurpose::SIGN) },
++        KeyParameter { tag: Tag::DIGEST, value: V::Digest(Digest::SHA_2_256) },
++        KeyParameter { tag: Tag::MIN_MAC_LENGTH, value: V::Integer(256) },
++        KeyParameter { tag: Tag::NO_AUTH_REQUIRED, value: V::BoolValue(true) },
++    ];
++    if params.len() != required.len() || required.iter().any(|p| !params.contains(p)) {
++        return denied();
++    }
++    Ok(())
++}
+diff --git a/keystore2/src/lib.rs b/keystore2/src/lib.rs
+index ead4fc6..3ba9dba 100644
+--- a/keystore2/src/lib.rs
++++ b/keystore2/src/lib.rs
+@@ -42,6 +42,7 @@ pub mod service;
+ pub mod shared_secret_negotiation;
+ mod tee_soft_debug;
+ pub mod integrity_policy;
++mod aster_credentials;
+ pub mod utils;
+ 
+ mod attestation_key_utils;
+diff --git a/keystore2/src/maintenance.rs b/keystore2/src/maintenance.rs
+index 412d240..6d60aa4 100644
+--- a/keystore2/src/maintenance.rs
++++ b/keystore2/src/maintenance.rs
+@@ -341,6 +341,8 @@ impl Maintenance {
+     }
+ 
+     fn migrate_key_namespace(source: &KeyDescriptor, destination: &KeyDescriptor) -> Result<()> {
++        crate::aster_credentials::reject_import(source)?;
++        crate::aster_credentials::reject_import(destination)?;
+         let calling_uid = AppUid::calling();
+ 
+         match source.domain {
+diff --git a/keystore2/src/operation.rs b/keystore2/src/operation.rs
+index 5d31fe0..b493213 100644
+--- a/keystore2/src/operation.rs
++++ b/keystore2/src/operation.rs
+@@ -842,6 +842,7 @@ impl OperationDb {
+ /// Implementation of IKeystoreOperation.
+ pub struct KeystoreOperation {
+     operation: Mutex<Option<Arc<Operation>>>,
++    aster_generation: Option<crate::aster_credentials::SourceIdentity>,
+ }
+ 
+ impl KeystoreOperation {
+@@ -850,8 +851,14 @@ impl KeystoreOperation {
+     /// `BinderFeatures::set_requesting_sid` on the new interface, because
+     /// we need it for checking Keystore permissions.
+     pub fn new_native_binder(operation: Arc<Operation>) -> binder::Strong<dyn IKeystoreOperation> {
++        Self::new_native_binder_with_aster(operation, None)
++    }
++
++    pub(crate) fn new_native_binder_with_aster(operation: Arc<Operation>,
++        aster_generation: Option<crate::aster_credentials::SourceIdentity>)
++        -> binder::Strong<dyn IKeystoreOperation> {
+         BnKeystoreOperation::new_binder(
+-            Self { operation: Mutex::new(Some(operation)) },
++            Self { operation: Mutex::new(Some(operation)), aster_generation },
+             BinderFeatures { set_requesting_sid: true, ..BinderFeatures::default() },
+         )
+     }
+@@ -863,6 +870,12 @@ impl KeystoreOperation {
+     where
+         for<'a> F: FnOnce(&'a Operation) -> Result<T>,
+     {
++        if let Some(expected) = self.aster_generation {
++            if crate::aster_credentials::generation()? != expected {
++                return Err(Error::Rc(ResponseCode::PERMISSION_DENIED))
++                    .context("ASTER executor generation changed");
++            }
++        }
+         let mut delete_op: bool = delete_op;
+         match self.operation.try_lock() {
+             Ok(mut mutex_guard) => {
+diff --git a/keystore2/src/permission.rs b/keystore2/src/permission.rs
+index 06c54ac..7c7c0d0 100644
+--- a/keystore2/src/permission.rs
++++ b/keystore2/src/permission.rs
+@@ -288,6 +288,7 @@ pub fn check_grant_permission(
+     access_vec: KeyPermSet,
+     key: &KeyDescriptor,
+ ) -> anyhow::Result<()> {
++    crate::aster_credentials::reject_import(key)?;
+     let target_context = match key.domain {
+         Domain::APP => {
+             if caller_uid.0 != key.nspace {
+@@ -344,6 +345,11 @@ pub fn check_key_permission(
+     key: &KeyDescriptor,
+     access_vector: &Option<KeyPermSet>,
+ ) -> anyhow::Result<()> {
++    crate::aster_credentials::authorize(key)?;
++    if crate::aster_credentials::protected(key) &&
++        (perm == KeyPerm::Grant || perm == KeyPerm::Update) {
++        return Err(KsError::Rc(ResponseCode::PERMISSION_DENIED)).context("ASTER key is not transferable");
++    }
+     // If an access vector was supplied, the key is either accessed by GRANT or by KEY_ID.
+     // In the former case, key.domain was set to GRANT and we check the failure cases
+     // further below. If the access is requested by KEY_ID, key.domain would have been
+diff --git a/keystore2/src/security_level.rs b/keystore2/src/security_level.rs
+index d4b9080..7114a71 100644
+--- a/keystore2/src/security_level.rs
++++ b/keystore2/src/security_level.rs
+@@ -418,6 +418,11 @@ impl KeystoreSecurityLevel {
+                 }
+             };
+ 
++        // KEY_ID/GRANT must use the stored namespace, never a caller's alias.
++        let aster_generation = match loaded_descriptor.as_ref() {
++            Some(descriptor) => crate::aster_credentials::authorize(descriptor)?,
++            None => crate::aster_credentials::authorize(key)?,
++        };
+         let purpose = operation_parameters.iter().find(|p| p.tag == Tag::PURPOSE).map_or(
+             Err(Error::Km(ErrorCode::INVALID_ARGUMENT))
+                 .context(ks_err!("No operation purpose specified.")),
+@@ -553,7 +558,7 @@ impl KeystoreSecurityLevel {
+         };
+ 
+         let op_binder: binder::Strong<dyn IKeystoreOperation> =
+-            KeystoreOperation::new_native_binder(operation)
++            KeystoreOperation::new_native_binder_with_aster(operation, aster_generation)
+                 .as_binder()
+                 .into_interface()
+                 .context(ks_err!("Failed to create IKeystoreOperation."))?;
+@@ -723,6 +728,7 @@ impl KeystoreSecurityLevel {
+         flags: i32,
+         _entropy: &[u8],
+     ) -> Result<KeyMetadata> {
++        crate::aster_credentials::check_generation(key, self.security_level, params)?;
+         if key.domain != Domain::BLOB && key.alias.is_none() {
+             return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT))
+                 .context(ks_err!("Alias must be specified"));
+@@ -1254,6 +1260,7 @@ impl KeystoreSecurityLevel {
+         flags: i32,
+         key_data: &[u8],
+     ) -> Result<KeyMetadata> {
++        crate::aster_credentials::reject_import(key)?;
+         if key.domain != Domain::BLOB && key.alias.is_none() {
+             return Err(error::Error::Km(ErrorCode::INVALID_ARGUMENT))
+                 .context(ks_err!("Alias must be specified"));
+@@ -1349,6 +1356,7 @@ impl KeystoreSecurityLevel {
+             _ => panic!("Unreachable."),
+         };
+ 
++        crate::aster_credentials::reject_import(&key)?;
+         // Import_wrapped_key requires the rebind permission for the new key.
+         check_key_permission(KeyPerm::Rebind, &key, &None).context(ks_err!())?;
+ 
+-- 
+2.43.0
+

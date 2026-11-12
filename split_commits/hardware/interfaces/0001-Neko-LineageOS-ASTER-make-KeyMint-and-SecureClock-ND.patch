@@ -1,0 +1,45 @@
+From 80a7c509f49ae9edf660b971f437c1ff2d56a0bf Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:59:38 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] make KeyMint and SecureClock NDK
+ bindings available to ASTER
+
+Allow the platform integrity APEX to depend on the generated KeyMint
+and SecureClock NDK libraries for its Keystore credential client.
+
+This changes APEX dependency availability only; AIDL definitions and
+vendor service implementations remain unchanged.
+
+Change-Id: I3a794e6da84fb75ce8f2dee1c9309af280979006
+---
+ security/keymint/aidl/Android.bp     | 1 +
+ security/secureclock/aidl/Android.bp | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/security/keymint/aidl/Android.bp b/security/keymint/aidl/Android.bp
+index ac284677..6d49adf4 100644
+--- a/security/keymint/aidl/Android.bp
++++ b/security/keymint/aidl/Android.bp
+@@ -28,6 +28,7 @@ aidl_interface {
+             apex_available: [
+                 "//apex_available:platform",
+                 "com.android.wifi",
++                "com.android.platform.integrity",
+             ],
+         },
+         rust: {
+diff --git a/security/secureclock/aidl/Android.bp b/security/secureclock/aidl/Android.bp
+index aefc6fc9..21f70424 100644
+--- a/security/secureclock/aidl/Android.bp
++++ b/security/secureclock/aidl/Android.bp
+@@ -25,6 +25,7 @@ aidl_interface {
+             apex_available: [
+                 "//apex_available:platform",
+                 "com.android.wifi",
++                "com.android.platform.integrity",
+             ],
+         },
+         rust: {
+-- 
+2.43.0
+

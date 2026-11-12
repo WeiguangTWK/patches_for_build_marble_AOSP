@@ -1,0 +1,144 @@
+From 1a6540a1c37d0d80be30bb57337bf38f29d51cbd Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:58:46 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] add ASTER source identity queries for
+ credential authorization
+
+Expose platform-only IPCThreadState helpers to query the current
+Binder caller's ASTER executor generation and collector backend.
+
+Use the existing Binder driver connection for the built-in identity
+query. Require an active synchronous transaction and reject explicitly
+replaced calling identities.
+
+When the driver does not support the query, allow a validated V4
+collector to resolve the sender through its registered Keystore role.
+Bind the fallback request to the current collector instance and check
+the returned generation and request fields.
+
+Do not fall back when the built-in query denies access. Return the
+backend explicitly so credential authorization can keep built-in and
+standalone namespaces separate.
+
+Compile the implementation for the Android platform target with the
+shared ASTER UAPI headers.
+
+Change-Id: I0ce1ca5da9968557bb1f1d940658a26d678bd9a8
+---
+ libs/binder/Android.bp                      |  2 +
+ libs/binder/AsterSourceIdentity.cpp         | 71 +++++++++++++++++++++
+ libs/binder/include/binder/IPCThreadState.h |  7 ++
+ 3 files changed, 80 insertions(+)
+ create mode 100644 libs/binder/AsterSourceIdentity.cpp
+
+diff --git a/libs/binder/Android.bp b/libs/binder/Android.bp
+index ab97db7..b3a6ce2 100644
+--- a/libs/binder/Android.bp
++++ b/libs/binder/Android.bp
+@@ -697,6 +697,8 @@ cc_library {
+     ],
+     target: {
+         android: {
++            srcs: ["AsterSourceIdentity.cpp"],
++            header_libs: ["libplatform_integrity_uapi"],
+             // NOT static to keep the wire protocol unfrozen
+             static: {
+                 enabled: false,
+diff --git a/libs/binder/AsterSourceIdentity.cpp b/libs/binder/AsterSourceIdentity.cpp
+new file mode 100644
+index 0000000..8ca964b
+--- /dev/null
++++ b/libs/binder/AsterSourceIdentity.cpp
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: Apache-2.0
++#include <binder/IPCThreadState.h>
++#include <binder/ProcessState.h>
++#include <binder/IBinder.h>
++#include <cutils/android_get_control_file.h>
++#include <platform_integrity.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <stddef.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++
++namespace android {
++status_t IPCThreadState::getCallingAsterSourceGeneration(uint64_t* generation) const {
++    uint32_t backend = 0;
++    return getCallingAsterSourceIdentity(generation, &backend);
++}
++status_t IPCThreadState::getCallingAsterSourceIdentity(uint64_t* generation, uint32_t* backend) const {
++    if (!generation || !backend) return BAD_VALUE;
++    *generation = 0;
++    *backend = 0;
++    if (!mServingStackPointer || mHasExplicitIdentity ||
++        (mLastTransactionBinderFlags & IBinder::FLAG_ONEWAY) || mProcess->mDriverFD < 0) {
++        return PERMISSION_DENIED;
++    }
++    pi_binder_source query{};
++    query.version = PI_BINDER_SOURCE_VERSION;
++    query.struct_size = sizeof(query);
++    if (ioctl(mProcess->mDriverFD, PI_IOC_BINDER_SOURCE, &query) == 0) {
++        if (query.version != PI_BINDER_SOURCE_VERSION || query.struct_size != sizeof(query) ||
++            !query.generation) return BAD_VALUE;
++        *generation = query.generation;
++        *backend = 1;
++        return OK;
++    }
++    const int binder_error = errno;
++    // Stock Binder reports EINVAL for unknown ioctls. Only a validated V4
++    // collector plus its held Keystore role may use this weaker path.
++    // EPERM/EACCES from the official query never trigger a fallback.
++    if (binder_error != ENOTTY && binder_error != EOPNOTSUPP && binder_error != EINVAL)
++        return -binder_error;
++    if (mCallingPid <= 1) return PERMISSION_DENIED;
++    const int inherited = android_get_control_file("/dev/platform_integrity");
++    const int collector = inherited >= 0 ? fcntl(inherited, F_DUPFD_CLOEXEC, 0)
++            : open("/dev/platform_integrity", O_RDWR | O_CLOEXEC | O_NOFOLLOW);
++    if (collector < 0) return -errno;
++    pi_digest4_status status{};
++    if (ioctl(collector, PI_IOC_DIGEST4_STATUS, &status) != 0) {
++        const int error = errno; close(collector); return -error;
++    }
++    if (status.abi_version != PI_DIGEST4_ABI || status.struct_size != sizeof(status) ||
++        status.capabilities != PI_DIGEST4_REQUIRED_CAPS || status.ready != 1) {
++        close(collector); return BAD_VALUE;
++    }
++    pi_source_query fallback{};
++    fallback.version = PI_SOURCE_QUERY_VERSION; fallback.struct_size = sizeof(fallback);
++    fallback.sender_pid = mCallingPid;
++    memcpy(fallback.instance, status.instance, sizeof(fallback.instance));
++    const auto original = fallback;
++    const int result = ioctl(collector, PI_IOC_SOURCE_QUERY, &fallback);
++    const int error = errno;
++    close(collector);
++    if (result != 0) return -error;
++    if (memcmp(&fallback, &original, offsetof(pi_source_query, generation)) || !fallback.generation)
++        return BAD_VALUE;
++    *generation = fallback.generation;
++    *backend = 2;
++    return OK;
++}
++} // namespace android
+diff --git a/libs/binder/include/binder/IPCThreadState.h b/libs/binder/include/binder/IPCThreadState.h
+index 83f8b60..5825154 100644
+--- a/libs/binder/include/binder/IPCThreadState.h
++++ b/libs/binder/include/binder/IPCThreadState.h
+@@ -77,6 +77,13 @@ public:
+      */
+     [[nodiscard]] LIBBINDER_EXPORTED pid_t getCallingPid() const;
+ 
++    // Platform-only, opt-in ASTER query on the existing driver connection.
++    // No rights are granted. Unsupported outside a synchronous kernel call.
++    [[nodiscard]] LIBBINDER_EXPORTED status_t getCallingAsterSourceGeneration(uint64_t* generation) const;
++    // backend: 1 = official Binder identity, 2 = standalone collector fallback.
++    [[nodiscard]] LIBBINDER_EXPORTED status_t getCallingAsterSourceIdentity(uint64_t* generation,
++                                                                          uint32_t* backend) const;
++
+     /**
+      * Returns the SELinux security identifier of the process which has
+      * made the current binder call. If not in a binder call this will
+-- 
+2.43.0
+

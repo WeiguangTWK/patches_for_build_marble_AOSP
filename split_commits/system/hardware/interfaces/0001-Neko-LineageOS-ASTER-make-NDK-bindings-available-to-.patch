@@ -1,0 +1,31 @@
+From dd06be70d9b01ac392c79838d18a01b2789e917f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 17:01:36 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] make NDK bindings available to the
+ ASTER APEX
+
+Allow the platform integrity APEX to use the generated Keystore2 NDK
+library for hardware-backed source credential operations.
+
+P.S. Existing AIDL interfaces and runtime authorizations are unchanged.
+
+Change-Id: I371e29fcb93d4c427542ca2c339a4e37739b5c75
+---
+ keystore2/aidl/Android.bp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/keystore2/aidl/Android.bp b/keystore2/aidl/Android.bp
+index da345d7..5a1c94d 100644
+--- a/keystore2/aidl/Android.bp
++++ b/keystore2/aidl/Android.bp
+@@ -32,6 +32,7 @@ aidl_interface {
+             apex_available: [
+                 "//apex_available:platform",
+                 "com.android.wifi",
++                "com.android.platform.integrity",
+             ],
+         },
+         rust: {
+-- 
+2.43.0
+

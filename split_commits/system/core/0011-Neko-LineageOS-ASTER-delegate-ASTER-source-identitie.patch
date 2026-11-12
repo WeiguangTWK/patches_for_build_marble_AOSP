@@ -1,0 +1,124 @@
+From b0a5334bafa84892f41f86d7d3498b287be3e5ef Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:47:42 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] delegate ASTER source identities to
+ the V4 collector
+
+Extend ASTER service identity setup to support the standalone V4
+collector alongside the existing built-in prepare path.
+
+Validate collector readiness before delegating the executor or
+Keystore child from PID1. Perform delegation before releasing the
+service startup barrier and retain the existing built-in fork binding.
+
+Pass Keystore a managed collector descriptor through init's existing
+descriptor publication mechanism. Keep the device node permissions
+unchanged.
+
+Treat unavailable identity support as a source-verification failure
+rather than a service startup failure, allowing both services to start
+when the collector is absent or incompatible.
+
+Change-Id: Ic91ad5364a43ac2c27e8e3229a23d272e305e53a
+---
+ init/service.cpp | 62 ++++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 50 insertions(+), 12 deletions(-)
+
+diff --git a/init/service.cpp b/init/service.cpp
+index b6b0387..19f327a 100644
+--- a/init/service.cpp
++++ b/init/service.cpp
+@@ -698,18 +698,45 @@ Result<void> Service::Start() {
+         }
+     }
+ 
+-    // Only PID1 may delegate the real ASTER service fork. Kernel binding occurs
+-    // before publication/wakeup, so a reparented or label-spoofed process cannot
+-    // claim this role. Failure leaves source authorization unavailable.
++    // Full backend binds ASTER in its existing pre-wakeup fork hook. V4 uses
++    // an explicit PID1 delegation before this service's cgroup barrier opens.
++    // Failure disables only source identity; service startup still proceeds.
+     android::base::unique_fd source_actor;
+-    if (name_ == "platform_integrityd" &&
+-        args_[0] == "/apex/com.android.platform.integrity/bin/platform_integrityd") {
+-        source_actor.reset(open("/dev/platform_integrity", O_RDWR | O_CLOEXEC));
+-        pi_source_actor request{};
+-        request.version = PI_SOURCE_ACTOR_VERSION; request.struct_size = sizeof(request);
+-        request.action = PI_SOURCE_ACTOR_PREPARE;
+-        if (source_actor < 0 || ioctl(source_actor.get(), PI_IOC_SOURCE_ACTOR, &request) != 0)
+-            source_actor.reset();
++    bool source_prepared = false;
++    uint32_t source_delegate_role = 0;
++    const bool aster_executor = name_ == "platform_integrityd" &&
++            args_[0] == "/apex/com.android.platform.integrity/bin/platform_integrityd";
++    const bool aster_keystore = name_ == "keystore2" && args_[0] == "/system/bin/keystore2";
++    if (aster_executor || aster_keystore) {
++        source_actor.reset(open("/dev/platform_integrity", O_RDWR | O_CLOEXEC | O_NOFOLLOW));
++        bool may_use_v4 = aster_keystore;
++        if (source_actor >= 0 && aster_executor) {
++            pi_source_actor request{};
++            request.version = PI_SOURCE_ACTOR_VERSION; request.struct_size = sizeof(request);
++            request.action = PI_SOURCE_ACTOR_PREPARE;
++            source_prepared = ioctl(source_actor.get(), PI_IOC_SOURCE_ACTOR, &request) == 0;
++            may_use_v4 = !source_prepared && (errno == ENOTTY || errno == EOPNOTSUPP);
++        }
++        if (source_actor >= 0 && may_use_v4) {
++            pi_digest4_status status{};
++            if (ioctl(source_actor.get(), PI_IOC_DIGEST4_STATUS, &status) == 0 &&
++                status.abi_version == PI_DIGEST4_ABI && status.struct_size == sizeof(status) &&
++                status.capabilities == PI_DIGEST4_REQUIRED_CAPS && status.ready == 1) {
++                source_delegate_role = aster_executor ? PI_SOURCE_ROLE_EXECUTOR : PI_SOURCE_ROLE_KEYSTORE;
++            }
++        }
++        if (!source_prepared && !source_delegate_role) source_actor.reset();
++    }
++    if (source_actor >= 0 && source_delegate_role == PI_SOURCE_ROLE_KEYSTORE) {
++        // The raw node stays 0660 system:system. Reuse init's managed-file FD
++        // publication instead of widening DAC or adding Keystore groups.
++        const int inherited = fcntl(source_actor.get(), F_DUPFD_CLOEXEC, 0);
++        if (inherited >= 0) {
++            descriptors.emplace_back(ANDROID_FILE_ENV_PREFIX "/dev/platform_integrity",
++                                     android::base::unique_fd(inherited));
++        } else {
++            PLOG(WARNING) << "ASTER Keystore identity descriptor unavailable";
++        }
+     }
+     pid_t pid = -1;
+     if (namespaces_.flags) {
+@@ -719,6 +746,7 @@ Result<void> Service::Start() {
+     }
+ 
+     if (pid == 0) {
++        source_actor.reset();
+         umask(077);
+         cgroups_activated.CloseWriteFd();
+         setsid_finished.CloseReadFd();
+@@ -731,7 +759,7 @@ Result<void> Service::Start() {
+ 
+     if (pid < 0) {
+         const int fork_error = errno;
+-        if (source_actor >= 0) {
++        if (source_actor >= 0 && source_prepared) {
+             pi_source_actor request{};
+             request.version = PI_SOURCE_ACTOR_VERSION; request.struct_size = sizeof(request);
+             request.action = PI_SOURCE_ACTOR_CANCEL;
+@@ -742,6 +770,16 @@ Result<void> Service::Start() {
+         return ErrnoError() << "Failed to fork";
+     }
+ 
++    if (source_actor >= 0 && source_delegate_role) {
++        pi_source_delegate request{};
++        request.version = PI_SOURCE_DELEGATE_VERSION; request.struct_size = sizeof(request);
++        request.role = source_delegate_role; request.child_pid = pid;
++        if (ioctl(source_actor.get(), PI_IOC_SOURCE_DELEGATE, &request) != 0) {
++            PLOG(WARNING) << "ASTER source identity delegation unavailable for " << name_;
++        }
++    }
++    source_actor.reset();
++
+     once_environment_vars_.clear();
+ 
+     if (oom_score_adjust_ != DEFAULT_OOM_SCORE_ADJUST) {
+-- 
+2.43.0
+

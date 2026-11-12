@@ -1,0 +1,100 @@
+From 42823dad49a68ec9d1e466bfaad85437995d19aa Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Wed, 11 Nov 2026 16:44:59 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] expose ASTER executor identity for
+ credential authorization
+
+Add an ASTER identity query for the sender of the current synchronous
+Binder transaction. Resolve the sender from the transaction stack and
+return its registered executor generation.
+
+Require the query to run on the receiving transaction thread and reject
+one-way transactions, missing senders and unregistered tasks. Check the
+receiver task to prevent a transferred Binder descriptor from
+impersonating its original owner.
+
+Hold the sender task reference while resolving its identity and release
+the sender's temporary Binder reference outside the receiver lock.
+
+This provides the built-in backend identity bridge used by Keystore
+for ASTER source credentials without changing ordinary Binder calls.
+
+Change-Id: Ie6b11f24794effd5d0beb9e4cd10c3e2fb57f8a1
+---
+ drivers/android/binder.c | 46 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index db4664405..9495cec3b 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -61,6 +61,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/pid_namespace.h>
+ #include <linux/security.h>
++#include <linux/platform_integrity.h>
+ #include <linux/spinlock.h>
+ #include <linux/ratelimit.h>
+ #include <linux/syscalls.h>
+@@ -5712,6 +5713,46 @@ static int binder_ioctl_get_freezer_info(
+ 	return 0;
+ }
+ 
++static int binder_ioctl_aster_source(struct binder_proc *proc,
++		struct binder_thread *thread, void __user *ubuf)
++{
++	struct pi_binder_source query;
++	struct binder_transaction *txn;
++	struct binder_thread *from = NULL;
++	struct task_struct *sender = NULL;
++
++	if (!IS_ENABLED(CONFIG_PLATFORM_INTEGRITY))
++		return -EOPNOTSUPP;
++	if (copy_from_user(&query, ubuf, sizeof(query)))
++		return -EFAULT;
++	if (query.version != PI_BINDER_SOURCE_VERSION ||
++	    query.struct_size != sizeof(query) || query.generation)
++		return -EINVAL;
++	/* A passed Binder fd must not impersonate its original receiver. */
++	if (proc->tsk != current->group_leader || thread->task != current)
++		return -EPERM;
++	binder_inner_proc_lock(proc);
++	txn = thread->transaction_stack;
++	if (txn && txn->to_thread == thread && !(txn->flags & TF_ONE_WAY)) {
++		from = binder_get_txn_from(txn);
++		if (from) {
++			sender = from->proc->tsk;
++			get_task_struct(sender);
++		}
++	}
++	binder_inner_proc_unlock(proc);
++	/* dec_tmpref may take the OTHER process's inner lock. Never nest it. */
++	if (from)
++		binder_thread_dec_tmpref(from);
++	if (!sender)
++		return -EPERM;
++	query.generation = pi_source_task_generation(sender);
++	put_task_struct(sender);
++	if (!query.generation)
++		return -EPERM;
++	return copy_to_user(ubuf, &query, sizeof(query)) ? -EFAULT : 0;
++}
++
+ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	int ret;
+@@ -5738,6 +5779,11 @@ static long binder_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ 	}
+ 
+ 	switch (cmd) {
++	case PI_IOC_BINDER_SOURCE:
++		ret = binder_ioctl_aster_source(proc, thread, ubuf);
++		if (ret)
++			goto err;
++		break;
+ 	case BINDER_WRITE_READ:
+ 		ret = binder_ioctl_write_read(filp, cmd, arg, thread);
+ 		if (ret)
+-- 
+2.43.0
+

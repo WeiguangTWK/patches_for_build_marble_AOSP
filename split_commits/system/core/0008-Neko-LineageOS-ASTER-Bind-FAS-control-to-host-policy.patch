@@ -1,0 +1,2265 @@
+From efa56da72b53236956543ec4c6191c8c855dd376 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 18:58:53 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Bind FAS control to host policy and
+ boot evidence
+
+Add shared host-side policy and FAS boot-record helpers for lease validation,
+instance continuity and boot-sticky submission tracking.
+
+Update fasd to use the policy-aware backend context and status interfaces,
+preserving the existing control path while rejecting stale grants or changed
+instances. Retain explicit stop and interruption evidence instead of claiming
+that a QTI hardware release has completed.
+
+Include the host lease, mode and shutdown models alongside the shared headers.
+
+Change-Id: I2db9e89ed295da952b876eb06fe73f401eed9627
+---
+ fasd/Android.bp                               |   5 +-
+ fasd/fasd.cpp                                 | 241 ++++++++++--
+ fasd/fasd.rc                                  |   3 +
+ libplatform_integrity_host/Android.bp         |  16 +
+ .../include/platform/fas_boot_record.h        |  91 +++++
+ .../include/platform/integrity_policy.h       |  92 +++++
+ .../tests/lease_model/README.md               | 122 ++++++
+ .../tests/lease_model/model.py                | 154 ++++++++
+ .../tests/lease_model/test_model.py           | 246 ++++++++++++
+ .../tests/mode_model/README.md                |  46 +++
+ .../tests/mode_model/model.py                 | 277 ++++++++++++++
+ .../tests/mode_model/shutdown_model.py        | 106 ++++++
+ .../tests/mode_model/test_model.py            | 349 ++++++++++++++++++
+ .../tests/mode_model/test_shutdown.py         | 223 +++++++++++
+ 14 files changed, 1946 insertions(+), 25 deletions(-)
+ create mode 100644 libplatform_integrity_host/Android.bp
+ create mode 100644 libplatform_integrity_host/include/platform/fas_boot_record.h
+ create mode 100644 libplatform_integrity_host/include/platform/integrity_policy.h
+ create mode 100644 libplatform_integrity_host/tests/lease_model/README.md
+ create mode 100644 libplatform_integrity_host/tests/lease_model/model.py
+ create mode 100644 libplatform_integrity_host/tests/lease_model/test_model.py
+ create mode 100644 libplatform_integrity_host/tests/mode_model/README.md
+ create mode 100644 libplatform_integrity_host/tests/mode_model/model.py
+ create mode 100644 libplatform_integrity_host/tests/mode_model/shutdown_model.py
+ create mode 100644 libplatform_integrity_host/tests/mode_model/test_model.py
+ create mode 100644 libplatform_integrity_host/tests/mode_model/test_shutdown.py
+
+diff --git a/fasd/Android.bp b/fasd/Android.bp
+index e13d100..224fb0f 100644
+--- a/fasd/Android.bp
++++ b/fasd/Android.bp
+@@ -18,14 +18,17 @@ cc_binary {
+         "-Wextra",
+         "-Werror",
+     ],
++    header_libs: ["libplatform_integrity_headers", "libplatform_integrity_uapi"],
+     shared_libs: [
++        "libbase",
++        "libjsoncpp",
+         "libbinder",
+         "libbinder_ndk",
+         "libcutils",
+         "libgui",
+         "liblog",
+         "libutils",
+-        "vendor.performance.fas-V1-ndk",
++        "vendor.performance.fas-V3-ndk",
+     ],
+     init_rc: ["fasd.rc"],
+ }
+diff --git a/fasd/fasd.cpp b/fasd/fasd.cpp
+index 12cbfe5..ebff079 100644
+--- a/fasd/fasd.cpp
++++ b/fasd/fasd.cpp
+@@ -15,6 +15,8 @@
+ 
+ #include <aidl/vendor/performance/fas/CpuPolicyVote.h>
+ #include <aidl/vendor/performance/fas/IFasBackend.h>
++#include <aidl/vendor/performance/fas/FasBackendStatus.h>
++#include <aidl/vendor/performance/fas/FasPolicyContext.h>
+ #include <android/binder_manager.h>
+ #include <android/gui/BnFpsListener.h>
+ #include <binder/ProcessState.h>
+@@ -22,6 +24,13 @@
+ #include <gui/SurfaceComposerClient.h>
+ #include <utils/Log.h>
+ #include <utils/Timers.h>
++#include <platform/integrity_policy.h>
++#include <platform/execution_evidence.h>
++#include <platform/fas_boot_record.h>
++#include <platform_integrity.h>
++#include <sys/ioctl.h>
++#include <json/json.h>
++#include <poll.h>
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -59,6 +68,8 @@
+ 
+ namespace android::fas {
+ namespace {
++namespace integrity = android::platform_integrity;
++const std::string gFasDaemonInstance = integrity::randomInstance();
+ 
+ using namespace std::chrono_literals;
+ 
+@@ -115,6 +126,7 @@ struct Session {
+     int32_t fixedTargetFps = 0;
+     std::string packageName;
+     std::vector<int32_t> renderOwnerCandidates;
++    std::string policyIdentity;
+ };
+ 
+ struct CpuPolicy {
+@@ -695,9 +707,90 @@ class CpuTopology {
+ 
+ class QtiBackendClient {
+   public:
++    void setPolicyIdentity(const std::string& identity) { mPolicyIdentity = identity; }
++    std::string controlV4(const std::string& command) {
++        std::vector<std::string> fields;
++        std::istringstream input(command);
++        for (std::string field; std::getline(input, field, '\t');) fields.push_back(field);
++        if (fields.size() < 3 || !ensureConnected()) return "ERROR";
++        const auto permit = integrity::currentPermit();
++        if (!permit || !permit->allows(0) || permit->identity != fields[1]) return "ERROR";
++        using aidl::vendor::performance::fas::FasBackendStatus;
++        using aidl::vendor::performance::fas::FasPolicyContext;
++        FasBackendStatus result;
++        if (fields[0] == "STATUS_V4" && fields.size() == 3) {
++            if (permit->allows(integrity::kFas) && !mContext) return "ERROR";
++            if (!mBackend->getBackendStatus(fields[2], &result).isOk()) return "ERROR";
++        } else if (fields[0] == "BIND_V4" && fields.size() == 5) {
++            if (permit->allows(integrity::kFas) || !integrity::instanceId(fields[2])
++                    || !integrity::instanceId(fields[3]) || (fields[4] != "0" && fields[4] != "1"))
++                return "ERROR";
++            if (!mBackend->getBackendStatus(fields[3], &result).isOk()
++                    || result.challenge != fields[3] || !result.healthy) return "ERROR";
++            FasPolicyContext context;
++            context.policyIdentity = fields[1];
++            context.daemonInstance = gFasDaemonInstance;
++            context.backendInstance = result.backendInstance;
++            context.collectorInstance = fields[2];
++            context.grant = fields[3];
++            context.compromise = fields[4] == "1";
++            if (!mBackend->bindPolicy(context, &result).isOk()) return "ERROR";
++            mContext = context;
++        } else if (fields[0] == "STOP_V4" && fields.size() == 3) {
++            if (permit->allows(integrity::kFas) || !mContext) return "ERROR";
++            auto context = *mContext;
++            context.policyIdentity = fields[1];
++            if (!mBackend->stopWithContext(context, &result).isOk()) return "ERROR";
++            result.challenge = fields[2];
++            mContext.reset();
++        } else return "ERROR";
++        Json::Value response(Json::objectValue);
++        response["protocol"] = 4;
++        response["identity"] = fields[1];
++        response["challenge"] = result.challenge;
++        response["daemon_instance"] = gFasDaemonInstance;
++        response["daemon_record"] = android::base::GetProperty(integrity::kFasDaemonBoot, "");
++        response["backend_instance"] = result.backendInstance;
++        response["backend_record"] = result.bootRecord;
++        response["bound_daemon"] = result.boundDaemonInstance;
++        response["bound_collector"] = result.boundCollectorInstance;
++        response["bound_grant"] = result.boundGrant;
++        response["healthy"] = result.healthy && integrity::fasInstanceHealthy(
++                integrity::kFasDaemonBoot, gFasDaemonInstance);
++        response["submission"] = result.bootSubmissionState;
++        // Host control evidence stays outside ASTER's environment report. Keep
++        // the same boot-sticky kernel marker that recovery formerly read via
++        // FACTS; a boot property is not an equivalent substitute.
++        response["kernel_submission"] = 2;
++        response["kernel_sequence"] = Json::Value();
++        const int markerFd = open("/dev/platform_integrity", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
++        if (markerFd >= 0) {
++            const auto marker = integrity::executionEvidence(markerFd);
++            if (marker && (!marker->independent || marker->collector == result.boundCollectorInstance)) {
++                response["kernel_submission"] = marker->submission;
++                response["kernel_sequence"] = Json::UInt64(marker->moduleSequence);
++            }
++            close(markerFd);
++        }
++        response["accepting"] = result.accepting;
++        response["release_attempted"] = result.releaseAttempted;
++        response["release_confirmed"] = result.releaseConfirmed;
++        Json::StreamWriterBuilder writer;
++        writer["indentation"] = "";
++        return Json::writeString(writer, response);
++    }
++    int stopWithPolicy(const std::string& identity) {
++        if (!ensureConnected()) return 2;
++        int32_t result = 2;
++        const auto status = mBackend->stopWithPolicy(identity, &result);
++        return status.isOk() ? result : 2;
++    }
+     bool update(uint64_t generation,
+                 const std::map<int32_t, PolicyFrequencyRange>& recommendations) {
+-        if (recommendations.empty() || !ensureConnected()) return false;
++        if ((integrity::enabled() && !integrity::fasInstanceHealthy(
++                    integrity::kFasDaemonBoot, gFasDaemonInstance))
++                || !integrity::allowedForIdentity(mPolicyIdentity, integrity::kFas) ||
++            recommendations.empty() || !ensureConnected()) return false;
+ 
+         std::vector<aidl::vendor::performance::fas::CpuPolicyVote> votes;
+         votes.reserve(std::min(recommendations.size(), kMaximumPolicyCount));
+@@ -728,6 +821,8 @@ class QtiBackendClient {
+     }
+ 
+   private:
++    std::optional<aidl::vendor::performance::fas::FasPolicyContext> mContext;
++    std::string mPolicyIdentity;
+     static constexpr int32_t kVoteTtlMillis = 1500;
+     static constexpr size_t kMaximumPolicyCount = 8;
+ 
+@@ -742,6 +837,7 @@ class QtiBackendClient {
+             return false;
+         }
+         mBackend = IFasBackend::fromBinder(binder);
++        if (integrity::enabled()) mContext.reset();
+         if (mBackend == nullptr) {
+             logConnectFailure("invalid service binder");
+             return false;
+@@ -756,8 +852,16 @@ class QtiBackendClient {
+     bool updateCpuVotes(uint64_t generation, uint64_t sequence,
+                         const std::vector<aidl::vendor::performance::fas::CpuPolicyVote>& votes,
+                         bool retry) {
+-        const ndk::ScopedAStatus status =
+-                mBackend->updateCpuVotes(generation, sequence, kVoteTtlMillis, votes);
++        if (!integrity::allowedForIdentity(mPolicyIdentity, integrity::kFas)) return false;
++        if (integrity::enabled() && (!mContext || !integrity::fasInstanceHealthy(
++                integrity::kFasDaemonBoot, gFasDaemonInstance))) return false;
++        if (integrity::enabled() && !integrity::recordFasSubmission(
++                integrity::kFasDaemonBoot, gFasDaemonInstance)) return false;
++        if (mContext) mContext->policyIdentity = mPolicyIdentity;
++        const ndk::ScopedAStatus status = integrity::enabled()
++                ? mBackend->updateCpuVotesWithContext(*mContext, generation, sequence,
++                                                     kVoteTtlMillis, votes)
++                : mBackend->updateCpuVotes(generation, sequence, kVoteTtlMillis, votes);
+         if (status.isOk()) return true;
+ 
+         logTransactionFailure("updateCpuVotes", status);
+@@ -800,6 +904,8 @@ class Engine {
+ 
+     void setSession(Session session) {
+         std::scoped_lock lock(mMutex);
++        if (!integrity::allowedForIdentity(session.policyIdentity, integrity::kFas)) return;
++        mQtiBackend.setPolicyIdentity(session.policyIdentity);
+         if (mSession.taskId >= 0) mQtiBackend.release(mSession.generation);
+         mSession = std::move(session);
+         mCadenceFrameTimes.clear();
+@@ -840,6 +946,9 @@ class Engine {
+               mSession.packageName.c_str(), mSession.uid, mSession.taskId, advertisedFps,
+               mSession.fpsOverride, values.str().c_str(),
+               formatIntegerList(mSession.renderOwnerCandidates, ',').c_str());
++        // Session state and the wait predicate use the same mutex: a session
++        // established just before the timer parks cannot lose its wakeup.
++        mSessionChanged.notify_one();
+     }
+ 
+     void updateRenderOwnerCandidates(std::vector<int32_t> candidates) {
+@@ -944,6 +1053,20 @@ class Engine {
+         mLastBackendDelivery = false;
+         mProcessMonitor.setPid(-1);
+         resetPolicySelectionLocked();
++        // Interrupt the active interval so an idle engine parks immediately.
++        // This does not assert that the backend completed vote release.
++        mSessionChanged.notify_one();
++    }
++
++    std::string controlV4(const std::string& command) {
++        std::scoped_lock lock(mMutex);
++        return mQtiBackend.controlV4(command);
++    }
++
++    int stopWithPolicy(const std::string& identity) {
++        clearSession();
++        std::scoped_lock lock(mMutex);
++        return mQtiBackend.stopWithPolicy(identity);
+     }
+ 
+     void onFrameTimes(uint64_t generation, const std::vector<int64_t>& presentTimesNanos,
+@@ -979,8 +1102,22 @@ class Engine {
+         evaluateLocked(nowNs, true);
+     }
+ 
+-    void tick() {
+-        std::scoped_lock lock(mMutex);
++    void runControlLoop() {
++        std::unique_lock lock(mMutex);
++        for (;;) {
++            // No idle timeout. Condition-variable waits release mMutex so the
++            // socket thread can establish/clear sessions and frames can arrive.
++            mSessionChanged.wait(lock, [this] { return mSession.taskId >= 0; });
++            if (mSessionChanged.wait_for(lock, kPolicyInterval,
++                                        [this] { return mSession.taskId < 0; })) {
++                continue;
++            }
++            tickLocked();
++        }
++    }
++
++  private:
++    void tickLocked() {
+         if (mSession.taskId < 0 || mLastFrameCallbackNs <= 0) return;
+         const nsecs_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
+         mAdditionalFrameTimeNs = std::max<int64_t>(
+@@ -989,7 +1126,6 @@ class Engine {
+         evaluateLocked(nowNs, false);
+     }
+ 
+-  private:
+     static std::string formatIntegerList(const std::vector<int32_t>& values, char delimiter) {
+         std::ostringstream result;
+         for (size_t i = 0; i < values.size(); ++i) {
+@@ -1539,6 +1675,10 @@ class Engine {
+     }
+ 
+     void evaluateLocked(nsecs_t nowNs, bool hasNewFrames) {
++        if (!integrity::allowedForIdentity(mSession.policyIdentity, integrity::kFas)) {
++            mQtiBackend.release(mSession.generation);
++            return;
++        }
+         // Target detection is driven only by newly reported frames. Keep it outside the policy
+         // throttle so the 100 ms timer cannot starve cadence confirmation by updating
+         // mLastPolicyNs immediately before a frame callback arrives.
+@@ -1713,6 +1853,7 @@ class Engine {
+     }
+ 
+     std::mutex mMutex;
++    std::condition_variable mSessionChanged;
+     Session mSession;
+     std::deque<int64_t> mCadenceFrameTimes;
+     std::deque<int64_t> mControlFrameTimes;
+@@ -1770,7 +1911,12 @@ class SessionManager {
+     explicit SessionManager(Engine& engine) : mEngine(engine) {}
+ 
+     void track(Session session) {
+-        if (mCurrentSession && mCurrentSession->taskId == session.taskId &&
++        if (!integrity::allowedForIdentity(session.policyIdentity, integrity::kFas)) {
++            stop();
++            return;
++        }
++        if (mCurrentSession && mCurrentSession->policyIdentity == session.policyIdentity &&
++            mCurrentSession->taskId == session.taskId &&
+             mCurrentSession->uid == session.uid &&
+             mCurrentSession->packageName == session.packageName) {
+             mEngine.updateRenderOwnerCandidates(session.renderOwnerCandidates);
+@@ -1797,6 +1943,21 @@ class SessionManager {
+         mCurrentSession = std::move(session);
+     }
+ 
++    std::string controlV4(const std::string& command) {
++        if (!command.starts_with("STATUS_V4\t")) stop();
++        return mEngine.controlV4(command);
++    }
++
++    int stopWithPolicy(const std::string& identity) {
++        stop();
++        return mEngine.stopWithPolicy(identity);
++    }
++
++    void enforcePolicy() {
++        if (mCurrentSession &&
++            !integrity::allowedForIdentity(mCurrentSession->policyIdentity, integrity::kFas)) stop();
++    }
++
+     void stop() {
+         stopListener();
+         ++mGeneration;
+@@ -1872,29 +2033,60 @@ int runSocketServer(SessionManager& sessions) {
+     }
+ 
+     ALOGI("ready; frequency application is delegated to the external QTI backend");
++    const std::string instance = std::to_string(getpid()) + "-" +
++                                 std::to_string(integrity::elapsedMillis());
+     for (;;) {
++        sessions.enforcePolicy();
++        pollfd ready{serverFd, POLLIN, 0};
++        if (poll(&ready, 1, 200) <= 0) continue;
+         const int clientFd = accept4(serverFd, nullptr, nullptr, SOCK_CLOEXEC);
+         if (clientFd < 0) {
+             if (errno == EINTR) continue;
+-            ALOGE("accept failed: %s", strerror(errno));
+             return 1;
+         }
++        ucred peer{};
++        socklen_t peerSize = sizeof(peer);
++        timeval timeout{1, 0};
++        setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++        if (getsockopt(clientFd, SOL_SOCKET, SO_PEERCRED, &peer, &peerSize) != 0 || peer.uid != 1000) {
++            close(clientFd);
++            continue;
++        }
+         char buffer[4096];
+         const ssize_t size = TEMP_FAILURE_RETRY(recv(clientFd, buffer, sizeof(buffer), MSG_TRUNC));
+-        close(clientFd);
+-        if (size <= 0) continue;
+-        if (size > static_cast<ssize_t>(sizeof(buffer))) {
+-            ALOGW("ignored oversized control message");
++        if (size <= 0 || size > static_cast<ssize_t>(sizeof(buffer))) {
++            close(clientFd);
+             continue;
+         }
+-        const std::string_view command(buffer, static_cast<size_t>(size));
+-        if (command.starts_with("STOP")) {
+-            sessions.stop();
+-        } else if (const auto session = parseTrackCommand(command)) {
+-            sessions.track(*session);
++        std::string_view command(buffer, static_cast<size_t>(size));
++        if (command.starts_with("BIND_V4\t") || command.starts_with("STATUS_V4\t")
++                || command.starts_with("STOP_V4\t")) {
++            const std::string reply = sessions.controlV4(std::string(command));
++            send(clientFd, reply.data(), reply.size(), MSG_NOSIGNAL);
++        } else if (command.starts_with("STOP_POLICY\t")) {
++            const std::string identity(command.substr(12));
++            const auto current = integrity::currentPermit();
++            int state = 2;
++            if (current && current->identity == identity && !current->allows(integrity::kFas))
++                state = sessions.stopWithPolicy(identity);
++            const std::string reply = identity + "\t" + instance + "\t" + std::to_string(state);
++            send(clientFd, reply.data(), reply.size(), MSG_NOSIGNAL);
+         } else {
+-            ALOGW("ignored malformed control message");
++            std::string identity;
++            if (command.starts_with("POLICY\t")) {
++                const size_t newline = command.find('\n');
++                if (newline == std::string_view::npos) { close(clientFd); continue; }
++                identity = command.substr(7, newline - 7);
++                command.remove_prefix(newline + 1);
++            }
++            if (command == "STOP") {
++                sessions.stop();
++            } else if (auto session = parseTrackCommand(command)) {
++                session->policyIdentity = identity;
++                sessions.track(std::move(*session));
++            }
+         }
++        close(clientFd);
+     }
+ }
+ 
+@@ -1902,15 +2094,16 @@ int runSocketServer(SessionManager& sessions) {
+ }  // namespace android::fas
+ 
+ int main() {
++    if (android::platform_integrity::enabled()
++            && !android::platform_integrity::registerFasInstance(
++                    android::platform_integrity::kFasDaemonBoot,
++                    android::fas::gFasDaemonInstance)) {
++        ALOGE("FAS boot continuity unavailable; requests remain disabled");
++    }
+     android::ProcessState::self()->startThreadPool();
+     android::fas::Engine engine;
+     android::fas::SessionManager sessions(engine);
+-    std::thread timer([&engine] {
+-        for (;;) {
+-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+-            engine.tick();
+-        }
+-    });
++    std::thread timer([&engine] { engine.runControlLoop(); });
+     timer.detach();
+     return android::fas::runSocketServer(sessions);
+ }
+diff --git a/fasd/fasd.rc b/fasd/fasd.rc
+index 1623c88..183e11d 100644
+--- a/fasd/fasd.rc
++++ b/fasd/fasd.rc
+@@ -1,3 +1,6 @@
++on init
++    setprop sys.integrity.fasd_boot 2:unregistered:0:0
++
+ service fasd /system/bin/fasd
+     class core
+     user system
+diff --git a/libplatform_integrity_host/Android.bp b/libplatform_integrity_host/Android.bp
+new file mode 100644
+index 0000000..0850cbd
+--- /dev/null
++++ b/libplatform_integrity_host/Android.bp
+@@ -0,0 +1,16 @@
++package {
++    default_applicable_licenses: ["Android-Apache-2.0"],
++}
++
++cc_library_headers {
++    name: "libplatform_integrity_headers",
++    host_supported: true,
++    export_include_dirs: ["include"],
++    header_libs: ["libaster_core_headers", "libplatform_integrity_uapi"],
++    export_header_lib_headers: ["libaster_core_headers", "libplatform_integrity_uapi"],
++    vendor_available: true,
++    apex_available: [
++        "//apex_available:platform",
++        "//apex_available:anyapex",
++    ],
++}
+diff --git a/libplatform_integrity_host/include/platform/fas_boot_record.h b/libplatform_integrity_host/include/platform/fas_boot_record.h
+new file mode 100644
+index 0000000..c6dca3d
+--- /dev/null
++++ b/libplatform_integrity_host/include/platform/fas_boot_record.h
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include <platform/integrity_policy.h>
++#include <sys/random.h>
++#include <cerrno>
++
++namespace android::platform_integrity {
++
++constexpr char kFasDaemonBoot[] = "sys.integrity.fasd_boot";
++constexpr char kFasBackendBoot[] = "vendor.fas.integrity.boot";
++constexpr char kFasBootSeed[] = "2:unregistered:0:0";
++
++inline bool instanceId(std::string_view value) {
++    if (value.size() != 32) return false;
++    for (char c : value) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
++    return true;
++}
++
++inline std::string randomInstance() {
++    unsigned char bytes[16];
++    size_t count = 0;
++    while (count < sizeof(bytes)) {
++        const ssize_t n = getrandom(bytes + count, sizeof(bytes) - count, 0);
++        if (n < 0 && errno == EINTR) continue;
++        if (n <= 0) return {};
++        count += static_cast<size_t>(n);
++    }
++    constexpr char hex[] = "0123456789abcdef";
++    std::string result;
++    for (unsigned char byte : bytes) {
++        result += hex[byte >> 4];
++        result += hex[byte & 15];
++    }
++    return result;
++}
++
++struct FasBootRecord {
++    std::string instance;
++    bool submitted = false;
++    bool interrupted = true;
++    bool valid = false;
++
++    static FasBootRecord parse(const std::string& value) {
++        if (value.size() != 38 || value.substr(0, 2) != "2:"
++                || value[34] != ':' || value[36] != ':'
++                || (value[35] != '0' && value[35] != '1')
++                || (value[37] != '0' && value[37] != '1')
++                || !instanceId(std::string_view(value).substr(2, 32))) return {};
++        return {value.substr(2, 32), value[35] == '1', value[37] == '1', true};
++    }
++    std::string encode() const {
++        return "2:" + instance + ":" + (submitted ? "1" : "0")
++                + ":" + (interrupted ? "1" : "0");
++    }
++};
++
++// The caller owns one init-managed service and serializes its writes. A new
++// process must never replace the first instance or turn an existing record clean.
++inline bool registerFasInstance(const char* property, const std::string& instance) {
++    if (!instanceId(instance)) return false;
++    const std::string previous = android::base::GetProperty(property, "");
++    FasBootRecord next;
++    if (previous == kFasBootSeed) {
++        next = {instance, false, false, true};
++    } else {
++        next = FasBootRecord::parse(previous);
++        if (!next.valid) return false;
++        next.interrupted = true;
++    }
++    const std::string value = next.encode();
++    if (!android::base::SetProperty(property, value)
++            || android::base::GetProperty(property, "") != value) return false;
++    return next.instance == instance && !next.interrupted;
++}
++
++inline bool fasInstanceHealthy(const char* property, std::string_view instance) {
++    const auto record = FasBootRecord::parse(android::base::GetProperty(property, ""));
++    return record.valid && !record.interrupted && record.instance == instance;
++}
++
++inline bool recordFasSubmission(const char* property, const std::string& instance) {
++    auto record = FasBootRecord::parse(android::base::GetProperty(property, ""));
++    if (!record.valid || record.interrupted || record.instance != instance) return false;
++    record.submitted = true;
++    const std::string value = record.encode();
++    return android::base::SetProperty(property, value)
++            && android::base::GetProperty(property, "") == value;
++}
++
++}  // namespace android::platform_integrity
+diff --git a/libplatform_integrity_host/include/platform/integrity_policy.h b/libplatform_integrity_host/include/platform/integrity_policy.h
+new file mode 100644
+index 0000000..c5d3f3c
+--- /dev/null
++++ b/libplatform_integrity_host/include/platform/integrity_policy.h
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include <android-base/properties.h>
++#include <array>
++#include <charconv>
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <time.h>
++
++namespace android::platform_integrity {
++
++constexpr unsigned kTee = 1;
++constexpr unsigned kFas = 2;
++constexpr unsigned kVisibility = 4;
++constexpr char kPolicyProperty[] = "sys.integrity.policy";
++constexpr uint64_t kMaxLeaseMillis = 5000;
++
++inline uint64_t elapsedMillis() {
++    timespec ts{};
++    if (clock_gettime(CLOCK_BOOTTIME, &ts) != 0) return UINT64_MAX;
++    return uint64_t(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
++}
++
++inline bool enabled() {
++    return android::base::GetBoolProperty("ro.platform.integrity.enabled", false);
++}
++
++// boot UUID (without hyphens), authority instance, epoch, deadline, feature mask.
++// All numbers are hexadecimal. The complete record fits one atomic property value.
++struct Permit {
++    std::string identity;
++    uint64_t deadline = 0;
++    unsigned features = 0;
++    bool allows(unsigned feature) const {
++        const uint64_t now = elapsedMillis();
++        return (features & feature) == feature && now < deadline &&
++               deadline - now <= kMaxLeaseMillis;
++    }
++};
++
++inline std::optional<Permit> parsePermit(std::string_view value) {
++    std::array<std::string_view, 5> fields;
++    size_t offset = 0;
++    for (size_t i = 0; i < fields.size(); ++i) {
++        size_t end = value.find(':', offset);
++        if ((i == fields.size() - 1) != (end == std::string_view::npos)) return {};
++        if (end == std::string_view::npos) end = value.size();
++        fields[i] = value.substr(offset, end - offset);
++        offset = end + 1;
++    }
++    if (fields[0].size() != 32 || fields[1].size() != 16 || fields[2].empty() ||
++        fields[2].size() > 8 || fields[3].empty() || fields[3].size() > 12 ||
++        fields[4].size() != 1) return {};
++    for (const auto field : fields) {
++        for (char c : field) {
++            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return {};
++        }
++    }
++    uint64_t deadline = 0;
++    const auto result = std::from_chars(fields[3].data(),
++                                      fields[3].data() + fields[3].size(), deadline, 16);
++    if (result.ec != std::errc{} || fields[4][0] > '7') return {};
++    const size_t identityEnd = fields[3].data() - value.data() - 1;
++    return Permit{std::string(value.substr(0, identityEnd)), deadline,
++                  unsigned(fields[4][0] - '0')};
++}
++
++inline std::optional<Permit> currentPermit() {
++    return parsePermit(android::base::GetProperty(kPolicyProperty, ""));
++}
++
++inline bool allowed(unsigned feature) {
++    if (!enabled()) return true;
++    const auto permit = currentPermit();
++    return permit && permit->allows(feature);
++}
++
++inline bool allowedForIdentity(std::string_view identity, unsigned feature) {
++    if (!enabled()) return true;
++    const auto current = currentPermit();
++    return current && current->identity == identity && current->allows(feature);
++}
++
++inline bool stillAllowed(const Permit& captured, unsigned feature) {
++    const auto current = currentPermit();
++    return current && current->identity == captured.identity && current->allows(feature);
++}
++
++}  // namespace android::platform_integrity
+diff --git a/libplatform_integrity_host/tests/lease_model/README.md b/libplatform_integrity_host/tests/lease_model/README.md
+new file mode 100644
+index 0000000..4d9c93d
+--- /dev/null
++++ b/libplatform_integrity_host/tests/lease_model/README.md
+@@ -0,0 +1,122 @@
++# Host permit-renewal coalescing model
++
++Run from the AOSP root:
++
++```sh
++python3 -B system/core/libplatform_integrity_host/tests/lease_model/test_model.py
++```
++
++This is an isolated sequential specification, not part of Android.bp. It performs
++no native compilation, device I/O, signing, property mutation or real shutdown.
++Running this model does not change production state. A candidate implementation
++now exists in the Framework host (`PermitRenewal` / `PlatformIntegrityService`),
++with 13 separate Java helper tests prepared for maintainer compilation. Existing
++query intervals remain unchanged; the Python tests do not execute that Java code.
++
++## Scope and source anchors
++
++The candidate change concerns only redundant `sys.integrity.policy` writes in
++`frameworks/base/services/core/java/com/android/server/platformintegrity/PlatformIntegrityService.java`.
++`publishLocked()` currently writes a four-second lease on each successful cycle;
++the cycle's existing 500ms scheduling, environment/control queries, proc publication
++and final receipt/ticket validation are separate work and must stay in place.
++
++The existing source contracts also include:
++
++- `EnvironmentSnapshot` and `AsterNotification.Gate`: report/receipt freshness
++  under two seconds, exact identities and generations, final ticket recheck.
++- `android.os.PlatformIntegrity` and the host `integrity_policy.h`: consumer
++  expiry is checked against BOOTTIME; a local host denial cannot erase a permit
++  already delivered through the property.
++- `ShutdownPermitWriter` / `ShutdownGate`: forced bounded revocation, actual
++  readback and one-way shutdown denial. These must bypass normal coalescing.
++
++The proposed margin is **two seconds remaining on the existing four-second lease**.
++It is a model fixture, not an accepted new runtime constant. Nothing raises the
++four-second issue lifetime or existing five-second parser guard.
++
++## Decision contract
++
++Every modeled cycle still requires externally validated current environment,
++control-chain and coordinated publication proof. It cannot refresh a report's
++completed time, reuse a superseded receipt, bypass a missing inventory read or
++make a V4 early-name row verified. Feature/mode selection is supplied by the
++existing host policy; this model never decides that Glow or any other environment
++qualifies for a feature.
++
++Only a positive, unchanged, still-valid permit may skip a write, and only when:
++
++1. The actual property equals this coordinator's last **successfully written**
++   value, including deadline, mask and identity; cached desired features alone
++   are insufficient.
++2. The current proof, notification/revision/identity generation and control expiry
++   are valid at the decision and at the final check.
++3. Remaining lifetime is strictly greater than the renewal margin. The exact
++   margin boundary performs a write.
++
++A skip changes neither actual deadline nor last-write success state. An unknown
++startup value is never adopted as a successful cached write. Property replacement
++retires the proof and forces zero; later positive recovery needs fresh validation.
++Mask/identity changes, explicit force, invalidation, expiration and shutdown never
++coalesce. Zero writes are deliberately not optimized in this first model.
++
++Both the write and skip branches need late-result checks. A notice, property
++replacement, shutdown or expiry during either branch cannot commit host authority.
++Forced zero must use the existing publication serialization. Failure cannot become
++cached success, advance an alleged successful deadline or revive an old result.
++
++The model conservatively freezes positive issuance after writer/readback failure,
++as the current host's writer-error path does. Failed cleanup may leave an already
++issued property valid until its original expiry. Tests distinguish local host
++denial from what an execution-side consumer can still read; they do not pretend
++that a failed zero write revoked external authority.
++
++## Explicit tradeoffs
++
++- **Less availability headroom:** after several skipped writes, a coordinator
++  stall or suspend can leave less time on the last issued permit. Functions may
++  become temporarily unavailable sooner than with rewriting every 500ms. Expired
++  authority requires a fresh generation/validation; no fallback extends it.
++- **Less frequent implicit writer probing:** an unchanged-value skip does not
++  exercise the property-service setter. A write-channel fault can remain unseen
++  until the next due renewal or forced revocation, instead of the next old-style
++  periodic write. Environment/control queries are unchanged, and no permit lives
++  longer because of this; nevertheless it is an operational diagnostic difference.
++- **More state/race handling:** successful-value tracking, unexpected replacement,
++  both-branch rechecks and shutdown serialization must be implemented correctly.
++- **Limited benefit:** under a nominal stable 500ms cycle, a ten-second fixture
++  gives 20 real writes without coalescing versus five with it. Both perform 20
++  validation cycles. This is ~75% fewer writes for one property, not fewer timers,
++  RPCs, proc publications or a measured CPU/battery improvement.
++
++No new suspend-prevention mechanism, wake lock or alarm is proposed. BOOTTIME
++advances during synthetic suspend, and proof/lease expiry is checked before work
++can restore authority. No power, actual scheduler latency or resume safety proof
++follows from the synthetic tests.
++
++## Model boundaries and next implementation requirements
++
++`Proof.validated` is a fixture for the existing complete successful query and
++receipt validation. This model does not implement the socket protocol, baseline
++verification, mode state machine, property format, Android permissions, raw
++collector parser, framework locks or memory ordering. `generation` combines
++identity/revision/notice fencing abstractly; existing epoch changes, endpoint
++rebinding and cache invalidation remain required in production. It is not a new
++wire field. Python integers do not prove fixed-width counter exhaustion behavior.
++
++`before` and `after` hooks represent serialized adversarial boundaries, not real
++concurrent threads or successful proof of atomic system-wide execution. Last-write
++and actual-property comparisons must be placed under the appropriate existing
++locks, and the actual property can still change after the final comparison. Do
++not promise zero-window rollback of delivered results or in-flight effects.
++
++Before integration, preserve forced zero publication for shutdown, historical
++alerts, pending/failed evidence, notification interruption and mode transitions.
++Do not move successful-write bookkeeping ahead of setter success or skip the
++post-decision generation check. The model's fresh-generation recovery on expiry
++is conservative; runtime integration must retain the host's real identity/rebind
++semantics rather than copying the synthetic generation directly.
++
++TEE heartbeat/ACK scheduling, the two-second report limit, three-second proc
++expiry, full evidence/control queries and FAS execution optimization are outside
++this change. No historical anomaly is cleared.
+diff --git a/libplatform_integrity_host/tests/lease_model/model.py b/libplatform_integrity_host/tests/lease_model/model.py
+new file mode 100644
+index 0000000..e3224da
+--- /dev/null
++++ b/libplatform_integrity_host/tests/lease_model/model.py
+@@ -0,0 +1,154 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Sequential permit-write coalescing specification; no property or device I/O."""
++from dataclasses import dataclass
++
++LEASE_MS = 4000
++MARGIN_MS = 2000
++REPORT_MS = 2000
++MAX_TIME = (1 << 48) - 1  # Existing property deadline has at most 12 hex digits.
++
++
++@dataclass(frozen=True)
++class Proof:
++    generation: int
++    mask: int
++    completed: int
++    receipt_until: int
++    control_until: int
++    validated: bool = True
++
++
++@dataclass(frozen=True)
++class Value:
++    # Synthetic identity includes boot/coordinator/revision/notice fencing.
++    # This is not a model of the five-field property encoding.
++    generation: int
++    deadline: int
++    mask: int
++
++
++class Model:
++    def __init__(self, coalesce=True):
++        self.coalesce = coalesce
++        self.now = self.highwater = 0
++        self.clock_bad = False
++        self.generation = 1
++        self.closing = self.writer_failed = False
++        self.actual = None
++        self.last_written = None
++        self.accepted = None
++        self.calls = self.successes = self.skips = self.cycles = 0
++
++    def advance(self, now):
++        if now < self.highwater or now < 0 or now > MAX_TIME - LEASE_MS:
++            self.clock_bad = True
++            self.invalidate()
++        self.now = now
++        self.highwater = max(self.highwater, now)
++
++    def invalidate(self):
++        self.generation += 1
++        self.accepted = None
++
++    def shutdown(self):
++        self.closing = True
++        self.invalidate()
++
++    def proof(self, mask=2, *, completed=None, receipt_until=None, control_until=None):
++        # Represents successful CURRENT environment/control/proc coordination.
++        # Calling this fixture is not a real query, ACK or proof of their health.
++        completed = self.now if completed is None else completed
++        return Proof(self.generation, mask, completed,
++                     completed + REPORT_MS if receipt_until is None else receipt_until,
++                     self.now + REPORT_MS if control_until is None else control_until)
++
++    def valid(self, proof):
++        return (proof is not None and proof.validated and not self.clock_bad
++                and not self.closing and not self.writer_failed
++                and proof.generation == self.generation and proof.mask in range(8)
++                and 0 <= proof.completed <= self.now < proof.completed + REPORT_MS
++                and self.now < proof.receipt_until and self.now < proof.control_until)
++
++    def _write(self, value, *, success=True, readback=True):
++        self.calls += 1
++        if success:
++            self.actual = value
++            self.successes += 1
++        if not success or not readback or self.actual != value:
++            # A failed setter/readback cannot be cached as success. Model the
++            # current host's irreversible writer-failure denial conservatively.
++            self.writer_failed = True
++            self.last_written = None
++            self.invalidate()
++            return False
++        self.last_written = value
++        return True
++
++    def _deny(self, success=True):
++        self.accepted = None
++        deadline = self.now + LEASE_MS if not self.clock_bad else 0
++        # Zero/clear is forced, including if the last value was already zero.
++        self._write(Value(self.generation, deadline, 0), success=success)
++        return "denied"
++
++    def cycle(self, now, proof, *, force=False, before=None, after=None,
++              write_ok=True, readback_ok=True, revoke_ok=True):
++        self.advance(now)
++        self.cycles += 1
++        self.accepted = None
++        if before:
++            before(self)
++        # Unexpected property replacement is not silently blessed. First force
++        # zero and retire this proof; later recovery needs a fresh generation.
++        if self.last_written is not None and self.actual != self.last_written:
++            self.invalidate()
++            return self._deny(revoke_ok)
++        if not self.valid(proof):
++            return self._deny(revoke_ok)
++        if self.last_written is not None and self.now >= self.last_written.deadline:
++            # Expired authority cannot be resumed using an old accepted proof.
++            self.invalidate()
++            return self._deny(revoke_ok)
++        skip = (self.coalesce and not force and proof.mask != 0
++                and isinstance(self.actual, Value) and self.actual == self.last_written
++                and self.actual.generation == self.generation
++                and self.actual.mask == proof.mask
++                and self.actual.deadline - self.now > MARGIN_MS)
++        if skip:
++            if after:
++                after(self)
++            # The skipped-write branch needs the same late-ticket and state
++            # checks as the real-write branch. No time/deadline is extended.
++            if (not self.valid(proof) or self.actual != self.last_written
++                    or self.actual.deadline - self.now <= MARGIN_MS):
++                if self.actual != self.last_written:
++                    self.invalidate()
++                return self._deny(revoke_ok)
++            self.skips += 1
++            self.accepted = proof
++            return "skipped"
++        value = Value(self.generation, self.now + LEASE_MS, proof.mask)
++        if not self._write(value, success=write_ok, readback=readback_ok):
++            self.accepted = None
++            return "write_failed"
++        if after:
++            after(self)
++        if (not self.valid(proof) or self.actual != value
++                or not self.now < value.deadline):
++            if self.actual != value:
++                self.invalidate()
++            return self._deny(revoke_ok)
++        self.accepted = proof
++        return "written"
++
++    def host_mask(self):
++        return self.accepted.mask if self.valid(self.accepted) else 0
++
++    def consumer_mask(self):
++        # Deliberately independent: if a zero write fails, previously delivered
++        # authority cannot be erased by setting a process-local denied flag.
++        value = self.actual
++        if (isinstance(value, Value) and value.mask in range(8)
++                and self.now < value.deadline and value.deadline - self.now <= 5000):
++            return value.mask
++        return 0
+diff --git a/libplatform_integrity_host/tests/lease_model/test_model.py b/libplatform_integrity_host/tests/lease_model/test_model.py
+new file mode 100644
+index 0000000..1a8bf53
+--- /dev/null
++++ b/libplatform_integrity_host/tests/lease_model/test_model.py
+@@ -0,0 +1,246 @@
++# SPDX-License-Identifier: Apache-2.0
++import unittest
++from dataclasses import replace
++
++from model import LEASE_MS, MARGIN_MS, MAX_TIME, Model, Value
++
++
++class PermitRenewal(unittest.TestCase):
++    def ready(self, coalesce=True, mask=2):
++        model = Model(coalesce)
++        self.assertEqual("written", model.cycle(0, model.proof(mask)))
++        return model
++
++    def run_cycle(self, model, now, mask=2, **kwargs):
++        model.advance(now)
++        return model.cycle(now, model.proof(mask), **kwargs)
++
++    def test_initial_positive_requires_real_write(self):
++        model = self.ready()
++        self.assertEqual(1, model.calls)
++        self.assertEqual(2, model.consumer_mask())
++
++    def test_skip_keeps_actual_deadline_and_last_success_unchanged(self):
++        model = self.ready()
++        old = model.last_written
++        self.assertEqual("skipped", self.run_cycle(model, 500))
++        self.assertIs(old, model.actual)
++        self.assertIs(old, model.last_written)
++        self.assertEqual(1, model.calls)
++
++    def test_margin_boundary_renews(self):
++        for now, expected in ((1999, "skipped"), (2000, "written"), (2001, "written")):
++            with self.subTest(now=now):
++                model = self.ready()
++                self.assertEqual(expected, self.run_cycle(model, now))
++
++    def test_stable_schedule_reduces_only_writes_not_validation_cycles(self):
++        optimized, baseline = self.ready(), self.ready(False)
++        for now in range(500, 10000, 500):
++            for model in (optimized, baseline):
++                self.run_cycle(model, now)
++                self.assertEqual(2, model.host_mask())
++                self.assertEqual(2, model.consumer_mask())
++        self.assertEqual(20, optimized.cycles)
++        self.assertEqual(baseline.cycles, optimized.cycles)
++        self.assertEqual(20, baseline.calls)
++        self.assertEqual(5, optimized.calls)
++
++    def test_invalid_control_or_receipt_forces_zero_before_margin(self):
++        for field in ("validated", "receipt_until", "control_until"):
++            with self.subTest(field=field):
++                model = self.ready()
++                model.advance(500)
++                value = False if field == "validated" else 500
++                proof = replace(model.proof(), **{field: value})
++                self.assertEqual("denied", model.cycle(500, proof))
++                self.assertEqual(0, model.consumer_mask())
++                self.assertEqual(2, model.calls)
++
++    def test_report_freshness_is_not_extended_by_skip(self):
++        model = self.ready()
++        proof = model.proof()
++        self.assertEqual("skipped", model.cycle(500, proof))
++        self.assertEqual("denied", model.cycle(2000, proof))
++        self.assertEqual(0, model.consumer_mask())
++
++    def test_future_report_rejected(self):
++        model = self.ready()
++        self.assertEqual("denied", model.cycle(500, model.proof(completed=501)))
++
++    def test_property_replacement_does_not_skip_or_bless_foreign_value(self):
++        for value in (None, "malformed", Value(999, 4500, 7), Value(1, 4500, 2)):
++            with self.subTest(value=value):
++                model = self.ready()
++                model.actual = value
++                self.assertEqual("denied", self.run_cycle(model, 500))
++                self.assertEqual(0, model.consumer_mask())
++                self.assertEqual(0, model.skips)
++
++    def test_property_replacement_recovery_requires_new_proof(self):
++        model = self.ready()
++        old = model.proof()
++        model.actual = "foreign"
++        model.cycle(500, old)
++        self.assertEqual("denied", model.cycle(501, old))
++        self.assertEqual("written", self.run_cycle(model, 502))
++
++    def test_identical_mask_but_changed_identity_forces_write(self):
++        model = self.ready()
++        model.invalidate()
++        self.assertEqual("written", self.run_cycle(model, 500))
++        self.assertEqual(model.generation, model.actual.generation)
++
++    def test_mask_changes_are_never_delayed(self):
++        for mask in (0, 7):
++            with self.subTest(mask=mask):
++                model = self.ready()
++                self.assertEqual("written", self.run_cycle(model, 500, mask))
++                self.assertEqual(mask, model.consumer_mask())
++
++    def test_zero_and_explicit_force_never_coalesce(self):
++        model = self.ready(mask=0)
++        self.assertEqual("written", self.run_cycle(model, 500, 0))
++        model = self.ready()
++        self.assertEqual("written", self.run_cycle(model, 500, force=True))
++
++    def test_failed_write_is_not_remembered_as_success(self):
++        model = self.ready()
++        old = model.actual
++        self.assertEqual("write_failed", self.run_cycle(model, 2000, write_ok=False))
++        self.assertIsNone(model.last_written)
++        self.assertIs(old, model.actual)
++        self.assertEqual(0, model.host_mask())
++        self.assertEqual(2, model.consumer_mask())
++        self.assertEqual("denied", self.run_cycle(model, 2001))
++        self.assertEqual(0, model.consumer_mask())
++
++    def test_readback_failure_is_not_success_even_if_value_was_written(self):
++        model = self.ready()
++        self.assertEqual("write_failed", self.run_cycle(model, 2000, readback_ok=False))
++        self.assertIsNone(model.last_written)
++        self.assertEqual(0, model.host_mask())
++
++    def test_notification_before_decision_revokes(self):
++        model = self.ready()
++        self.assertEqual("denied", self.run_cycle(model, 500, before=lambda m: m.invalidate()))
++        self.assertEqual(0, model.consumer_mask())
++
++    def test_notification_after_skip_decision_still_revokes(self):
++        model = self.ready()
++        self.assertEqual("denied", self.run_cycle(model, 500, after=lambda m: m.invalidate()))
++        self.assertEqual(0, model.consumer_mask())
++        self.assertEqual(0, model.skips)
++
++    def test_notification_after_write_requires_actual_zero_write(self):
++        model = self.ready()
++        self.assertEqual("denied", self.run_cycle(model, 2000, after=lambda m: m.invalidate()))
++        self.assertEqual(3, model.calls)  # initial, positive renewal, zero cleanup
++        self.assertEqual(0, model.consumer_mask())
++
++    def test_replacement_during_skip_is_not_accepted(self):
++        model = self.ready()
++        old_generation = model.generation
++        def replace_value(m):
++            m.actual = Value(900, 4500, 7)
++        self.assertEqual("denied", self.run_cycle(model, 500, after=replace_value))
++        self.assertEqual(0, model.consumer_mask())
++        self.assertGreater(model.generation, old_generation)
++
++    def test_skipped_write_is_not_property_writer_health_probe(self):
++        optimized, baseline = self.ready(), self.ready(False)
++        # The write channel has failed; read-only checks and other components
++        # remain healthy. A skipped setter cannot discover this channel failure.
++        self.assertEqual("skipped", self.run_cycle(optimized, 500, write_ok=False))
++        self.assertFalse(optimized.writer_failed)
++        self.assertEqual("write_failed", self.run_cycle(baseline, 500, write_ok=False))
++        self.assertEqual("write_failed", self.run_cycle(optimized, 2000, write_ok=False))
++        self.assertTrue(optimized.writer_failed)
++
++    def test_skipped_write_never_exceeds_four_seconds_from_last_actual_write(self):
++        model = self.ready()
++        for now in (500, 1000, 1500):
++            self.assertEqual("skipped", self.run_cycle(model, now))
++            self.assertEqual(LEASE_MS, model.actual.deadline)
++        model.advance(LEASE_MS)
++        self.assertEqual(0, model.consumer_mask())
++
++    def test_new_coordinator_cannot_adopt_existing_positive_as_cached_success(self):
++        old = self.ready()
++        restarted = Model()
++        restarted.actual = old.actual
++        self.assertEqual("written", self.run_cycle(restarted, 500))
++        self.assertEqual(1, restarted.calls)
++        self.assertEqual(0, restarted.skips)
++
++    def test_shutdown_before_after_skip_and_after_write_never_restores(self):
++        for time, hook in ((500, "before"), (500, "after"), (2000, "after")):
++            with self.subTest(time=time, hook=hook):
++                model = self.ready()
++                self.assertEqual("denied", self.run_cycle(model, time,
++                    **{hook: lambda m: m.shutdown()}))
++                self.assertEqual(0, model.consumer_mask())
++                self.assertEqual("denied", self.run_cycle(model, time + 1))
++
++    def test_failed_zero_cannot_erase_prior_consumer_authority(self):
++        model = self.ready()
++        self.run_cycle(model, 500, after=lambda m: m.shutdown(), revoke_ok=False)
++        self.assertEqual(0, model.host_mask())
++        self.assertEqual(2, model.consumer_mask())
++        model.advance(4000)
++        self.assertEqual(0, model.consumer_mask())
++
++    def test_short_suspend_uses_boottime_margin_and_fresh_proof(self):
++        model = self.ready()
++        # No timer executes during the synthetic suspend. Uptime is not advanced
++        # in this model; BOOTTIME alone decides expiry at the next call.
++        self.assertEqual("written", self.run_cycle(model, 2500))
++        self.assertEqual(6500, model.actual.deadline)
++
++    def test_expired_lease_after_suspend_requires_new_generation(self):
++        model = self.ready()
++        self.assertEqual("denied", self.run_cycle(model, 4500))
++        self.assertEqual(0, model.consumer_mask())
++        self.assertEqual("written", self.run_cycle(model, 4501))
++
++    def test_stale_pre_suspend_proof_cannot_renew(self):
++        model = self.ready()
++        proof = model.proof()
++        self.assertEqual("denied", model.cycle(2500, proof))
++
++    def test_less_availability_headroom_during_stall_is_explicit(self):
++        optimized, baseline = self.ready(), self.ready(False)
++        for now in (500, 1000, 1500):
++            self.run_cycle(optimized, now)
++            self.run_cycle(baseline, now)
++        # Both keep the same four-second maximum issued lease. The optimized
++        # value nevertheless expires earlier when the coordinator stops running.
++        for model in (optimized, baseline):
++            model.advance(4500)
++            self.assertEqual(0, model.host_mask())  # stale environment either way
++        self.assertEqual(0, optimized.consumer_mask())
++        self.assertEqual(2, baseline.consumer_mask())
++
++    def test_boundary_delay_during_skip_cannot_claim_skip_success(self):
++        model = self.ready()
++        self.assertEqual("denied", self.run_cycle(model, 1999,
++            after=lambda m: m.advance(2000)))
++
++    def test_long_delay_after_write_rejects_stale_commit(self):
++        model = self.ready()
++        self.assertEqual("denied", self.run_cycle(model, 2000,
++            after=lambda m: m.advance(4000)))
++
++    def test_clock_regression_and_overflow_fail_closed(self):
++        for now in (-1, MAX_TIME - LEASE_MS + 1):
++            with self.subTest(now=now):
++                model = self.ready()
++                self.assertEqual("denied", self.run_cycle(model, now))
++                self.assertEqual(0, model.host_mask())
++        model = self.ready()
++        self.run_cycle(model, 1000)
++        self.assertEqual("denied", self.run_cycle(model, 999))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/libplatform_integrity_host/tests/mode_model/README.md b/libplatform_integrity_host/tests/mode_model/README.md
+new file mode 100644
+index 0000000..a5b6b2d
+--- /dev/null
++++ b/libplatform_integrity_host/tests/mode_model/README.md
+@@ -0,0 +1,46 @@
++# Host mode contract model
++
++This isolated Python model belongs to AOSP Integration, not ASTER's detector.
++It is not installed, linked into Android, or a replacement for production tests.
++It exercises the proposed mode matrix before changes to report/classification,
++Framework persistence, notification rebinding and publication coordination.
++
++Run from the source root:
++
++```sh
++python3 -B system/core/libplatform_integrity_host/tests/mode_model/test_model.py
++python3 -B system/core/libplatform_integrity_host/tests/mode_model/test_shutdown.py
++```
++
++Inputs represent **already authenticated, parsed evidence**. Identity labels,
++baseline verification and capability flags in this model do not implement
++cryptographic verification, protocol parsing or resident-code measurement.
++`union` denotes the exact official-plus-approved-community reference set; it
++does not denote a same-name digest waiver. `endpoints_stopped` represents the
++stop confirmation needed at the tested authorization/recovery boundary.
++
++The model separates current findings, host retention, proc availability and
++positive permits. Normal-mode failure has no extra host latch; raw evidence
++may still prevent recovery. Compromise retention survives clean observations
++and reboot and clears only after a verified, persisted exit. An incomplete
++V4 observation receives a diagnostic ACK at most, never a clean publication
++or positive permit. Scalar faults are never fabricated as module names.
++
++Each new authority/endpoint instance requires explicit fresh binding; old
++notification proofs and late receipts cannot silently restore authorization.
++The model uses immutable plans as abstract exact request/receipt bindings,
++not as proof that the production transport already meets this contract.
++
++Limits: no concurrent runtime, actual fsync/crash recovery, SELinux, syscalls,
++kernel lifetime, proc byte-format/order proof, legacy-record migration,
++suspend timing or power tests. The ten-name projection only tests capacity,
++not the final evidence-order algorithm. Storage failures model failed commits;
++in-memory retention remains restrictive until a durable retry/recovery.
++The 104 early records are represented as incomplete coverage, not 104 module
++versions accepted by this model. Existing production behavior is unchanged.
++
++The shutdown interleaving model covers revocation, final observation/receipt,
++durable denial, expected close, timeout and process/boot boundaries. Its storage
++and receipt inputs are abstract barriers, not execution of AtomicFile, the
++property service, actual shutdown or hardware release. Production integration
++and device acceptance must be checked separately.
+diff --git a/libplatform_integrity_host/tests/mode_model/model.py b/libplatform_integrity_host/tests/mode_model/model.py
+new file mode 100644
+index 0000000..3361ff9
+--- /dev/null
++++ b/libplatform_integrity_host/tests/mode_model/model.py
+@@ -0,0 +1,277 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Host policy contract model, not a report parser or production authority."""
++from dataclasses import dataclass
++from enum import Enum
++
++
++class Mode(Enum):
++    NORMAL = "NORMAL"
++    ENTER = "ENTER_PENDING"
++    COMPROMISE = "COMPROMISE"
++    EXIT = "EXIT_PENDING"
++
++
++@dataclass(frozen=True, order=True)
++class Finding:
++    kind: str
++    module: str = ""
++
++
++@dataclass(frozen=True)
++class Evidence:
++    # Identities are opaque labels here. Production must authenticate and parse
++    # them before using this contract; a caller-supplied boolean is not proof.
++    boot: str = "boot-a"
++    collector: str = "collector-a"
++    classifier: str = "classifier-a"
++    baseline: str = "baseline-a"
++    notice: str = "notice-a"
++    endpoints: str = "endpoints-a"
++    serial: int = 1
++    sequence: int = 1
++    completed_ms: int = 100
++    official: tuple | None = ()
++    union: tuple | None = ()
++    coverage_complete: bool = True
++    collection_consistent: bool = True
++    baseline_verified: bool = True
++    endpoints_confirmed: bool = True
++    endpoints_stopped: bool = True
++
++    @property
++    def identities(self):
++        return (self.boot, self.collector, self.classifier, self.baseline,
++                self.notice, self.endpoints)
++
++
++@dataclass(frozen=True)
++class Retained:
++    finding: Finding
++    identities: tuple
++    sequence: int
++    serial: int
++
++
++@dataclass(frozen=True)
++class Plan:
++    revision: int
++    evidence: Evidence
++    scope: str
++    historical: tuple
++    latch_generation: int
++    reason: str
++    publishable: bool
++    features: int
++    exit_verified: bool
++
++
++@dataclass(frozen=True)
++class Receipt:
++    # A real receipt must also bind the transport proof and fresh challenge.
++    # This immutable plan represents that exact binding for transition tests.
++    plan: Plan
++    accepted: bool = True
++    published: bool = True
++
++
++class Policy:
++    def __init__(self, mode=Mode.NORMAL, boot="boot-a"):
++        self.mode = mode
++        self.boot = boot
++        self.request_boot = boot
++        self.revision = 0
++        self.latch_generation = 0
++        self.retained = {}
++        self.overflow = False
++        self.features = 0
++        self.publication = None
++        self.reason = "CHECKING"
++        self.pending = None
++        self.bound = None
++        self.last_serial = 0
++        self.last_sequence = 0
++        self.retired_notices = set()
++        self.seen = {}
++        self.permit_completed = None
++
++    @property
++    def protected(self):
++        return self.mode in (Mode.COMPROMISE, Mode.EXIT)
++
++    def invalidate(self, reason):
++        self.revision += 1
++        self.features = 0
++        self.permit_completed = None
++        self.publication = None
++        self.pending = None
++        self.reason = reason
++
++    def retain(self, findings, evidence=None):
++        if not self.protected:
++            return
++        for finding in findings:
++            if finding in self.retained:
++                continue
++            if len(self.retained) >= 512:
++                if not self.overflow:
++                    self.overflow = True
++                    self.latch_generation += 1
++                continue
++            self.retained[finding] = Retained(
++                finding, evidence.identities if evidence else (),
++                evidence.sequence if evidence else 0,
++                evidence.serial if evidence else 0)
++            self.latch_generation += 1
++
++    def fault(self, kind):
++        """Confirmed local timeout/disconnect, not a pending handshake."""
++        if self.bound is not None:
++            self.retired_notices.add(self.bound[4])
++        self.invalidate(kind)
++        self.retain((Finding(kind),))
++        self.bound = None
++
++    def request_mode(self, compromise, persist_ok=True):
++        self.invalidate("RESTART_REQUIRED")
++        if not persist_ok:
++            self.reason = "PERSISTENCE_FAILED"
++            return False
++        self.mode = Mode.ENTER if compromise else Mode.EXIT
++        self.request_boot = self.boot
++        return True
++
++    def reboot(self, boot):
++        if boot == self.boot:
++            raise ValueError("reboot requires a new boot identity")
++        self.invalidate("CHECKING")
++        self.boot = boot
++        if self.mode == Mode.ENTER:
++            self.mode = Mode.COMPROMISE
++        self.bound = None
++        self.last_serial = self.last_sequence = 0
++
++    def prepare(self, evidence, now):
++        self.invalidate("CHECKING")
++        if not evidence.baseline_verified:
++            # This models a locally confirmed verification failure, not an
++            # unauthenticated remote field asserting that a signature is bad.
++            self.fault("BASELINE_INVALID")
++            return None
++        if (evidence.boot != self.boot
++                or not all(evidence.identities) or evidence.serial <= 0
++                or evidence.sequence < 0 or now < evidence.completed_ms
++                or now - evidence.completed_ms >= 2000):
++            self.reason = "INVALID_OR_STALE_EVIDENCE"
++            return None
++        if evidence.notice in self.retired_notices:
++            self.reason = "NEW_NOTIFICATION_BINDING_REQUIRED"
++            return None
++        stream = (evidence.boot, evidence.collector, evidence.classifier, evidence.baseline)
++        previous = self.seen.get(stream)
++        if previous and (evidence.serial <= previous[0] or evidence.sequence < previous[1]):
++            self.reason = "REGRESSED_EVIDENCE"
++            return None
++        if self.bound == evidence.identities:
++            if evidence.serial <= self.last_serial or evidence.sequence < self.last_sequence:
++                self.reason = "REGRESSED_EVIDENCE"
++                return None
++        elif self.bound is not None:
++            # Never transparently accept a new authority/endpoint instance.
++            self.fault("INSTANCE_CHANGED")
++            return None
++        if not evidence.endpoints_confirmed:
++            self.reason = "ENDPOINTS_UNCONFIRMED"
++            return None
++        self.bound = evidence.identities
++        self.last_serial, self.last_sequence = evidence.serial, evidence.sequence
++        self.seen[stream] = (evidence.serial, evidence.sequence)
++        scope = "union" if self.mode in (Mode.COMPROMISE, Mode.EXIT) else "official"
++        findings = evidence.union if scope == "union" else evidence.official
++        if findings is None:
++            self.reason = "REFERENCE_UNAVAILABLE"
++            return None
++        self.retain(findings, evidence)
++        historical = tuple(sorted(f.module for f in self.retained if f.module))
++        # Incomplete coverage cannot generate a normal empty proc view. A valid
++        # observation can still receive a diagnostic ACK, with features zero.
++        measured_complete = evidence.coverage_complete and evidence.collection_consistent
++        syscall_history_unrepresented = (any(f.kind == "SYSCALL_CHANGED" for f in self.retained)
++                                         and not any(f.kind == "SYSCALL_CHANGED" for f in findings))
++        publishable = measured_complete and not syscall_history_unrepresented
++        waiting = self.mode == Mode.ENTER or (
++            self.mode == Mode.EXIT and self.boot == self.request_boot)
++        exit_verified = (self.mode == Mode.EXIT and not waiting and measured_complete
++                         and evidence.official == () and evidence.endpoints_stopped)
++        latched = bool(self.retained) or self.overflow
++        features = 0
++        if waiting:
++            reason = "RESTART_REQUIRED"
++        elif not measured_complete:
++            reason = "COVERAGE_INCOMPLETE"
++        elif findings:
++            reason = "CURRENT_ANOMALY"
++        elif latched and not exit_verified:
++            reason = "LATCHED_ANOMALY"
++        elif self.mode == Mode.EXIT:
++            reason = "EXIT_VERIFIED" if exit_verified else "STOP_UNCONFIRMED"
++        elif not evidence.endpoints_stopped:
++            reason = "STOP_UNCONFIRMED"
++        else:
++            features = 2 if self.mode == Mode.COMPROMISE else 7
++            reason = "COMPROMISE_READY" if features == 2 else "NORMAL_READY"
++        if exit_verified:
++            # Official recovery ACK is separate from the still-effective union
++            # publication policy; it cannot use union cleanliness for exit.
++            scope, historical, publishable = "official", (), False
++        plan = Plan(self.revision, evidence, scope, historical,
++                    self.latch_generation, reason, publishable, features, exit_verified)
++        self.pending = plan
++        self.reason = reason
++        return plan
++
++    def commit(self, receipt, now, persist_ok=True):
++        plan = self.pending
++        if (plan is None or receipt.plan != plan or plan.revision != self.revision
++                or plan.latch_generation != self.latch_generation
++                or not receipt.accepted or receipt.published != plan.publishable
++                or now < plan.evidence.completed_ms
++                or now - plan.evidence.completed_ms >= 2000):
++            self.invalidate("COORDINATION_REJECTED")
++            return False
++        if self.protected and not persist_ok:
++            self.invalidate("PERSISTENCE_FAILED")
++            return False
++        self.pending = None
++        if plan.exit_verified:
++            # Atomic persistent exit precedes clearing. A following fresh
++            # normal observation/publication is required before granting seven.
++            self.mode = Mode.NORMAL
++            self.retained.clear()
++            self.overflow = False
++            self.latch_generation += 1
++            self.invalidate("NORMAL_RECHECK_REQUIRED")
++            return True
++        if plan.publishable:
++            current = evidence_names(plan.evidence, plan.scope)
++            # Compatibility projection only: full retention remains separate.
++            names = tuple(dict.fromkeys(plan.historical + current))[-10:]
++            self.publication = (names, now + 3000)
++        self.features = plan.features
++        self.permit_completed = plan.evidence.completed_ms
++        return True
++
++    def allowed(self, now):
++        if (self.permit_completed is None or now < self.permit_completed
++                or now - self.permit_completed >= 2000):
++            return 0
++        return self.features
++
++    def proc_names(self, now):
++        if self.publication is None or now >= self.publication[1]:
++            return None  # Unavailable, never an invented clean list.
++        return self.publication[0]
++
++
++def evidence_names(evidence, scope):
++    findings = evidence.union if scope == "union" else evidence.official
++    return tuple(f.module for f in findings if f.module)
+diff --git a/libplatform_integrity_host/tests/mode_model/shutdown_model.py b/libplatform_integrity_host/tests/mode_model/shutdown_model.py
+new file mode 100644
+index 0000000..f73a799
+--- /dev/null
++++ b/libplatform_integrity_host/tests/mode_model/shutdown_model.py
+@@ -0,0 +1,106 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Shutdown/policy interleavings. Not a property writer or runtime authority."""
++from model import Finding, Mode, Policy
++
++
++class Shutdown:
++    def __init__(self, policy):
++        self.policy = policy
++        self.phase = "RUNNING"
++        self.start = self.deadline = None
++        self.zero_confirmed = False
++        self.notice = self.interruptions = 0
++        self.observed_notice = None
++        self.plan = None
++        self.frozen_boot = ""
++
++    def begin(self, now):
++        if self.phase != "RUNNING":
++            return False
++        self.phase = "DRAINING"
++        self.start, self.deadline = now, now + 2000
++        self.policy.invalidate("SHUTDOWN")
++        return True
++
++    def live(self, now):
++        return self.phase == "DRAINING" and self.start <= now < self.deadline
++
++    def fail(self):
++        if self.phase == "TERMINAL":
++            return
++        self.phase = "FAILED"
++        self.policy.fault("SHUTDOWN_UNCONFIRMED")
++
++    def confirm_zero(self, now, success=True):
++        if self.live(now) and success:
++            self.zero_confirmed = True
++        else:
++            self.fail()
++
++    def disconnect(self):
++        if self.phase == "TERMINAL":
++            return  # only after successful handoff is close expected
++        self.notice += 1
++        self.interruptions += 1
++        self.policy.fault("CONTROL_INTERRUPTED")
++
++    def change(self):
++        if self.phase != "TERMINAL":
++            self.notice += 1
++
++    def final_observation(self, evidence, now, stop_ack=True):
++        if not self.live(now) or not self.zero_confirmed:
++            self.fail()
++            return False
++        # Initial durable denial precedes endpoint teardown. It confers no
++        # expected-close authority if the later report/receipt/commit fails.
++        self.frozen_boot = self.policy.boot
++        if not stop_ack:
++            self.fail()
++            return False
++        # prepare applies current findings/retention but cannot issue permits.
++        self.plan = self.policy.prepare(evidence, now)
++        if self.plan is None:
++            self.fail()
++            return False
++        self.observed_notice = self.notice
++        return True
++
++    def finish(self, now, persist_ok=True, receipt_ok=True):
++        if (not self.live(now) or not self.zero_confirmed or self.plan is None
++                or not persist_ok):
++            self.fail()
++            return False
++        # Persistence precedes the final ticket CAS. A late/changed ticket can
++        # leave a durable denial marker but never expected-close authority.
++        self.frozen_boot = self.policy.boot
++        if (not receipt_ok or self.notice != self.observed_notice
++                or now < self.plan.evidence.completed_ms
++                or now - self.plan.evidence.completed_ms >= 2000):
++            self.fail()
++            return False
++        self.phase = "TERMINAL"
++        self.policy.invalidate("SHUTDOWN_TERMINAL")
++        return True
++
++    def commit_positive(self, receipt, now):
++        if self.phase != "RUNNING":
++            return False
++        return self.policy.commit(receipt, now)
++
++    def restart_same_boot(self):
++        # A persisted freeze is denial only, including when the old worker
++        # committed the marker but failed its final notification CAS.
++        if self.frozen_boot == self.policy.boot:
++            self.phase = "FAILED"
++            self.policy.invalidate("FROZEN_BOOT")
++
++    def reboot(self, boot):
++        self.policy.reboot(boot)
++        self.phase = "RUNNING"
++        self.start = self.deadline = None
++        self.zero_confirmed = False
++        self.plan = None
++        self.observed_notice = None
++        self.notice = self.interruptions = 0
++        self.frozen_boot = ""
+diff --git a/libplatform_integrity_host/tests/mode_model/test_model.py b/libplatform_integrity_host/tests/mode_model/test_model.py
+new file mode 100644
+index 0000000..5e641a1
+--- /dev/null
++++ b/libplatform_integrity_host/tests/mode_model/test_model.py
+@@ -0,0 +1,349 @@
++# SPDX-License-Identifier: Apache-2.0
++import unittest
++from dataclasses import replace
++
++from model import Evidence, Finding, Mode, Policy, Receipt
++
++
++UNKNOWN = Finding("UNKNOWN_MODULE", "unknown_ko")
++VERSION = Finding("UNAPPROVED_VERSION", "known_ko")
++COMMUNITY = Finding("UNAPPROVED_VERSION", "community_ko")
++
++
++class ModeContract(unittest.TestCase):
++    def apply(self, policy, evidence=None, now=101, persist_ok=True):
++        evidence = evidence or Evidence(boot=policy.boot)
++        plan = policy.prepare(evidence, now)
++        self.assertIsNotNone(plan)
++        ok = policy.commit(Receipt(plan, published=plan.publishable), now, persist_ok)
++        return ok, plan
++
++    def test_official_normal_grants_seven_after_receipt_only(self):
++        p = Policy()
++        plan = p.prepare(Evidence(), 101)
++        self.assertEqual(p.allowed(101), 0)
++        self.assertTrue(p.commit(Receipt(plan), 102))
++        self.assertEqual(p.allowed(102), 7)
++        self.assertEqual(p.proc_names(102), ())
++
++    def test_community_only_version_is_not_official(self):
++        p = Policy()
++        self.apply(p, Evidence(official=(COMMUNITY,), union=()))
++        self.assertEqual(p.features, 0)
++        self.assertFalse(p.retained)
++        self.assertEqual(p.proc_names(102), ("community_ko",))
++
++    def test_official_in_compromise_only_grants_fas(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p)
++        self.assertEqual(p.features, 2)
++
++    def test_approved_community_filtered_only_in_compromise(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(official=(COMMUNITY,), union=()))
++        self.assertEqual(p.features, 2)
++        self.assertEqual(p.proc_names(102), ())
++
++    def test_normal_anomaly_can_recover_without_host_latch(self):
++        p = Policy()
++        self.apply(p, Evidence(official=(UNKNOWN,)))
++        self.assertEqual(p.features, 0)
++        self.apply(p, Evidence(serial=2, sequence=2))
++        self.assertEqual(p.features, 7)
++        self.assertFalse(p.retained)
++
++    def test_raw_history_anomaly_still_blocks_normal(self):
++        p = Policy()
++        self.apply(p, Evidence(official=(UNKNOWN,)))
++        self.apply(p, Evidence(serial=2, sequence=2, official=(UNKNOWN,)))
++        self.assertFalse(p.retained)
++        self.assertEqual(p.features, 0)
++        self.assertEqual(p.proc_names(102), ("unknown_ko",))
++
++    def test_unknown_and_wrong_digest_both_latch_in_compromise(self):
++        for finding in (UNKNOWN, VERSION):
++            with self.subTest(finding=finding):
++                p = Policy(Mode.COMPROMISE)
++                self.apply(p, Evidence(union=(finding,)))
++                self.apply(p, Evidence(serial=2, sequence=2))
++                self.assertEqual(p.features, 0)
++                self.assertIn(finding, p.retained)
++                self.assertEqual(p.proc_names(102), (finding.module,))
++
++    def test_duplicate_findings_preserve_first_evidence(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        first = p.retained[UNKNOWN]
++        self.apply(p, Evidence(serial=2, sequence=5, union=(UNKNOWN,)))
++        self.assertEqual(p.latch_generation, 1)
++        self.assertEqual(p.retained[UNKNOWN], first)
++
++    def test_scalar_anomaly_is_not_a_fabricated_proc_module(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(Finding("SYSCALL_CHANGED"),)))
++        self.assertEqual(p.features, 0)
++        self.assertEqual(p.proc_names(102), ())
++        self.assertTrue(p.retained)
++
++    def test_component_failure_latches_only_in_compromise(self):
++        for mode in (Mode.NORMAL, Mode.COMPROMISE):
++            p = Policy(mode)
++            self.apply(p)
++            p.fault("CONTROL_DOWN")
++            self.assertEqual(p.features, 0)
++            self.assertIsNone(p.proc_names(102))
++            self.assertEqual(bool(p.retained), mode == Mode.COMPROMISE)
++
++    def test_normal_disconnect_requires_new_notification_and_fresh_report(self):
++        p = Policy()
++        self.apply(p)
++        p.fault("DISCONNECTED")
++        self.assertIsNone(p.prepare(Evidence(serial=2), 101))
++        self.assertIsNone(p.prepare(Evidence(notice="notice-b"), 101))
++        self.apply(p, Evidence(serial=2, notice="notice-b"))
++        self.assertEqual(p.features, 7)
++
++    def test_compromise_reconnect_does_not_clear_failure(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p)
++        p.fault("DISCONNECTED")
++        self.apply(p, Evidence(serial=2, notice="notice-b"))
++        self.assertEqual(p.features, 0)
++        self.assertTrue(p.retained)
++
++    def test_no_silent_instance_rebind(self):
++        p = Policy()
++        self.apply(p)
++        self.assertIsNone(p.prepare(Evidence(serial=2, collector="collector-b"), 101))
++        self.assertEqual(p.features, 0)
++        self.assertIsNone(p.prepare(Evidence(serial=3, collector="collector-b"), 101))
++
++    def test_pending_handshake_is_not_confirmed_failure(self):
++        p = Policy(Mode.COMPROMISE)
++        self.assertIsNone(p.prepare(Evidence(endpoints_confirmed=False), 101))
++        self.assertFalse(p.retained)
++        self.assertEqual(p.features, 0)
++
++    def test_glow_104_gap_never_becomes_clean_publication_or_permit(self):
++        p = Policy(Mode.COMPROMISE)
++        ok, plan = self.apply(p, Evidence(coverage_complete=False))
++        self.assertTrue(ok)
++        self.assertFalse(plan.publishable)
++        self.assertEqual(p.reason, "COVERAGE_INCOMPLETE")
++        self.assertEqual(p.features, 0)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_unapproved_input_retained_even_with_coverage_gap(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(coverage_complete=False, union=(VERSION,)))
++        self.assertIn(VERSION, p.retained)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_unsupported_scope_is_explicit_not_infinite_checking(self):
++        p = Policy(Mode.COMPROMISE)
++        self.assertIsNone(p.prepare(Evidence(union=None), 101))
++        self.assertEqual(p.reason, "REFERENCE_UNAVAILABLE")
++        self.assertEqual(p.features, 0)
++
++    def test_untrusted_baseline_cannot_create_a_clean_result(self):
++        p = Policy()
++        self.assertIsNone(p.prepare(Evidence(baseline_verified=False), 101))
++        self.assertEqual(p.features, 0)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_confirmed_baseline_failure_latches_in_compromise(self):
++        p = Policy(Mode.COMPROMISE)
++        self.assertIsNone(p.prepare(Evidence(baseline_verified=False), 101))
++        self.assertIn(Finding("BASELINE_INVALID"), p.retained)
++        self.apply(p, Evidence(serial=2))
++        self.assertEqual(p.features, 0)
++
++    def test_syscall_anomaly_remains_latched_after_current_result_recovers(self):
++        p = Policy(Mode.COMPROMISE)
++        finding = Finding("SYSCALL_CHANGED")
++        self.apply(p, Evidence(union=(finding,)))
++        self.apply(p, Evidence(serial=2))
++        self.assertIn(finding, p.retained)
++        self.assertEqual(p.features, 0)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_evidence_loss_remains_restrictive_after_rebind(self):
++        p = Policy()
++        self.apply(p)
++        p.fault("EVIDENCE_LOST")
++        self.apply(p, Evidence(serial=2, notice="notice-b", coverage_complete=False))
++        self.assertFalse(p.retained)
++        self.assertEqual(p.features, 0)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_exit_cannot_use_incomplete_official_evidence(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        p.request_mode(False)
++        p.reboot("boot-b")
++        self.apply(p, Evidence(boot="boot-b", coverage_complete=False))
++        self.assertEqual(p.mode, Mode.EXIT)
++        self.assertIn(UNKNOWN, p.retained)
++        self.assertEqual(p.features, 0)
++
++    def test_inconsistent_collection_cannot_publish(self):
++        p = Policy()
++        self.apply(p, Evidence(collection_consistent=False))
++        self.assertEqual(p.features, 0)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_clock_regression_and_two_second_boundary(self):
++        for now in (99, 2100):
++            p = Policy()
++            self.assertIsNone(p.prepare(Evidence(), now))
++        p = Policy()
++        self.apply(p)
++        self.assertEqual(p.allowed(2099), 7)
++        self.assertEqual(p.allowed(2100), 0)
++        self.assertEqual(p.allowed(99), 0)
++
++    def test_sequence_regression_and_replayed_serial_rejected(self):
++        for bad in (Evidence(serial=1, sequence=3), Evidence(serial=3, sequence=0)):
++            p = Policy()
++            self.apply(p, Evidence(serial=2, sequence=2))
++            self.assertIsNone(p.prepare(bad, 101))
++            self.assertEqual(p.features, 0)
++
++    def test_late_receipt_after_new_report_rejected(self):
++        p = Policy()
++        old = p.prepare(Evidence(), 101)
++        p.prepare(Evidence(serial=2), 101)
++        self.assertFalse(p.commit(Receipt(old), 102))
++        self.assertEqual(p.features, 0)
++
++    def test_mode_change_invalidates_inflight_receipt(self):
++        p = Policy()
++        old = p.prepare(Evidence(), 101)
++        p.request_mode(True)
++        self.assertFalse(p.commit(Receipt(old), 102))
++
++    def test_disconnect_invalidates_inflight_receipt(self):
++        p = Policy()
++        old = p.prepare(Evidence(), 101)
++        p.fault("DISCONNECTED")
++        self.assertFalse(p.commit(Receipt(old), 102))
++
++    def test_receipt_cannot_change_scope_or_history(self):
++        for changed in (dict(scope="union"), dict(historical=("forged",)),
++                        dict(latch_generation=99)):
++            p = Policy()
++            plan = p.prepare(Evidence(), 101)
++            self.assertFalse(p.commit(Receipt(replace(plan, **changed)), 102))
++
++    def test_rejected_or_wrong_publication_receipt_never_grants(self):
++        for args in (dict(accepted=False), dict(published=False)):
++            p = Policy()
++            plan = p.prepare(Evidence(), 101)
++            self.assertFalse(p.commit(Receipt(plan, **args), 102))
++
++    def test_expired_receipt_rejected(self):
++        p = Policy()
++        plan = p.prepare(Evidence(), 101)
++        self.assertFalse(p.commit(Receipt(plan), 2100))
++
++    def test_enter_requires_new_boot_and_then_fresh_verification(self):
++        p = Policy()
++        p.request_mode(True)
++        self.apply(p)
++        self.assertEqual(p.features, 0)
++        p.reboot("boot-b")
++        self.assertEqual(p.features, 0)
++        self.apply(p)
++        self.assertEqual(p.features, 2)
++
++    def test_reboot_does_not_clear_compromise_retention(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        p.reboot("boot-b")
++        self.apply(p)
++        self.assertIn(UNKNOWN, p.retained)
++        self.assertEqual(p.features, 0)
++
++    def test_exit_requires_reboot_official_scope_and_stopped_endpoints(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        p.request_mode(False)
++        self.apply(p, Evidence(serial=2))
++        self.assertEqual(p.mode, Mode.EXIT)
++        p.reboot("boot-b")
++        self.apply(p, Evidence(boot="boot-b", official=(COMMUNITY,), union=()))
++        self.assertEqual(p.mode, Mode.EXIT)
++        self.apply(p, Evidence(boot="boot-b", serial=2, endpoints_stopped=False))
++        self.assertEqual(p.mode, Mode.EXIT)
++        self.assertTrue(p.retained)
++
++    def test_approved_community_during_exit_is_not_new_compromise_alarm(self):
++        p = Policy(Mode.COMPROMISE)
++        p.request_mode(False)
++        p.reboot("boot-b")
++        _, plan = self.apply(p, Evidence(boot="boot-b", official=(COMMUNITY,), union=()))
++        self.assertEqual(p.mode, Mode.EXIT)
++        self.assertFalse(p.retained)
++        self.assertEqual(p.features, 0)
++        self.assertEqual(plan.scope, "union")
++        self.assertEqual(p.proc_names(102), ())
++
++    def test_exit_atomic_success_then_new_normal_recheck(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        p.request_mode(False)
++        p.reboot("boot-b")
++        self.apply(p)
++        self.assertEqual(p.mode, Mode.NORMAL)
++        self.assertFalse(p.retained)
++        self.assertEqual(p.features, 0)
++        self.apply(p, Evidence(boot="boot-b", serial=2))
++        self.assertEqual(p.features, 7)
++
++    def test_failed_exit_storage_keeps_mode_and_latches(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        p.request_mode(False)
++        p.reboot("boot-b")
++        ok, _ = self.apply(p, persist_ok=False)
++        self.assertFalse(ok)
++        self.assertEqual(p.mode, Mode.EXIT)
++        self.assertIn(UNKNOWN, p.retained)
++        self.assertEqual(p.features, 0)
++
++    def test_failed_latch_storage_does_not_publish_or_grant(self):
++        p = Policy(Mode.COMPROMISE)
++        ok, _ = self.apply(p, Evidence(union=(UNKNOWN,)), persist_ok=False)
++        self.assertFalse(ok)
++        self.assertIn(UNKNOWN, p.retained)
++        self.assertIsNone(p.proc_names(102))
++
++    def test_proc_expiry_does_not_erase_retention(self):
++        p = Policy(Mode.COMPROMISE)
++        self.apply(p, Evidence(union=(UNKNOWN,)))
++        self.assertEqual(p.proc_names(3100), ("unknown_ko",))
++        self.assertIsNone(p.proc_names(3101))
++        self.assertTrue(p.retained)
++
++    def test_proc_ten_names_is_not_full_retention(self):
++        p = Policy(Mode.COMPROMISE)
++        findings = tuple(Finding("UNKNOWN_MODULE", f"module_{i:02}") for i in range(12))
++        self.apply(p, Evidence(union=findings))
++        self.assertEqual(len(p.proc_names(102)), 10)
++        self.assertEqual(len(p.retained), 12)
++        self.assertEqual(p.features, 0)
++
++    def test_latch_capacity_overflow_remains_restricted(self):
++        p = Policy(Mode.COMPROMISE)
++        for batch in range(2):
++            findings = tuple(Finding("UNKNOWN_MODULE", f"module_{i}")
++                             for i in range(batch * 300, (batch + 1) * 300))
++            self.apply(p, Evidence(serial=batch + 1, union=findings))
++        self.assertEqual(len(p.retained), 512)
++        self.assertTrue(p.overflow)
++        self.apply(p, Evidence(serial=3))
++        self.assertEqual(p.features, 0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/libplatform_integrity_host/tests/mode_model/test_shutdown.py b/libplatform_integrity_host/tests/mode_model/test_shutdown.py
+new file mode 100644
+index 0000000..4c4b448
+--- /dev/null
++++ b/libplatform_integrity_host/tests/mode_model/test_shutdown.py
+@@ -0,0 +1,223 @@
++# SPDX-License-Identifier: Apache-2.0
++import unittest
++from model import Evidence, Finding, Mode, Policy, Receipt
++from shutdown_model import Shutdown
++
++
++class ShutdownContract(unittest.TestCase):
++    def ready(self, mode=Mode.COMPROMISE):
++        policy = Policy(mode)
++        plan = policy.prepare(Evidence(), 101)
++        self.assertTrue(policy.commit(Receipt(plan), 101))
++        return Shutdown(policy)
++
++    def finish(self, shutdown, evidence=None):
++        self.assertTrue(shutdown.final_observation(evidence or Evidence(serial=2), 120))
++        self.assertTrue(shutdown.finish(130))
++
++    def test_cancel_does_not_call_begin_or_revoke(self):
++        shutdown = self.ready()
++        self.assertEqual(shutdown.phase, "RUNNING")
++        self.assertEqual(shutdown.policy.features, 2)
++
++    def test_begin_revoke_precedes_expected_close(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        self.assertEqual(shutdown.policy.features, 0)
++        shutdown.confirm_zero(111)
++        self.finish(shutdown)
++        shutdown.disconnect()
++        self.assertFalse(shutdown.policy.retained)
++
++    def test_no_zero_confirmation_means_no_grace(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        self.assertFalse(shutdown.final_observation(Evidence(serial=2), 120))
++        self.assertEqual(shutdown.phase, "FAILED")
++        self.assertIn(Finding("SHUTDOWN_UNCONFIRMED"), shutdown.policy.retained)
++
++    def test_property_failure_cannot_become_success(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111, False)
++        self.assertFalse(shutdown.finish(120))
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_preexisting_module_latch_survives_orderly_shutdown(self):
++        shutdown = self.ready()
++        finding = Finding("UNKNOWN_MODULE", "unknown_ko")
++        plan = shutdown.policy.prepare(Evidence(serial=2, union=(finding,)), 102)
++        shutdown.policy.commit(Receipt(plan), 102)
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.finish(shutdown, Evidence(serial=3))
++        self.assertIn(finding, shutdown.policy.retained)
++
++    def test_final_report_adds_module_finding_before_close(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        finding = Finding("UNAPPROVED_VERSION", "modified_ko")
++        self.finish(shutdown, Evidence(serial=2, union=(finding,)))
++        self.assertIn(finding, shutdown.policy.retained)
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_coalesced_disconnect_and_reconnect_cannot_erase_fault(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.disconnect()
++        shutdown.confirm_zero(111)
++        self.finish(shutdown, Evidence(serial=2, notice="notice-b"))
++        self.assertEqual(shutdown.interruptions, 1)
++        self.assertIn(Finding("CONTROL_INTERRUPTED"), shutdown.policy.retained)
++
++    def test_new_notification_after_ack_rejects_seal(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.assertTrue(shutdown.final_observation(Evidence(serial=2), 120))
++        shutdown.change()
++        self.assertFalse(shutdown.finish(130))
++        self.assertEqual(shutdown.phase, "FAILED")
++
++    def test_component_dies_before_terminal_is_not_expected_close(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        shutdown.final_observation(Evidence(serial=2), 120)
++        shutdown.disconnect()
++        self.assertFalse(shutdown.finish(130))
++        self.assertIn(Finding("CONTROL_INTERRUPTED"), shutdown.policy.retained)
++
++    def test_v4_ack_stays_partial_and_zero_permit(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.finish(shutdown, Evidence(serial=2, coverage_complete=False))
++        self.assertFalse(shutdown.plan.evidence.coverage_complete)
++        self.assertEqual(shutdown.policy.features, 0)
++        self.assertIsNone(shutdown.policy.proc_names(130))
++
++    def test_shutdown_does_not_perform_verified_exit_or_clear_history(self):
++        shutdown = self.ready()
++        shutdown.policy.fault("CONTROL_INTERRUPTED")
++        shutdown.policy.request_mode(False)
++        shutdown.reboot("boot-b")
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.finish(shutdown, Evidence(boot="boot-b", serial=1, notice="notice-boot-b"))
++        self.assertEqual(shutdown.policy.mode, Mode.EXIT)
++        self.assertTrue(shutdown.policy.retained)
++
++    def test_expired_worker_cannot_finish_or_rearm(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        shutdown.final_observation(Evidence(serial=2), 120)
++        self.assertFalse(shutdown.finish(2110))
++        self.assertFalse(shutdown.begin(2200))
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_late_positive_receipt_cannot_commit(self):
++        shutdown = self.ready()
++        old = shutdown.policy.prepare(Evidence(serial=2), 102)
++        shutdown.begin(110)
++        self.assertFalse(shutdown.commit_positive(Receipt(old), 120))
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_failed_final_persistence_preserves_memory_latches_and_denial(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        shutdown.final_observation(Evidence(serial=2), 120)
++        self.assertFalse(shutdown.finish(130, persist_ok=False))
++        self.assertTrue(shutdown.policy.retained)
++        self.assertEqual(shutdown.policy.features, 0)
++        self.assertEqual(shutdown.frozen_boot, "boot-a")
++
++    def test_failed_stop_after_initial_freeze_has_no_expected_close_grace(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.assertFalse(shutdown.final_observation(Evidence(serial=2), 120, stop_ack=False))
++        self.assertEqual(shutdown.frozen_boot, "boot-a")
++        self.assertEqual(shutdown.phase, "FAILED")
++        shutdown.disconnect()
++        self.assertIn(Finding("CONTROL_INTERRUPTED"), shutdown.policy.retained)
++
++    def test_rejected_receipt_does_not_allow_close(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        shutdown.final_observation(Evidence(serial=2), 120)
++        self.assertFalse(shutdown.finish(130, receipt_ok=False))
++        self.assertEqual(shutdown.phase, "FAILED")
++
++    def test_changed_ticket_after_persistence_leaves_denial_marker_only(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        shutdown.final_observation(Evidence(serial=2), 120)
++        shutdown.change()
++        shutdown.finish(130)
++        self.assertEqual(shutdown.frozen_boot, "boot-a")
++        shutdown.restart_same_boot()
++        self.assertEqual(shutdown.phase, "FAILED")
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_shutdown_failure_after_handoff_cannot_restore_features(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.finish(shutdown)
++        shutdown.fail()
++        self.assertEqual(shutdown.phase, "TERMINAL")
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_duplicate_begin_does_not_extend_deadline(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        self.assertFalse(shutdown.begin(1000))
++        self.assertEqual(shutdown.deadline, 2110)
++
++    def test_normal_shutdown_failure_adds_no_compromise_latch(self):
++        shutdown = self.ready(Mode.NORMAL)
++        shutdown.begin(110)
++        shutdown.fail()
++        self.assertFalse(shutdown.policy.retained)
++        self.assertEqual(shutdown.policy.features, 0)
++
++    def test_force_reboot_without_trusted_begin_is_not_exempt(self):
++        shutdown = self.ready()
++        shutdown.disconnect()
++        self.assertIn(Finding("CONTROL_INTERRUPTED"), shutdown.policy.retained)
++
++    def test_real_new_boot_is_not_automatically_authorized(self):
++        shutdown = self.ready()
++        shutdown.policy.fault("CONTROL_INTERRUPTED")
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.finish(shutdown, Evidence(serial=2, notice="notice-b"))
++        shutdown.reboot("boot-b")
++        self.assertEqual(shutdown.phase, "RUNNING")
++        self.assertEqual(shutdown.policy.features, 0)
++        self.assertTrue(shutdown.policy.retained)
++
++    def test_report_freshness_is_rechecked_after_persistence(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(111)
++        self.assertTrue(shutdown.final_observation(Evidence(serial=2, completed_ms=0), 120))
++        self.assertFalse(shutdown.finish(2050))  # drain budget remains, report expired
++        self.assertEqual(shutdown.phase, "FAILED")
++
++    def test_clock_regression_fails_closed(self):
++        shutdown = self.ready()
++        shutdown.begin(110)
++        shutdown.confirm_zero(109)
++        self.assertEqual(shutdown.phase, "FAILED")
++        self.assertEqual(shutdown.policy.features, 0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+

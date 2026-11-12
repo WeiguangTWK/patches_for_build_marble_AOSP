@@ -1,0 +1,64 @@
+From db23e7d5733841757fda2188e8006fa6295ad95f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 16:22:18 +0800
+Subject: [PATCH] Neko LineageOS: [ASTER] Allow integrity APEX crypto and TLS
+ dependencies
+
+Expose the required crypto and TLS libraries to com.android.platform.integrity
+and allow the ASTER bootstrap to use the static crypto implementation.
+
+This supplies the existing signing and HTTPS interfaces used by the collector
+runtime without changing cryptographic algorithms or TLS verification behavior.
+
+Change-Id: I4b11d6e19992951fabd4b12fb0a7346248184bd4
+---
+ Android.bp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index 9ec7b94..1a85058 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -186,6 +186,7 @@ cc_object {
+         "com.android.conscrypt",
+         "com.android.extservices",
+         "com.android.ondevicepersonalization",
++        "com.android.platform.integrity",
+         "com.android.resolv",
+         "com.android.virt",
+         "com.android.wifi",
+@@ -290,6 +291,7 @@ cc_library {
+         "com.android.conscrypt",
+         "com.android.extservices",
+         "com.android.ondevicepersonalization",
++        "com.android.platform.integrity",
+         "com.android.resolv",
+         "com.android.virt",
+         "com.android.wifi",
+@@ -371,6 +373,7 @@ cc_library_static {
+         "//packages/modules/DnsResolver/tests:__subpackages__",
+         "//packages/modules/NeuralNetworks:__subpackages__",
+         "//system/core/init",
++        "//external/aster:__pkg__",
+         "//system/core/fs_mgr/liblp",
+         "//system/core/fs_mgr/liblp/vts_core",
+         "//system/core/fs_mgr/libsnapshot",
+@@ -388,6 +391,7 @@ cc_library_static {
+         "com.android.art.debug",
+         "com.android.extservices",
+         "com.android.neuralnetworks",
++        "com.android.platform.integrity",
+     ],
+     defaults: [
+         "libcrypto_bcm_sources",
+@@ -483,6 +487,7 @@ cc_library {
+         "com.android.bt",
+         "com.android.configinfrastructure",
+         "com.android.conscrypt",
++        "com.android.platform.integrity",
+         "com.android.resolv",
+         "com.android.virt",
+         "com.android.wifi",
+-- 
+2.43.0
+

@@ -1,0 +1,1120 @@
+From a4a5ee31b538a283dfa9e49b0820814b6274bf8b Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 19:09:20 +0800
+Subject: [PATCH] Neko LineageOS: [FAS] Enforce integrity grants in the QTI
+ backend
+
+Move fasqtid to IFasBackend V3 and bind CPU vote submissions to the current
+daemon, backend, collector and policy grant. Report challenged status and reject
+stale contexts or broken boot continuity.
+
+Record the first submission for the boot and expose explicit release-attempt
+state without asserting hardware completion. Add the required boot-property,
+collector access and vendor manifest integration, together with control models.
+
+Change-Id: Icf7ef16bb7d858858da8ab2acb02c4dd82cc8548
+---
+ fasqtid/Android.bp                         |   3 +-
+ fasqtid/fasqtid.cpp                        | 201 ++++++++++++++-
+ fasqtid/fasqtid.rc                         |   3 +
+ fasqtid/tests/control_model/README.md      | 103 ++++++++
+ fasqtid/tests/control_model/model.py       | 235 +++++++++++++++++
+ fasqtid/tests/control_model/test_model.py  | 285 +++++++++++++++++++++
+ fasqtid/vendor.performance.fas-service.xml |   2 +-
+ sepolicy/vendor/fasqtid.te                 |   8 +
+ sepolicy/vendor/init.te                    |   2 +
+ sepolicy/vendor/property.te                |   2 +
+ sepolicy/vendor/property_contexts          |   2 +
+ 11 files changed, 841 insertions(+), 5 deletions(-)
+ create mode 100644 fasqtid/tests/control_model/README.md
+ create mode 100644 fasqtid/tests/control_model/model.py
+ create mode 100644 fasqtid/tests/control_model/test_model.py
+
+diff --git a/fasqtid/Android.bp b/fasqtid/Android.bp
+index 160aea7..1ab721d 100644
+--- a/fasqtid/Android.bp
++++ b/fasqtid/Android.bp
+@@ -18,13 +18,14 @@ cc_binary {
+         "-Wextra",
+         "-Werror",
+     ],
++    header_libs: ["libplatform_integrity_headers", "libplatform_integrity_uapi"],
+     shared_libs: [
+         "android.hardware.thermal-V1-ndk",
+         "libbase",
+         "libbinder_ndk",
+         "libdl",
+         "liblog",
+-        "vendor.performance.fas-V1-ndk",
++        "vendor.performance.fas-V3-ndk",
+     ],
+     init_rc: ["fasqtid.rc"],
+     vintf_fragments: ["vendor.performance.fas-service.xml"],
+diff --git a/fasqtid/fasqtid.cpp b/fasqtid/fasqtid.cpp
+index 0bb276c..56ff358 100644
+--- a/fasqtid/fasqtid.cpp
++++ b/fasqtid/fasqtid.cpp
+@@ -20,12 +20,20 @@
+ #include <aidl/android/hardware/thermal/Temperature.h>
+ #include <aidl/android/hardware/thermal/ThrottlingSeverity.h>
+ #include <aidl/vendor/performance/fas/BnFasBackend.h>
++#include <aidl/vendor/performance/fas/FasBackendStatus.h>
++#include <aidl/vendor/performance/fas/FasPolicyContext.h>
+ #include <aidl/vendor/performance/fas/CpuPolicyVote.h>
+ #include <android-base/properties.h>
+ #include <android/binder_ibinder.h>
+ #include <android/binder_manager.h>
+ #include <android/binder_process.h>
+ #include <log/log.h>
++#include <platform/integrity_policy.h>
++#include <platform/execution_evidence.h>
++#include <platform/fas_boot_record.h>
++#include <platform_integrity.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
+ 
+ #include <dlfcn.h>
+ #include <sys/stat.h>
+@@ -35,6 +43,7 @@
+ #include <atomic>
+ #include <chrono>
+ #include <cstdint>
++#include <cerrno>
+ #include <cstdlib>
+ #include <fstream>
+ #include <map>
+@@ -50,12 +59,16 @@
+ 
+ namespace android::fas::qti {
+ namespace {
++namespace integrity = android::platform_integrity;
++const std::string gFasBackendInstance = integrity::randomInstance();
+ 
+ using aidl::android::hardware::thermal::IThermal;
+ using aidl::android::hardware::thermal::Temperature;
+ using aidl::android::hardware::thermal::ThrottlingSeverity;
+ using aidl::vendor::performance::fas::BnFasBackend;
+ using aidl::vendor::performance::fas::CpuPolicyVote;
++using aidl::vendor::performance::fas::FasPolicyContext;
++using aidl::vendor::performance::fas::FasBackendStatus;
+ using namespace std::chrono_literals;
+ 
+ constexpr char kPerfLibrary[] = "libqti-perfd-client.so";
+@@ -97,6 +110,8 @@ struct VoteRequest {
+     int64_t sequence = 0;
+     int32_t ttlMillis = 0;
+     std::vector<CpuPolicyVote> policies;
++    std::string policyIdentity;
++    std::optional<FasPolicyContext> context;
+ };
+ 
+ std::optional<int32_t> readPolicyMaximumKhz(int32_t policyId) {
+@@ -339,6 +354,15 @@ std::optional<PerfResources> resourcesForPolicy(int32_t policyId) {
+ 
+ class ThermalGate {
+   public:
++    void invalidateIdleSample() {
++        // Require a fresh sample when requests resume. Keep the previous blocked
++        // state, but never count an unobserved idle gap toward thermal recovery.
++        mLastPoll = TimePoint{};
++        mAvailable = false;
++        mRecoverySince.reset();
++        mSeverity = ThrottlingSeverity::NONE;
++    }
++
+     void refresh(TimePoint now) {
+         if (mLastPoll != TimePoint{} && now - mLastPoll < kThermalPollInterval) return;
+         mLastPoll = now;
+@@ -460,6 +484,21 @@ class PerfClient {
+             return false;
+         }
+ 
++        if (!integrity::allowedForIdentity(request.policyIdentity, integrity::kFas)) return false;
++        if (integrity::enabled()) {
++            if (!integrity::recordFasSubmission(integrity::kFasBackendBoot,
++                    gFasBackendInstance)) return false;
++            if (!request.context || !integrity::fasInstanceHealthy(
++                    integrity::kFasDaemonBoot, request.context->daemonInstance)) return false;
++            const int fd = open("/dev/platform_integrity", O_RDWR | O_CLOEXEC);
++            if (fd < 0) return false;
++            const bool measured = integrity::recordExecutionSubmission(
++                    fd, request.context->collectorInstance);
++            close(fd);
++            if (!measured) return false;
++            // Do not submit if revocation raced recording the sticky boot marker.
++            if (!integrity::allowedForIdentity(request.policyIdentity, integrity::kFas)) return false;
++        }
+         const int oldHandle = mHandle;
+         // Keep the vendor lock finite for process-death safety, but do not depend on renewal of an
+         // existing handle. Some proprietary perf stacks can lose renewed resources when another
+@@ -487,7 +526,8 @@ class PerfClient {
+     void release() {
+         if (mHandle > 0 && mRelease != nullptr) {
+             const int result = mRelease(mHandle);
+-            ALOGI("released QTI perf vote handle=%d result=%d", mHandle, result);
++            // The proprietary client reports transport/submission, not completion.
++            ALOGI("requested QTI perf vote release handle=%d client_result=%d", mHandle, result);
+         }
+         mHandle = -1;
+         mPreviousHandle = -1;
+@@ -577,6 +617,66 @@ class Backend final : public BnFasBackend {
+ 
+     ndk::ScopedAStatus updateCpuVotes(int64_t generation, int64_t sequence, int32_t ttlMillis,
+                                       const std::vector<CpuPolicyVote>& votes) override {
++        if (integrity::enabled()) return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        return updateCpuVotesWithPolicy("", generation, sequence, ttlMillis, votes);
++    }
++
++    ndk::ScopedAStatus updateCpuVotesWithPolicy(const std::string& policyIdentity,
++            int64_t generation, int64_t sequence, int32_t ttlMillis,
++            const std::vector<CpuPolicyVote>& votes) override {
++        if (integrity::enabled()) return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        return submitVotes(nullptr, policyIdentity, generation, sequence, ttlMillis, votes);
++    }
++
++    ndk::ScopedAStatus updateCpuVotesWithContext(const FasPolicyContext& context,
++            int64_t generation, int64_t sequence, int32_t ttlMillis,
++            const std::vector<CpuPolicyVote>& votes) override {
++        return submitVotes(&context, context.policyIdentity, generation, sequence, ttlMillis, votes);
++    }
++
++    ndk::ScopedAStatus getBackendStatus(const std::string& challenge,
++            FasBackendStatus* result) override {
++        if (AIBinder_getCallingUid() != kSystemUid || !integrity::instanceId(challenge))
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        std::scoped_lock lock(mMutex);
++        *result = statusLocked(challenge);
++        return ndk::ScopedAStatus::ok();
++    }
++
++    ndk::ScopedAStatus bindPolicy(const FasPolicyContext& context,
++            FasBackendStatus* result) override {
++        if (AIBinder_getCallingUid() != kSystemUid)
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        std::scoped_lock lock(mMutex);
++        const auto permit = integrity::currentPermit();
++        if (!validContext(context) || !permit || !permit->allows(0)
++                || permit->identity != context.policyIdentity || permit->allows(integrity::kFas))
++            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
++        revokeLocked();
++        mBinding = context;
++        *result = statusLocked(context.grant);
++        return ndk::ScopedAStatus::ok();
++    }
++
++    ndk::ScopedAStatus stopWithContext(const FasPolicyContext& context,
++            FasBackendStatus* result) override {
++        if (AIBinder_getCallingUid() != kSystemUid)
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        std::scoped_lock lock(mMutex);
++        const auto permit = integrity::currentPermit();
++        if (!validContext(context) || !permit || !permit->allows(0)
++                || permit->identity != context.policyIdentity || permit->allows(integrity::kFas))
++            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
++        revokeLocked();
++        mBinding.reset();
++        *result = statusLocked(context.grant);
++        result->releaseAttempted = true;
++        return ndk::ScopedAStatus::ok();
++    }
++
++    ndk::ScopedAStatus submitVotes(const FasPolicyContext* context,
++            const std::string& policyIdentity, int64_t generation, int64_t sequence,
++            int32_t ttlMillis, const std::vector<CpuPolicyVote>& votes) {
+         const uid_t callerUid = AIBinder_getCallingUid();
+         const pid_t callerPid = AIBinder_getCallingPid();
+         if (callerUid != kSystemUid) {
+@@ -587,7 +687,9 @@ class Backend final : public BnFasBackend {
+         VoteRequest request{.generation = generation,
+                             .sequence = sequence,
+                             .ttlMillis = ttlMillis,
+-                            .policies = votes};
++                            .policies = votes,
++                            .policyIdentity = policyIdentity,
++                            .context = context ? std::optional<FasPolicyContext>(*context) : std::nullopt};
+         if (!validateRequest(request)) {
+             ALOGW("rejected malformed vote request generation=%lld sequence=%lld policies=%zu",
+                   static_cast<long long>(generation), static_cast<long long>(sequence),
+@@ -596,6 +698,11 @@ class Backend final : public BnFasBackend {
+         }
+ 
+         std::scoped_lock lock(mMutex);
++        if (!integrity::allowedForIdentity(policyIdentity, integrity::kFas)
++                || (integrity::enabled() && (!context || !boundContext(*context)))) {
++            revokeLocked();
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        }
+         prepareCallerLocked(callerPid, callerUid);
+         if (isStaleLocked(generation, sequence)) {
+             ALOGW("ignored stale vote request generation=%lld sequence=%lld",
+@@ -604,6 +711,7 @@ class Backend final : public BnFasBackend {
+         }
+         mGeneration = generation;
+         mLastSequence = sequence;
++        if (context && mBinding) mBinding->policyIdentity = context->policyIdentity;
+         mLatest = std::move(request);
+         mLastUpdate = Clock::now();
+ 
+@@ -635,6 +743,7 @@ class Backend final : public BnFasBackend {
+         mGeneration = generation;
+         mLastSequence = sequence;
+         mLatest.reset();
++        mThermal.invalidateIdleSample();
+         mPerf.release();
+         mNodes.invalidate();
+         resetCeilingStateLocked();
+@@ -643,26 +752,103 @@ class Backend final : public BnFasBackend {
+         return ndk::ScopedAStatus::ok();
+     }
+ 
++    ndk::ScopedAStatus stopWithPolicy(const std::string& policyIdentity, int32_t* result) override {
++        if (AIBinder_getCallingUid() != kSystemUid)
++            return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
++        std::scoped_lock lock(mMutex);
++        const auto current = integrity::currentPermit();
++        if (!current || current->identity != policyIdentity || current->allows(integrity::kFas))
++            return ndk::ScopedAStatus::fromExceptionCode(EX_ILLEGAL_STATE);
++        revokeLocked();
++        *result = submissionState();
++        return ndk::ScopedAStatus::ok();
++    }
++
+   private:
++    bool validContext(const FasPolicyContext& context) const {
++        return context.backendInstance == gFasBackendInstance
++                && integrity::instanceId(context.grant)
++                && integrity::instanceId(context.collectorInstance)
++                && integrity::fasInstanceHealthy(integrity::kFasBackendBoot, gFasBackendInstance)
++                && integrity::fasInstanceHealthy(integrity::kFasDaemonBoot, context.daemonInstance);
++    }
++
++    bool boundContext(const FasPolicyContext& context) const {
++        // Changing an epoch does not change the controller authority; a different
++        // controller must bind again while FAS is disabled.
++        return mBinding && validContext(context)
++                && context.policyIdentity.size() >= 50 && mBinding->policyIdentity.size() >= 50
++                && context.policyIdentity.substr(0, 50) == mBinding->policyIdentity.substr(0, 50)
++                && context.daemonInstance == mBinding->daemonInstance
++                && context.collectorInstance == mBinding->collectorInstance
++                && context.grant == mBinding->grant && context.compromise == mBinding->compromise;
++    }
++
++    FasBackendStatus statusLocked(const std::string& challenge) const {
++        FasBackendStatus result;
++        result.challenge = challenge;
++        result.backendInstance = gFasBackendInstance;
++        result.bootRecord = android::base::GetProperty(integrity::kFasBackendBoot, "");
++        result.healthy = integrity::fasInstanceHealthy(integrity::kFasBackendBoot,
++                                                      gFasBackendInstance);
++        if (mBinding) {
++            result.boundDaemonInstance = mBinding->daemonInstance;
++            result.boundCollectorInstance = mBinding->collectorInstance;
++            result.boundGrant = mBinding->grant;
++            result.accepting = boundContext(*mBinding)
++                    && integrity::allowedForIdentity(mBinding->policyIdentity, integrity::kFas);
++        }
++        const auto record = integrity::FasBootRecord::parse(result.bootRecord);
++        result.bootSubmissionState = record.valid && !record.interrupted
++                ? (record.submitted ? 1 : 0) : 2;
++        return result;
++    }
++
+     void watchdogLoop() {
+         while (mRunning) {
+             std::this_thread::sleep_for(250ms);
+             std::scoped_lock lock(mMutex);
+             const TimePoint now = Clock::now();
++            if (integrity::enabled() &&
++                (!mLatest || !mLatest->context || !boundContext(*mLatest->context)
++                    || !integrity::allowedForIdentity(mLatest->policyIdentity, integrity::kFas))) {
++                revokeLocked();
++            }
+             const bool thermalWasAllowed = mThermal.allowed();
+-            mThermal.refresh(now);
++            if (mLatest) {
++                mThermal.refresh(now);
++            } else {
++                mThermal.invalidateIdleSample();
++            }
+             const bool actualEnabled = android::base::GetBoolProperty(kEnabledProperty, true);
+             expireStaleVoteLocked(now);
+             handleSafetyTransitionsLocked(now, thermalWasAllowed, actualEnabled, true);
+         }
+     }
+ 
++    static int32_t submissionState() {
++        const int fd = open("/dev/platform_integrity", O_RDONLY | O_CLOEXEC);
++        if (fd < 0) return 2;
++        const auto status = integrity::executionEvidence(fd);
++        close(fd);
++        return status ? status->submission : 2;
++    }
++
++    void revokeLocked() {
++        mLatest.reset();
++        mThermal.invalidateIdleSample();
++        mPerf.release();
++        mNodes.invalidate();
++        resetCeilingStateLocked();
++    }
++
+     void prepareCallerLocked(pid_t callerPid, uid_t callerUid) {
+         if (mClientPid == callerPid) return;
+         if (mClientPid > 0) mPerf.release();
+         mNodes.invalidate();
+         resetCeilingStateLocked();
+         mLatest.reset();
++        mThermal.invalidateIdleSample();
+         mGeneration = 0;
+         mLastSequence = 0;
+         mClientPid = callerPid;
+@@ -697,12 +883,14 @@ class Backend final : public BnFasBackend {
+         ALOGW("vote watchdog expired generation=%lld after %d ms",
+               static_cast<long long>(mLatest->generation), mLatest->ttlMillis);
+         mLatest.reset();
++        mThermal.invalidateIdleSample();
+         mPerf.release();
+         mNodes.invalidate();
+         resetCeilingStateLocked();
+     }
+ 
+     bool applyLocked(const VoteRequest& request) {
++        if (!integrity::allowedForIdentity(request.policyIdentity, integrity::kFas)) return false;
+         mLastSubmitted.reset();
+         if (mPerf.handle() <= 0 && !mNodes.readyForNewHandle()) return false;
+         VoteRequest submitted = mExternalCeiling.reconcile(request);
+@@ -742,6 +930,7 @@ class Backend final : public BnFasBackend {
+               request.ttlMillis);
+     }
+ 
++    std::optional<FasPolicyContext> mBinding;
+     std::mutex mMutex;
+     std::atomic<bool> mRunning = true;
+     std::thread mWorker;
+@@ -763,6 +952,12 @@ class Backend final : public BnFasBackend {
+ }  // namespace android::fas::qti
+ 
+ int main() {
++    if (android::platform_integrity::enabled()
++            && !android::platform_integrity::registerFasInstance(
++                    android::platform_integrity::kFasBackendBoot,
++                    android::fas::qti::gFasBackendInstance)) {
++        ALOGE("FAS backend boot continuity unavailable; requests remain disabled");
++    }
+     ABinderProcess_setThreadPoolMaxThreadCount(2);
+     std::shared_ptr<android::fas::qti::Backend> backend =
+             ndk::SharedRefBase::make<android::fas::qti::Backend>();
+diff --git a/fasqtid/fasqtid.rc b/fasqtid/fasqtid.rc
+index 42c379f..f5f5229 100644
+--- a/fasqtid/fasqtid.rc
++++ b/fasqtid/fasqtid.rc
+@@ -1,3 +1,6 @@
++on init
++    setprop vendor.fas.integrity.boot 2:unregistered:0:0
++
+ on boot
+     # QTI perf opcodes 0x40800x00/0x40804x00 require these freq_qos-backed nodes.
+     # Some compatible kernels expose the store callbacks with read-only DAC modes.
+diff --git a/fasqtid/tests/control_model/README.md b/fasqtid/tests/control_model/README.md
+new file mode 100644
+index 0000000..f871494
+--- /dev/null
++++ b/fasqtid/tests/control_model/README.md
+@@ -0,0 +1,103 @@
++# FAS 请求期限与释放记录模型
++
++本目录属于宿主 FAS 控制链，不属于 ASTER 环境测量、分类或公共 proc 协议。
++这是正式改动 `fasqtid.cpp` 前的顺序逻辑规格，不是生产实现或硬件模拟器。
++无 Android.bp/Kbuild 接入，不进入 ROM，不访问设备、属性、真实时钟或厂商库。
++
++在 AOSP 根目录执行：
++
++```sh
++python3 -B device/xiaomi/sm8450-common/fasqtid/tests/control_model/test_model.py
++```
++
++2026-10-27 本轮只做 AST/范围/空白静态检查，共30个测试方法；**未执行以上测试**，
++未编译或上机。
++维护者运行后的结果需另行记录；用例存在不等于用例通过。
++
++## 生产源码依据
++
++- 仓库 `device/xiaomi/sm8450-common` 起点提交
++  `797e1172c78ed49191b6997fff2127977504fb01`，工作区已有未提交修改；模型不覆盖它们。
++- `fasqtid.cpp:99` 的 steady_clock 在当前 libc++ 使用 CLOCK_MONOTONIC；
++  `submitVotes` 接收后记录 mLastUpdate，`isExpiredLocked` 据此计算请求年龄。
++  热查询及安全处理仍有沿用查询前 now 的路径，厂商 acquire 接收完整 ttlMillis。
++- `PerfClient::apply` 先取得新句柄再释放旧句柄；旧释放失败只打印日志。
++  `PerfClient::release` 不论返回值均清掉当前及上一个句柄。
++- 当前请求范围250–5000ms，fasd常用1500ms；模型沿用请求范围。
++- `system/core/libplatform_integrity_host/include/platform/integrity_policy.h`
++  使用 BOOTTIME 校验宿主许可。新许可不是旧请求的续期。
++- `FasBackendStatus.releaseConfirmed` 当前保持 false；闭源客户端返回值没有提供
++  硬件完成证明。现有 host/Binder/socket 回执不在本批修改范围。
++
++## 截止时间与迟到结果
++
++`Deadlines.accept` 的 received 是后端方法入口取得的 BOOTTIME/单调时间样本，
++应在等待业务互斥锁和慢 HAL 调用之前取得。模型不证明 Binder 送达前的排队时长：
++当前协议没有发送者时间戳，不能自行添加端到端新鲜度承诺。
++received与锁内now分开：旧的有效接收样本不能误判为时钟倒退；排队时已经过期
++则不安装请求。generation/sequence按AIDL long的有符号64位范围验证。
++
++请求固定绝对截止时间，之后的锁等待、热查询、提交均消耗原预算；提交前使用
++剩余预算，不向上取整或把完整TTL重新授予厂商。若厂商要求最小提交长度，传入
++该下限，预算不足即拒绝；模型默认1ms只是算术单位，**不是已确认的厂商约定**。
++任何生产实现都还需确定整数转换及厂商持续时间契约。
++
++每个票据绑定后端实例、请求修订、generation、sequence和截止时间；旧序号不刷新
++期限，撤销或替换使旧票据失效。提交返回正句柄后再次核对当前时间、许可及温度；
++迟到成功仍保留句柄用于清理，不能因为调用方失败就丢掉实际副作用。
++此模型没有实现分布式原子提交，也不宣称消除了所有在途窗口。
++
++时钟读取失败、回退、整数耗尽使该模型实例不可用，不自动清零或恢复。BOOTTIME
++预算包含休眠，但不会自动证明恢复后的温度可用；permit/thermal布尔值是调用者
++提供的已验证事实，不是模型自行签发的许可或温度读数。热采样跨休眠失效和5秒
++观察如何接入仍待设计，不能以本模型替代恢复通知或检测机制。
++
++## 有界释放记录
++
++| 状态/事实 | 含义 |
++| --- | --- |
++| RESERVED | 已预留存储，尚未开始厂商调用；仅此时可取消槽位 |
++| ACQUIRING | 调用已开始，不能再取消记录来隐藏副作用 |
++| HELD | 返回正句柄，尚未提交释放 |
++| NEEDS_RELEASE | 调用返回成功，但原请求已失效，需要清理 |
++| RELEASING | 释放已开始，等待本次结果 |
++| RELEASE_FAILED | 释放失败或结果不明确，保留记录，不自动重试 |
++| ACQUIRE_UNKNOWN | 开始调用但未取得可信正句柄，副作用不明 |
++| submitted_releases/last_submission | 正常返回的释放提交压缩摘要，不是硬件完成 |
++
++取得新句柄前先预留槽位，旧记录占用的空间不能被直接覆盖。容量不足在厂商调用
++前拒绝，是“未执行”的计数，不冒充证据丢失或永久故障；槽位释放后可再接收。
++示例容量2/4只用于验证边界，不是正式配置。所有集合、摘要及计数均有界。
++
++正常返回的释放折叠到固定大小的计数、最后一次提交及ever_acquired标志，保留
++硬件未确认语义；不会随运行时长积累无限多成功句柄。失败记录继续占用槽位，
++候选模型暂阻止新 acquire，但仍允许释放其他已知句柄。不会把厂商TTL经过当作
++自动清除条件，也不因实例重建就获得旧实例清理完成的证明。
++
++`no_local_work` 只表示模型当前没有可处理的本地任务，不能直接映射为健康、许可、
++硬件释放完成或看门狗可停驻。它不检查宿主状态、持久证据和恢复条件。
++`hardware_release_confirmed` 始终false，不存在把unknown改成clean的接口。
++
++同一数字句柄在旧提交结束后再次出现时使用不同槽位序号；旧完成结果不能删除
++新记录。同一数字同时出现在两个尚未解决的记录中则标记所有权不明，不能盲目
++重复释放。实际厂商是否允许这类复用、是否可安全重试，仍缺少可靠接口契约。
++
++**需要在生产接入前定型的边界**：失败 acquire 返回是否保证无副作用尚未确认。
++模型暂按未知保留记录而不是直接擦除；这比现有后端更保守。失败后阻止新提交、
++解除条件、跨实例证据保存及宿主/UI反应均未接入产品，不能仅拷贝模型便视为已批准
++的运行时策略。缺失厂商完成/重试契约时应继续明确报告未知，不制造轮询查询接口。
++
++## 验收范围与后续顺序
++
++负向用例包含休眠、锁等待/慢调用、截止边界、许可/温度失效、旧票据、实例变化、
++重复/倒退序号、时钟失败、计数耗尽、存储拒绝、释放失败/无结果、句柄复用及迟到
++完成。两条释放的返回值与完成顺序还覆盖18种组合；摘要循环覆盖1000次成功提交
++后记录仍有界且从未形成硬件确认。
++
++测试都是显式顺序步骤，假定状态转移被适当串行化，不证明真实C++锁、Binder线程、
++内存序、厂商阻塞上限、定时器、回调存活或功耗。即使测试通过，也不扩大FAS许可。
++
++下一步先由维护者运行模型；确认尚未定型的失败语义后，再将deadline/记录接入
++fasqtid并做对应生产路径测试。请求年龄、热恢复与日志节流应分别选择时钟，不能
++全局替换steady_clock。条件变量、停驻谓词、退出通知和跨休眠恢复另批实施；
++本批不删除250ms看门狗、不改变活动500ms热查询、不增加唤醒源或周期扫描。
+diff --git a/fasqtid/tests/control_model/model.py b/fasqtid/tests/control_model/model.py
+new file mode 100644
+index 0000000..1f8b094
+--- /dev/null
++++ b/fasqtid/tests/control_model/model.py
+@@ -0,0 +1,235 @@
++# SPDX-License-Identifier: Apache-2.0
++"""Sequential host-control specification; no vendor calls, clocks or permissions."""
++
++from dataclasses import dataclass
++from enum import Enum, auto
++
++
++MAX_COUNTER = (1 << 64) - 1
++MAX_ORDER = (1 << 63) - 1  # AIDL long / native int64_t
++
++
++@dataclass(frozen=True)
++class Time:
++    boot_ms: int
++    mono_ms: int
++
++
++@dataclass(frozen=True)
++class Request:
++    instance: str
++    revision: int
++    generation: int
++    sequence: int
++    deadline_ms: int
++
++
++class Deadlines:
++    """BOOTTIME deadline plus local ticket; supplied booleans are external facts."""
++
++    def __init__(self, instance):
++        self.instance = instance
++        self.current = None
++        self.last_order = (-1, 0)
++        self.revision = 0
++        self.last_time = None
++        self.clock_fault = False
++
++    @staticmethod
++    def valid_time(now):
++        return (isinstance(now, Time)
++                and type(now.boot_ms) is int and type(now.mono_ms) is int
++                and 0 <= now.mono_ms <= now.boot_ms <= MAX_COUNTER)
++
++    def observe(self, now):
++        valid = self.valid_time(now)
++        if valid and self.last_time is not None:
++            valid = (now.boot_ms >= self.last_time.boot_ms
++                     and now.mono_ms >= self.last_time.mono_ms)
++        if not valid:
++            self.clock_fault = True
++            self.current = None
++            return False
++        self.last_time = now
++        return not self.clock_fault
++
++    def accept(self, generation, sequence, ttl_ms, received, *, now=None):
++        # received precedes lock acquisition. It may legitimately be older than
++        # another serialized operation's last observation; it is not "now".
++        if now is None:
++            now = received
++        if not self.observe(now):
++            return None
++        if (not self.valid_time(received) or received.boot_ms > now.boot_ms
++                or received.mono_ms > now.mono_ms):
++            self.clock_fault = True
++            self.current = None
++            return None
++        if (type(generation) is not int or type(sequence) is not int
++                or type(ttl_ms) is not int or not 0 <= generation <= MAX_ORDER
++                or not 0 < sequence <= MAX_ORDER or not 250 <= ttl_ms <= 5000):
++            return None
++        if (generation, sequence) <= self.last_order:
++            return None
++        if received.boot_ms > MAX_COUNTER - ttl_ms or self.revision == MAX_COUNTER:
++            self.clock_fault = True
++            self.current = None
++            return None
++        if received.boot_ms + ttl_ms <= now.boot_ms:
++            return None
++        self.revision += 1
++        self.last_order = (generation, sequence)
++        self.current = Request(self.instance, self.revision, generation, sequence,
++                               received.boot_ms + ttl_ms)
++        return self.current
++
++    def revoke(self):
++        # Do not reset order or clock history; old callbacks remain stale.
++        self.current = None
++
++    def budget(self, request, now, *, permit, thermal, minimum_submit_ms=1):
++        if not self.observe(now):
++            return 0
++        if (request is None or request != self.current or not permit or not thermal
++                or type(minimum_submit_ms) is not int or minimum_submit_ms <= 0):
++            return 0
++        remaining = request.deadline_ms - now.boot_ms
++        return remaining if remaining >= minimum_submit_ms else 0
++
++    def completion_requires_release(self, request, now, *, permit, thermal):
++        # Call after an acquire returned a positive handle. Rejection never
++        # erases that handle: the separate ledger must still account for it.
++        return self.budget(request, now, permit=permit, thermal=thermal) == 0
++
++
++class State(Enum):
++    RESERVED = auto()
++    ACQUIRING = auto()
++    ACQUIRE_UNKNOWN = auto()
++    HELD = auto()
++    NEEDS_RELEASE = auto()
++    RELEASING = auto()
++    RELEASE_FAILED = auto()
++
++
++@dataclass(frozen=True)
++class Slot:
++    instance: str
++    serial: int
++
++
++@dataclass
++class Record:
++    slot: Slot
++    handle: int | None = None
++    state: State = State.RESERVED
++
++
++class Releases:
++    """Bounded ownership records, not a hardware completion detector.
++
++    There is no automatic retry, TTL-based success, alarm reset or permit writer.
++    Successful release submissions fold into a bounded summary, not CLEAN.
++    """
++
++    def __init__(self, instance, capacity=4):
++        if capacity <= 0:
++            raise ValueError("positive capacity required")
++        self.instance = instance
++        self.capacity = capacity
++        self.serial = 0
++        self.records = {}
++        self.ambiguous_handles = set()
++        self.submitted_releases = 0
++        self.capacity_rejections = 0
++        self.last_submission = None
++        self.ever_acquired = False
++        self.counter_fault = False
++
++    @property
++    def unresolved(self):
++        return (self.counter_fault or bool(self.ambiguous_handles)
++                or any(r.state in (State.ACQUIRE_UNKNOWN, State.RELEASE_FAILED)
++                       for r in self.records.values()))
++
++    def reserve(self):
++        # Reserve before calling the vendor, so a returned handle always has storage.
++        if self.unresolved:
++            return None
++        if len(self.records) >= self.capacity:
++            self.capacity_rejections = min(MAX_COUNTER, self.capacity_rejections + 1)
++            return None
++        if self.serial == MAX_COUNTER:
++            self.counter_fault = True
++            return None
++        self.serial += 1
++        slot = Slot(self.instance, self.serial)
++        self.records[slot] = Record(slot)
++        return slot
++
++    def cancel_before_call(self, slot):
++        record = self.records.get(slot)
++        if record is None or record.state != State.RESERVED:
++            return False
++        del self.records[slot]
++        return True
++
++    def acquired(self, slot, handle, *, requires_release=False):
++        record = self.records.get(slot)
++        if record is None or record.state != State.ACQUIRING:
++            return False
++        if type(handle) is not int or handle <= 0:
++            # Without an established no-effect return contract, no positive
++            # handle is uncertainty, not permission to erase the operation.
++            record.state = State.ACQUIRE_UNKNOWN
++            return False
++        duplicate = any(r.handle == handle for r in self.records.values() if r is not record)
++        record.handle = handle
++        record.state = State.NEEDS_RELEASE if requires_release else State.HELD
++        self.ever_acquired = True
++        if duplicate:
++            # Ownership is ambiguous. Do not issue blind releases using a reused ID.
++            self.ambiguous_handles.add(handle)
++        return not duplicate
++
++    def start_acquire(self, slot):
++        record = self.records.get(slot)
++        if record is None or record.state != State.RESERVED or self.unresolved:
++            return False
++        record.state = State.ACQUIRING
++        return True
++
++    def start_release(self, slot):
++        record = self.records.get(slot)
++        if (record is None or record.state not in (State.HELD, State.NEEDS_RELEASE)
++                or record.handle in self.ambiguous_handles):
++            return None
++        record.state = State.RELEASING
++        return slot
++
++    def finish_release(self, ticket, result):
++        record = self.records.get(ticket)
++        if record is None or record.state != State.RELEASING:
++            return False
++        if type(result) is not int or result < 0:
++            # None models a missing/ambiguous result, not a completed release.
++            record.state = State.RELEASE_FAILED
++            return True
++        if self.submitted_releases == MAX_COUNTER:
++            self.counter_fault = True
++            record.state = State.RELEASE_FAILED
++            return True
++        self.submitted_releases += 1
++        self.last_submission = (ticket, record.handle, result)
++        del self.records[ticket]
++        return True
++
++    @property
++    def no_local_work(self):
++        # A scheduling fact only. It cannot be used as hardware release confirmation.
++        return not self.records and not self.unresolved
++
++    @property
++    def hardware_release_confirmed(self):
++        # No completion interface exists in this model or the current backend.
++        return False
+diff --git a/fasqtid/tests/control_model/test_model.py b/fasqtid/tests/control_model/test_model.py
+new file mode 100644
+index 0000000..e8d6c66
+--- /dev/null
++++ b/fasqtid/tests/control_model/test_model.py
+@@ -0,0 +1,285 @@
++# SPDX-License-Identifier: Apache-2.0
++"""No device I/O or compilation. Run explicitly, never imported by the product."""
++
++import unittest
++from itertools import permutations, product
++
++from model import Deadlines, MAX_COUNTER, MAX_ORDER, Releases, State, Time
++
++
++class DeadlineTests(unittest.TestCase):
++    def setUp(self):
++        self.model = Deadlines("backend-A")
++        self.request = self.model.accept(1, 1, 1500, Time(1000, 1000))
++
++    def budget(self, now, **kwargs):
++        return self.model.budget(self.request, now, permit=True, thermal=True, **kwargs)
++
++    def test_lock_and_hal_delay_consume_original_budget(self):
++        self.assertEqual(900, self.budget(Time(1600, 1600)))
++        self.assertEqual(100, self.budget(Time(2400, 2400)))
++        self.assertEqual(0, self.budget(Time(2500, 2500)))
++
++    def test_queued_receipt_is_not_a_clock_regression_or_a_new_deadline(self):
++        self.budget(Time(1800, 1800))
++        replacement = self.model.accept(1, 2, 1500, Time(1100, 1100), now=Time(2000, 2000))
++        self.assertFalse(self.model.clock_fault)
++        self.assertEqual(2600, replacement.deadline_ms)
++        self.assertEqual(600, self.model.budget(replacement, Time(2000, 2000),
++                                              permit=True, thermal=True))
++
++    def test_request_expired_while_waiting_for_lock_is_not_installed(self):
++        self.assertIsNone(self.model.accept(1, 2, 1500, Time(1100, 1100),
++                                            now=Time(3000, 3000)))
++        self.assertFalse(self.model.clock_fault)
++        self.assertEqual(self.request, self.model.current)
++        self.assertEqual(0, self.budget(Time(3000, 3000)))
++
++    def test_suspend_time_expires_old_request_despite_fresh_permit(self):
++        self.assertEqual(0, self.budget(Time(10000, 1100)))
++
++    def test_short_suspend_consumes_budget_without_claiming_thermal_freshness(self):
++        self.assertEqual(1200, self.budget(Time(1300, 1100)))
++        self.assertEqual(0, self.model.budget(self.request, Time(1300, 1100),
++                                            permit=True, thermal=False))
++
++    def test_vendor_minimum_never_rounds_budget_up(self):
++        self.assertEqual(0, self.budget(Time(2400, 2400), minimum_submit_ms=250))
++
++    def test_completion_after_deadline_requires_release(self):
++        self.assertEqual(100, self.budget(Time(2400, 2400)))
++        self.assertTrue(self.model.completion_requires_release(
++            self.request, Time(2501, 2501), permit=True, thermal=True))
++
++    def test_revoked_or_superseded_callback_cannot_restore_request(self):
++        self.model.revoke()
++        self.assertEqual(0, self.budget(Time(1100, 1100)))
++        replacement = self.model.accept(1, 2, 1500, Time(1200, 1200))
++        self.assertIsNotNone(replacement)
++        self.assertTrue(self.model.completion_requires_release(
++            self.request, Time(1300, 1300), permit=True, thermal=True))
++        self.assertEqual(replacement, self.model.current)
++
++    def test_duplicate_and_regressed_order_do_not_refresh_deadline(self):
++        for generation, sequence in [(1, 1), (0, 99), (1, 0)]:
++            with self.subTest(order=(generation, sequence)):
++                self.assertIsNone(self.model.accept(generation, sequence, 5000, Time(1200, 1200)))
++                self.assertEqual(self.request, self.model.current)
++        self.assertEqual(0, self.budget(Time(2500, 2500)))
++
++    def test_valid_completion_still_requires_current_permit_and_temperature(self):
++        self.assertFalse(self.model.completion_requires_release(
++            self.request, Time(1200, 1200), permit=True, thermal=True))
++        for permit, thermal in [(False, True), (True, False), (False, False)]:
++            self.assertTrue(self.model.completion_requires_release(
++                self.request, Time(1200, 1200), permit=permit, thermal=thermal))
++
++    def test_clock_failure_and_regression_latch_unavailable(self):
++        for invalid in [None, Time(999, 999), Time(1100, 999), Time(1000, 1001),
++                        Time(-1, -1), Time(True, 0), Time(MAX_COUNTER + 1, 1000)]:
++            with self.subTest(invalid=invalid):
++                model = Deadlines("backend-A")
++                request = model.accept(1, 1, 1500, Time(1000, 1000))
++                self.assertEqual(0, model.budget(request, invalid, permit=True, thermal=True))
++                self.assertTrue(model.clock_fault)
++                self.assertIsNone(model.accept(1, 2, 1500, Time(2000, 2000)))
++
++    def test_deadline_and_revision_overflow_never_wrap(self):
++        model = Deadlines("backend-A")
++        self.assertIsNone(model.accept(1, 1, 1500, Time(MAX_COUNTER - 100, 1000)))
++        self.assertTrue(model.clock_fault)
++        model = Deadlines("backend-A")
++        model.revision = MAX_COUNTER
++        self.assertIsNone(model.accept(1, 1, 1500, Time(1000, 1000)))
++
++    def test_other_backend_ticket_is_not_authority(self):
++        other = Deadlines("backend-B")
++        other.accept(1, 1, 1500, Time(1000, 1000))
++        self.assertEqual(0, other.budget(self.request, Time(1100, 1100),
++                                       permit=True, thermal=True))
++
++    def test_invalid_ttl_cannot_replace_live_request(self):
++        for ttl in [0, 249, 5001, True]:
++            self.assertIsNone(self.model.accept(1, 2, ttl, Time(1100, 1100)))
++            self.assertEqual(self.request, self.model.current)
++
++    def test_order_is_bounded_by_signed_aidl_long(self):
++        self.assertIsNone(self.model.accept(MAX_ORDER + 1, 1, 1500, Time(1100, 1100)))
++        self.assertIsNone(self.model.accept(1, MAX_ORDER + 1, 1500, Time(1100, 1100)))
++        self.assertEqual(self.request, self.model.current)
++
++
++class ReleaseTests(unittest.TestCase):
++    def setUp(self):
++        self.model = Releases("backend-A", capacity=2)
++
++    def hold(self, handle, **kwargs):
++        slot = self.model.reserve()
++        self.assertIsNotNone(slot)
++        self.assertTrue(self.model.start_acquire(slot))
++        self.assertTrue(self.model.acquired(slot, handle, **kwargs))
++        return slot
++
++    def test_release_submission_is_not_hardware_confirmation(self):
++        slot = self.hold(10)
++        self.assertTrue(self.model.finish_release(self.model.start_release(slot), 0))
++        self.assertTrue(self.model.no_local_work)
++        self.assertFalse(self.model.hardware_release_confirmed)
++        self.assertTrue(self.model.ever_acquired)
++        self.assertEqual(1, self.model.submitted_releases)
++
++    def test_failed_retirement_keeps_both_handles_and_blocks_new_submission(self):
++        old = self.hold(10)
++        new = self.hold(20)
++        self.model.finish_release(self.model.start_release(old), -1)
++        self.assertEqual(State.RELEASE_FAILED, self.model.records[old].state)
++        self.assertEqual(State.HELD, self.model.records[new].state)
++        self.assertIsNone(self.model.reserve())
++        self.assertIsNone(self.model.start_release(old))  # no unapproved retry
++        self.assertFalse(self.model.no_local_work)
++        self.model.finish_release(self.model.start_release(new), 0)
++        self.assertIn(old, self.model.records)
++
++    def test_missing_result_is_not_success_or_retry_permission(self):
++        slot = self.hold(10)
++        self.model.finish_release(self.model.start_release(slot), None)
++        self.assertTrue(self.model.unresolved)
++        self.assertFalse(self.model.no_local_work)
++        self.assertIsNone(self.model.start_release(slot))
++
++    def test_capacity_refusal_happens_before_vendor_call_without_erasing_records(self):
++        first = self.hold(10)
++        second = self.hold(20)
++        self.assertIsNone(self.model.reserve())
++        self.assertEqual({first, second}, set(self.model.records))
++        self.assertEqual(1, self.model.capacity_rejections)
++        self.assertFalse(self.model.unresolved)  # refused work is not lost evidence
++        self.model.finish_release(self.model.start_release(first), 0)
++        self.assertIsNotNone(self.model.reserve())
++
++    def test_late_duplicate_completion_cannot_clear_reused_handle(self):
++        old = self.hold(10)
++        ticket = self.model.start_release(old)
++        self.model.finish_release(ticket, 0)
++        new = self.hold(10)
++        self.assertNotEqual(old, new)
++        self.assertFalse(self.model.finish_release(ticket, 0))
++        self.assertIn(new, self.model.records)
++
++    def test_simultaneous_duplicate_handle_is_ambiguous(self):
++        old = self.hold(10)
++        slot = self.model.reserve()
++        self.assertTrue(self.model.start_acquire(slot))
++        self.assertFalse(self.model.acquired(slot, 10))
++        self.assertEqual(2, len(self.model.records))
++        self.assertTrue(self.model.unresolved)
++        self.assertIsNone(self.model.start_release(old))
++        self.assertIsNone(self.model.start_release(slot))
++
++    def test_stale_acquire_success_still_needs_a_cleanup_record(self):
++        slot = self.hold(10, requires_release=True)
++        self.assertEqual(State.NEEDS_RELEASE, self.model.records[slot].state)
++        self.assertFalse(self.model.no_local_work)
++        self.assertIsNotNone(self.model.start_release(slot))
++
++    def test_reserved_and_inflight_work_are_not_idle(self):
++        slot = self.model.reserve()
++        self.assertFalse(self.model.no_local_work)
++        self.model.start_acquire(slot)
++        self.assertFalse(self.model.cancel_before_call(slot))
++        self.model.acquired(slot, 10)
++        self.model.start_release(slot)
++        self.assertFalse(self.model.no_local_work)
++        self.assertIsNone(self.model.start_release(slot))
++
++    def test_cancel_is_only_valid_before_vendor_call(self):
++        slot = self.model.reserve()
++        self.assertTrue(self.model.cancel_before_call(slot))
++        held = self.hold(10)
++        self.assertFalse(self.model.cancel_before_call(held))
++
++    def test_failed_acquire_keeps_old_handle_and_unknown_operation(self):
++        old = self.hold(10)
++        slot = self.model.reserve()
++        self.assertTrue(self.model.start_acquire(slot))
++        self.assertFalse(self.model.acquired(slot, None))
++        self.assertEqual(State.HELD, self.model.records[old].state)
++        self.assertEqual(State.ACQUIRE_UNKNOWN, self.model.records[slot].state)
++        self.assertTrue(self.model.unresolved)
++        self.assertIsNone(self.model.reserve())
++        self.assertFalse(self.model.cancel_before_call(slot))
++
++    def test_other_instance_cannot_complete_release(self):
++        slot = self.hold(10)
++        ticket = self.model.start_release(slot)
++        other = Releases("backend-B")
++        other_slot = other.reserve()
++        other.start_acquire(other_slot)
++        other.acquired(other_slot, 10)
++        other.start_release(other_slot)
++        self.assertFalse(other.finish_release(ticket, 0))
++        self.assertIn(other_slot, other.records)
++
++    def test_summary_is_bounded_without_promoting_unknown_to_clean(self):
++        for _ in range(1000):
++            slot = self.hold(10)
++            self.model.finish_release(self.model.start_release(slot), 0)
++            self.assertEqual(0, len(self.model.records))
++        self.assertEqual(1000, self.model.submitted_releases)
++        self.assertFalse(self.model.hardware_release_confirmed)
++        self.assertEqual(3, len(self.model.last_submission))
++
++    def test_counters_never_wrap_or_forget_pending_work(self):
++        self.model.serial = MAX_COUNTER
++        self.assertIsNone(self.model.reserve())
++        self.assertTrue(self.model.unresolved)
++        model = Releases("other")
++        slot = model.reserve()
++        model.start_acquire(slot)
++        model.acquired(slot, 10)
++        model.submitted_releases = MAX_COUNTER
++        model.finish_release(model.start_release(slot), 0)
++        self.assertIn(slot, model.records)
++        self.assertTrue(model.unresolved)
++
++    def test_release_result_order_preserves_each_unresolved_record(self):
++        for results in product((0, -1, None), repeat=2):
++            for order in permutations((0, 1)):
++                with self.subTest(results=results, order=order):
++                    model = Releases("backend-A", capacity=2)
++                    slots = []
++                    for handle in (10, 20):
++                        slot = model.reserve()
++                        model.start_acquire(slot)
++                        model.acquired(slot, handle)
++                        model.start_release(slot)
++                        slots.append(slot)
++                    for i in order:
++                        self.assertTrue(model.finish_release(slots[i], results[i]))
++                    for i, result in enumerate(results):
++                        self.assertEqual(result != 0, slots[i] in model.records)
++                    self.assertEqual(all(r == 0 for r in results), model.no_local_work)
++                    self.assertFalse(model.hardware_release_confirmed)
++
++
++class CombinedTests(unittest.TestCase):
++    def test_suspend_during_acquire_keeps_late_success_for_release(self):
++        deadlines = Deadlines("backend-A")
++        releases = Releases("backend-A")
++        request = deadlines.accept(1, 1, 1500, Time(1000, 1000))
++        self.assertEqual(1400, deadlines.budget(request, Time(1100, 1100),
++                                              permit=True, thermal=True))
++        slot = releases.reserve()
++        self.assertTrue(releases.start_acquire(slot))
++        requires_release = deadlines.completion_requires_release(
++            request, Time(9000, 1150), permit=True, thermal=True)
++        self.assertTrue(requires_release)
++        releases.acquired(slot, 10, requires_release=requires_release)
++        self.assertEqual(State.NEEDS_RELEASE, releases.records[slot].state)
++        releases.finish_release(releases.start_release(slot), -1)
++        self.assertFalse(releases.no_local_work)
++        self.assertIsNone(releases.reserve())
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/fasqtid/vendor.performance.fas-service.xml b/fasqtid/vendor.performance.fas-service.xml
+index 97f1352..3e6ba0c 100644
+--- a/fasqtid/vendor.performance.fas-service.xml
++++ b/fasqtid/vendor.performance.fas-service.xml
+@@ -6,7 +6,7 @@
+ <manifest version="1.0" type="device">
+     <hal format="aidl">
+         <name>vendor.performance.fas</name>
+-        <version>1</version>
++        <version>3</version>
+         <fqname>IFasBackend/default</fqname>
+     </hal>
+ </manifest>
+diff --git a/sepolicy/vendor/fasqtid.te b/sepolicy/vendor/fasqtid.te
+index a1befbd..ef6f31c 100644
+--- a/sepolicy/vendor/fasqtid.te
++++ b/sepolicy/vendor/fasqtid.te
+@@ -21,3 +21,11 @@ set_prop(fasqtid, vendor_fas_prepare_prop)
+ 
+ # Inspect only ownership and mode bits before asking vendor init to repair the QTI perf nodes.
+ allow fasqtid vendor_sysfs_msm_perf:file getattr;
++
++get_prop(fasqtid, platform_integrity_config_prop)
++get_prop(fasqtid, platform_integrity_policy_prop)
++allow fasqtid platform_integrity_device:chr_file { open read write getattr ioctl };
++allowxperm fasqtid platform_integrity_device:chr_file ioctl { 0x4970 0x4975 0x4984 };
++
++set_prop(fasqtid, vendor_fas_integrity_boot_prop)
++get_prop(fasqtid, platform_integrity_fasd_boot_prop)
+diff --git a/sepolicy/vendor/init.te b/sepolicy/vendor/init.te
+index 0c9b482..5b91a93 100644
+--- a/sepolicy/vendor/init.te
++++ b/sepolicy/vendor/init.te
+@@ -7,3 +7,5 @@ set_prop(vendor_init, vendor_qcc_prop)
+ recovery_only(`
+ allow init proc:file write;
+ ')
++
++set_prop(vendor_init, vendor_fas_integrity_boot_prop)
+diff --git a/sepolicy/vendor/property.te b/sepolicy/vendor/property.te
+index 0ede2dc..f470ef2 100644
+--- a/sepolicy/vendor/property.te
++++ b/sepolicy/vendor/property.te
+@@ -23,3 +23,5 @@ vendor_public_prop(vendor_panel_info_prop)
+ 
+ # Thermal
+ vendor_public_prop(vendor_thermal_normal_prop)
++
++vendor_internal_prop(vendor_fas_integrity_boot_prop)
+diff --git a/sepolicy/vendor/property_contexts b/sepolicy/vendor/property_contexts
+index 6dc4bdc..5cf9a84 100644
+--- a/sepolicy/vendor/property_contexts
++++ b/sepolicy/vendor/property_contexts
+@@ -39,3 +39,5 @@ vendor.sys.rpmb_state u:object_r:vendor_payment_security_prop:s0
+ 
+ # Thermal
+ vendor.sys.thermal.data.path u:object_r:vendor_thermal_normal_prop:s0
++
++vendor.fas.integrity.boot u:object_r:vendor_fas_integrity_boot_prop:s0 exact string
+-- 
+2.43.0
+
