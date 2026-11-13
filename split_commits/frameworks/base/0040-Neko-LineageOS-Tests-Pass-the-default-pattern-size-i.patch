@@ -1,0 +1,65 @@
+From 27737329f573e2cd8bb12e4d0fb410346de09fdd Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 7 Nov 2026 19:15:28 +0800
+Subject: [PATCH] Neko LineageOS: [Tests] Pass the default pattern size in
+ locksettings helpers
+
+Update the pattern-credential helpers in SoftwareRateLimiterTest,
+KeySyncTaskTest and TestOnlyInsecureCertificateHelperTest to pass
+PATTERN_SIZE_DEFAULT to byteArrayToPattern and createPattern.
+
+Keep the existing test patterns while matching the current size-aware APIs.
+
+Change-Id: Ied4a7cb65b02e0c5bc4f38b863aa27162322f6bb
+---
+ .../android/server/locksettings/SoftwareRateLimiterTest.java  | 4 +++-
+ .../locksettings/recoverablekeystore/KeySyncTaskTest.java     | 4 +++-
+ .../TestOnlyInsecureCertificateHelperTest.java                | 4 +++-
+ 3 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/services/tests/servicestests/src/com/android/server/locksettings/SoftwareRateLimiterTest.java b/services/tests/servicestests/src/com/android/server/locksettings/SoftwareRateLimiterTest.java
+index 7d3dc883f..953ad9a8f 100644
+--- a/services/tests/servicestests/src/com/android/server/locksettings/SoftwareRateLimiterTest.java
++++ b/services/tests/servicestests/src/com/android/server/locksettings/SoftwareRateLimiterTest.java
+@@ -601,7 +601,9 @@ public class SoftwareRateLimiterTest {
+ 
+     private LockscreenCredential newPattern(String pattern) {
+         return LockscreenCredential.createPattern(
+-                LockPatternUtils.byteArrayToPattern(pattern.getBytes()));
++                LockPatternUtils.byteArrayToPattern(
++                        pattern.getBytes(), LockPatternUtils.PATTERN_SIZE_DEFAULT),
++                LockPatternUtils.PATTERN_SIZE_DEFAULT);
+     }
+ 
+     private LockscreenCredential newPassword(String password) {
+diff --git a/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/KeySyncTaskTest.java b/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/KeySyncTaskTest.java
+index dbdb70bcb..2ac083e84 100644
+--- a/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/KeySyncTaskTest.java
++++ b/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/KeySyncTaskTest.java
+@@ -974,6 +974,8 @@ public class KeySyncTaskTest {
+ 
+     private static LockscreenCredential createPattern(String patternString) {
+         return LockscreenCredential.createPattern(
+-                LockPatternUtils.byteArrayToPattern(patternString.getBytes()));
++                LockPatternUtils.byteArrayToPattern(
++                        patternString.getBytes(), LockPatternUtils.PATTERN_SIZE_DEFAULT),
++                LockPatternUtils.PATTERN_SIZE_DEFAULT);
+     }
+ }
+diff --git a/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/TestOnlyInsecureCertificateHelperTest.java b/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/TestOnlyInsecureCertificateHelperTest.java
+index 335155bb9..eace504cb 100644
+--- a/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/TestOnlyInsecureCertificateHelperTest.java
++++ b/services/tests/servicestests/src/com/android/server/locksettings/recoverablekeystore/TestOnlyInsecureCertificateHelperTest.java
+@@ -160,6 +160,8 @@ public class TestOnlyInsecureCertificateHelperTest {
+ 
+     private static LockscreenCredential createPattern(String patternString) {
+         return LockscreenCredential.createPattern(
+-                LockPatternUtils.byteArrayToPattern(patternString.getBytes()));
++                LockPatternUtils.byteArrayToPattern(
++                        patternString.getBytes(), LockPatternUtils.PATTERN_SIZE_DEFAULT),
++                LockPatternUtils.PATTERN_SIZE_DEFAULT);
+     }
+ }
+-- 
+2.43.0
+
