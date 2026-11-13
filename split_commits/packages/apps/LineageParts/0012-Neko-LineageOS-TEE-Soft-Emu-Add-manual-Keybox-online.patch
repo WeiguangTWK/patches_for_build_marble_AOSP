@@ -1,0 +1,1264 @@
+From 73074802c0dd3a0ea1859a66a1847bc2edda310f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 16:41:43 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu] Add manual Keybox online
+ updates for TEE Soft Emu
+
+Add an Advanced page with a user-defined update URL, RAW and Base64
+content modes, and the latest update result. Leave the source unset
+and provide no bundled sources or example URLs.
+
+Share configuration management between both pages, preserving unrelated
+fields when saving. Route local imports and online updates through a
+single background worker with bounded downloads, lightweight XML and
+required-field checks, and atomic file replacement with rollback on
+configuration activation failure.
+
+Change-Id: If393a01465ca8a36578d29deb735c09cfa1fdb2c
+---
+ AndroidManifest.xml                           |   2 +
+ docs/tee-soft-keybox-update.md                |  57 ++++
+ proguard.flags                                |   5 +
+ res/values-zh-rCN/tee_soft_update_strings.xml |  23 ++
+ res/values-zh-rTW/tee_soft_update_strings.xml |  23 ++
+ res/values/tee_soft_update_strings.xml        |  31 +++
+ res/xml/tee_soft_advanced_settings.xml        |  33 +++
+ res/xml/tee_soft_debug_settings.xml           |   5 +
+ .../lineageparts/teedebug/KeyboxUpdater.java  | 248 ++++++++++++++++++
+ .../teedebug/KeyboxXmlValidator.java          | 107 ++++++++
+ .../teedebug/TeeSoftAdvancedSettings.java     | 161 ++++++++++++
+ .../teedebug/TeeSoftDebugConfig.java          |  91 +++++++
+ .../teedebug/TeeSoftDebugSettings.java        | 237 ++++-------------
+ 13 files changed, 837 insertions(+), 186 deletions(-)
+ create mode 100644 docs/tee-soft-keybox-update.md
+ create mode 100644 res/values-zh-rCN/tee_soft_update_strings.xml
+ create mode 100644 res/values-zh-rTW/tee_soft_update_strings.xml
+ create mode 100644 res/values/tee_soft_update_strings.xml
+ create mode 100644 res/xml/tee_soft_advanced_settings.xml
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/KeyboxXmlValidator.java
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/TeeSoftDebugConfig.java
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 659c247..432c6d6 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -10,6 +10,7 @@
+     android:versionCode="1"
+     android:versionName="1.0">
+ 
++    <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.WRITE_MEDIA_STORAGE" />
+     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+@@ -34,6 +35,7 @@
+         android:defaultToDeviceProtectedStorage="true"
+         android:directBootAware="true"
+         android:hardwareAccelerated="true"
++        android:usesCleartextTraffic="true"
+         android:icon="@mipmap/ic_launcher"
+         android:label="@string/lineageparts_title"
+         android:supportsRtl="true"
+diff --git a/docs/tee-soft-keybox-update.md b/docs/tee-soft-keybox-update.md
+new file mode 100644
+index 0000000..f407f94
+--- /dev/null
++++ b/docs/tee-soft-keybox-update.md
+@@ -0,0 +1,57 @@
++# TEE Soft Emu Keybox online update
++
++## Scope and agreed behavior
++
++- Advanced child page in LineageParts; user-entered HTTP/HTTPS URL starts empty.
++  No bundled source, example URL or URL hint. RAW is the default; Base64 is explicit.
++- Manual updates only. No scheduler, boot receiver, retry loop or RKP changes.
++- Downloads and local imports share a process-wide worker and installation path.
++  Both use installation-time XML/required-field checks only, not cryptographic validation.
++- Existing Keystore2/PureSoft generation, material consumption and ASTER gates stay unchanged.
++  Updating material does not enable TEE Soft Emu or rewrite existing keys/certificates.
++
++## Implementation
++
++- `TeeSoftDebugConfig`: synchronized read/merge/atomic write of config.conf. Each page writes
++  only its own fields; installation owns keybox_path. Unknown key/value fields survive edits.
++- `KeyboxUpdater`: one active import/update across page recreation, bounded HTTP download,
++  explicit Base64 decoding, shared validation and keybox.xml installation.
++- `KeyboxXmlValidator`: UTF-8, one complete XML document, at least one Key with nonempty
++  PrivateKey and Certificate. Also accepts an ungrouped legacy document with both fields.
++  Optional count, device ID and algorithm metadata are not required. Mixed or incomplete
++  sibling groups cannot contribute fields to one another. XML comments are accepted;
++  DTDs, nested Key entries and nested payload elements are rejected. CDATA/entity payloads
++  are rejected because the existing consumer extracts literal tag contents.
++- Per response/XML limit: 1 MiB; XML depth: 64; token count: 100000. Base64 permits spaces,
++  tabs and CR/LF; invalid alphabet content fails. HTTP requires status 200, at most five
++  redirects, 15-second connection/read timeouts and a 60-second elapsed-time budget checked
++  between blocking calls. An in-progress blocking call may exceed that budget by its timeout.
++  HTTPS redirects cannot downgrade to HTTP. Userinfo and URL fragments are not accepted.
++- Installation writes, sets existing 0644 permissions, syncs and renames a same-directory
++  temporary file. A backup copy restores the previous file if subsequent config activation
++  fails. Normal completion removes temporary files. Config and material are separate files:
++  this is not a crash-atomic transaction across both, and abrupt process/device termination
++  can leave a temporary/backup file. Failed rollback preserves its backup for recovery.
++- Result codes persist separately from the last successful update timestamp. No user URL,
++  response or private key is logged. Success means material was installed, not that its
++  signatures are valid or that attestation will be accepted.
++- Manifest adds INTERNET and permits HTTP for user-defined sources. Existing system_app
++  networking and adbroot file create/rename policies cover these operations; no new policy
++  or Keystore2 IPC is introduced.
++
++## Static verification (2026-11-13)
++
++- Java tree-sitter syntax parsing: passed for all five teedebug Java files.
++- Manifest, preference XML and all three new locale resource files: XML parsing passed.
++- Resource references, fragment navigation/retention, API availability, existing file/network
++  SELinux permissions and failure/concurrency paths: checked statically.
++- Whitespace check: git diff --check passed.
++- No compilation, executable behavior tests, network fetch or device verification performed.
++
++## Remaining runtime validation
++
++After a future build: RAW/Base64 success, download/decode/XML rejection preserving old
++material, write/config activation failures and rollback, config field preservation across
++both pages, local/network exclusion, recreation/back navigation during a job, SELinux
++access and subsequent Keystore2 consumption. Structural validation deliberately cannot
++reject all unusable cryptographic material.
+diff --git a/proguard.flags b/proguard.flags
+index 36f29e8..1efaa5d 100644
+--- a/proguard.flags
++++ b/proguard.flags
+@@ -43,3 +43,8 @@
+     public static ** SEARCH_INDEX_DATA_PROVIDER;
+     public static ** SUMMARY_PROVIDER;
+ }
++
++# Advanced TEE page is opened from a preference XML through reflection.
++-keep class org.lineageos.lineageparts.teedebug.TeeSoftAdvancedSettings {
++    public <init>();
++}
+diff --git a/res/values-zh-rCN/tee_soft_update_strings.xml b/res/values-zh-rCN/tee_soft_update_strings.xml
+new file mode 100644
+index 0000000..674dcbe
+--- /dev/null
++++ b/res/values-zh-rCN/tee_soft_update_strings.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="tee_soft_advanced_title">高级</string>
++    <string name="tee_soft_update_title">Keybox 联网更新</string>
++    <string name="tee_soft_update_url_title">更新源 URL</string>
++    <string name="tee_soft_update_url_unset">尚未配置</string>
++    <string name="tee_soft_update_format_title">内容格式</string>
++    <string name="tee_soft_update_now">立即更新</string>
++    <string name="tee_soft_update_result_title">最近联网更新结果</string>
++    <string name="tee_soft_update_busy">正在导入或更新 Keybox</string>
++    <string name="tee_soft_update_invalid_url">请输入有效的 HTTP 或 HTTPS URL，不包含登录凭据或片段标识</string>
++    <string name="tee_soft_update_success">Keybox 已更新</string>
++    <string name="tee_soft_update_success_at">Keybox 已更新：%1$s</string>
++    <string name="tee_soft_update_error_download">下载失败：请检查更新源、网络连接及响应大小</string>
++    <string name="tee_soft_update_error_decode">更新失败：响应内容无法解码为 Base64</string>
++    <string name="tee_soft_update_error_xml">更新失败：Keybox XML 格式无效或缺少必要字段</string>
++    <string name="tee_soft_update_error_save">无法保存 Keybox 设置或材料</string>
++    <string name="tee_soft_update_error_config">无法读取 Keybox 设置</string>
++</resources>
+diff --git a/res/values-zh-rTW/tee_soft_update_strings.xml b/res/values-zh-rTW/tee_soft_update_strings.xml
+new file mode 100644
+index 0000000..84238f3
+--- /dev/null
++++ b/res/values-zh-rTW/tee_soft_update_strings.xml
+@@ -0,0 +1,23 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="tee_soft_advanced_title">進階</string>
++    <string name="tee_soft_update_title">Keybox 線上更新</string>
++    <string name="tee_soft_update_url_title">更新來源 URL</string>
++    <string name="tee_soft_update_url_unset">尚未設定</string>
++    <string name="tee_soft_update_format_title">內容格式</string>
++    <string name="tee_soft_update_now">立即更新</string>
++    <string name="tee_soft_update_result_title">最近線上更新結果</string>
++    <string name="tee_soft_update_busy">正在匯入或更新 Keybox</string>
++    <string name="tee_soft_update_invalid_url">請輸入有效的 HTTP 或 HTTPS URL，不包含登入憑證或片段識別碼</string>
++    <string name="tee_soft_update_success">Keybox 已更新</string>
++    <string name="tee_soft_update_success_at">Keybox 已更新：%1$s</string>
++    <string name="tee_soft_update_error_download">下載失敗：請檢查更新來源、網路連線及回應大小</string>
++    <string name="tee_soft_update_error_decode">更新失敗：回應內容無法解碼為 Base64</string>
++    <string name="tee_soft_update_error_xml">更新失敗：Keybox XML 格式無效或缺少必要欄位</string>
++    <string name="tee_soft_update_error_save">無法儲存 Keybox 設定或材料</string>
++    <string name="tee_soft_update_error_config">無法讀取 Keybox 設定</string>
++</resources>
+diff --git a/res/values/tee_soft_update_strings.xml b/res/values/tee_soft_update_strings.xml
+new file mode 100644
+index 0000000..142f0b2
+--- /dev/null
++++ b/res/values/tee_soft_update_strings.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="tee_soft_advanced_title">Advanced</string>
++    <string name="tee_soft_update_title">Keybox online update</string>
++    <string name="tee_soft_update_url_title">Update source URL</string>
++    <string name="tee_soft_update_url_unset">Not configured</string>
++    <string name="tee_soft_update_format_title">Content format</string>
++    <string name="tee_soft_update_now">Update now</string>
++    <string name="tee_soft_update_result_title">Last online update result</string>
++    <string name="tee_soft_update_busy">A Keybox import or update is in progress</string>
++    <string name="tee_soft_update_invalid_url">Enter a valid HTTP or HTTPS URL without credentials or a fragment</string>
++    <string name="tee_soft_update_success">Keybox updated</string>
++    <string name="tee_soft_update_success_at">Keybox updated: %1$s</string>
++    <string name="tee_soft_update_error_download">Download failed: check the source, connection and response size</string>
++    <string name="tee_soft_update_error_decode">Update failed: the response could not be decoded as Base64</string>
++    <string name="tee_soft_update_error_xml">Update failed: invalid Keybox XML or missing required fields</string>
++    <string name="tee_soft_update_error_save">Could not save Keybox settings or material</string>
++    <string name="tee_soft_update_error_config">Could not read Keybox settings</string>
++    <string-array name="tee_soft_update_format_entries" translatable="false">
++        <item>RAW</item>
++        <item>Base64</item>
++    </string-array>
++    <string-array name="tee_soft_update_format_values" translatable="false">
++        <item>raw</item>
++        <item>base64</item>
++    </string-array>
++</resources>
+diff --git a/res/xml/tee_soft_advanced_settings.xml b/res/xml/tee_soft_advanced_settings.xml
+new file mode 100644
+index 0000000..bb7c0b9
+--- /dev/null
++++ b/res/xml/tee_soft_advanced_settings.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
++    android:key="tee_soft_advanced"
++    android:title="@string/tee_soft_advanced_title">
++
++    <PreferenceCategory android:title="@string/tee_soft_update_title">
++        <EditTextPreference
++            android:key="tee_soft_update_url"
++            android:title="@string/tee_soft_update_url_title"
++            android:dialogTitle="@string/tee_soft_update_url_title"
++            android:persistent="false" />
++
++        <ListPreference
++            android:key="tee_soft_update_format"
++            android:title="@string/tee_soft_update_format_title"
++            android:entries="@array/tee_soft_update_format_entries"
++            android:entryValues="@array/tee_soft_update_format_values"
++            android:persistent="false" />
++
++        <Preference
++            android:key="tee_soft_update_now"
++            android:title="@string/tee_soft_update_now" />
++
++        <Preference
++            android:key="tee_soft_update_result"
++            android:title="@string/tee_soft_update_result_title"
++            android:selectable="false" />
++    </PreferenceCategory>
++</PreferenceScreen>
+diff --git a/res/xml/tee_soft_debug_settings.xml b/res/xml/tee_soft_debug_settings.xml
+index b996c13..7036fdf 100644
+--- a/res/xml/tee_soft_debug_settings.xml
++++ b/res/xml/tee_soft_debug_settings.xml
+@@ -26,6 +26,11 @@
+         android:summary="@string/tee_soft_debug_keybox_path_summary"
+         android:dependency="tee_soft_debug_enabled" />
+ 
++    <Preference
++        android:key="tee_soft_debug_advanced"
++        android:title="@string/tee_soft_advanced_title"
++        android:fragment="org.lineageos.lineageparts.teedebug.TeeSoftAdvancedSettings" />
++
+     <PreferenceCategory
+         android:key="tee_soft_debug_applications"
+         android:title="@string/tee_soft_debug_applications_title"
+diff --git a/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java b/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java
+new file mode 100644
+index 0000000..d225058
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java
+@@ -0,0 +1,248 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package org.lineageos.lineageparts.teedebug;
++
++import android.content.ContentResolver;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.SystemClock;
++import android.system.ErrnoException;
++import android.system.Os;
++
++import org.lineageos.lineageparts.R;
++
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.HttpURLConnection;
++import java.net.URI;
++import java.net.URISyntaxException;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.util.Base64;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.function.Consumer;
++
++/** One process-wide job shared by local imports and network updates, independent of fragments. */
++final class KeyboxUpdater {
++    static final String URL_KEY = "update_url";
++    static final String FORMAT_KEY = "update_format";
++    static final String RESULT_KEY = "update_result";
++    static final String TIME_KEY = "update_time";
++    static final String RAW = "raw";
++    static final String BASE64 = "base64";
++    static final int MAX_BYTES = 1024 * 1024;
++    private static final long TIMEOUT_MS = 60000;
++    private static final AtomicBoolean BUSY = new AtomicBoolean();
++    private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
++    private static final Handler MAIN = new Handler(Looper.getMainLooper());
++    // Resource IDs are never persisted: persisted result codes remain stable across ROM updates.
++    private static volatile String sLastResult;
++
++    private KeyboxUpdater() {}
++
++    static boolean busy() { return BUSY.get(); }
++    static String lastResult() { return sLastResult; }
++
++    static boolean validUrl(String value) {
++        if (value.isEmpty() || value.length() > 8192) return false;
++        try {
++            URI uri = new URI(value);
++            return ("https".equalsIgnoreCase(uri.getScheme())
++                    || "http".equalsIgnoreCase(uri.getScheme()))
++                    && uri.getHost() != null && uri.getRawUserInfo() == null
++                    && uri.getRawFragment() == null;
++        } catch (URISyntaxException e) {
++            return false;
++        }
++    }
++
++    static int errorResource(String result) {
++        if ("download".equals(result)) return R.string.tee_soft_update_error_download;
++        if ("decode".equals(result)) return R.string.tee_soft_update_error_decode;
++        if ("xml".equals(result)) return R.string.tee_soft_update_error_xml;
++        return R.string.tee_soft_update_error_save;
++    }
++
++    static boolean startUpdate(String source, String format, Consumer<Integer> callback) {
++        if (!validUrl(source) || !(RAW.equals(format) || BASE64.equals(format))
++                || !BUSY.compareAndSet(false, true)) return false;
++        WORKER.execute(() -> {
++            String result = "download";
++            int error = 0;
++            try {
++                byte[] data = download(source);
++                result = "decode";
++                if (BASE64.equals(format)) {
++                    // BASIC decoding rejects non-alphabet content; tolerate whitespace only.
++                    String encoded = new String(data, StandardCharsets.US_ASCII)
++                            .replaceAll("[ \\t\\r\\n]", "");
++                    data = Base64.getDecoder().decode(encoded);
++                }
++                result = "xml";
++                validate(data);
++                result = "save";
++                install(data, true);
++                result = "success";
++            } catch (IOException | IllegalArgumentException | SecurityException e) {
++                // Never log a user URL, response body or private key.
++                error = errorResource(result);
++                try {
++                    TeeSoftDebugConfig.update(Map.of(RESULT_KEY, result));
++                } catch (IOException | SecurityException ignored) {
++                    // Report the current outcome in this process even when storage is unavailable.
++                }
++            } finally {
++                sLastResult = result;
++                BUSY.set(false);
++                final int outcome = error;
++                MAIN.post(() -> callback.accept(outcome));
++            }
++        });
++        return true;
++    }
++
++    static boolean startImport(ContentResolver resolver, Uri uri, Consumer<Integer> callback) {
++        if (!BUSY.compareAndSet(false, true)) return false;
++        WORKER.execute(() -> {
++            int error = 0;
++            try {
++                final byte[] data;
++                try (InputStream in = resolver.openInputStream(uri)) {
++                    if (in == null) throw new IOException("Cannot open selected document");
++                    data = readLimited(in, 0);
++                }
++                validate(data);
++                install(data, false);
++            } catch (IOException | SecurityException e) {
++                error = R.string.tee_soft_debug_keybox_pick_failed;
++            } finally {
++                BUSY.set(false);
++                final int outcome = error;
++                MAIN.post(() -> callback.accept(outcome));
++            }
++        });
++        return true;
++    }
++
++    private static void validate(byte[] data) throws IOException {
++        if (data.length == 0 || data.length > MAX_BYTES) {
++            throw new IOException("Keybox size is invalid");
++        }
++        KeyboxXmlValidator.validate(data);
++    }
++
++    private static byte[] download(String source) throws IOException {
++        URL url = new URL(source);
++        long deadline = SystemClock.elapsedRealtime() + TIMEOUT_MS;
++        for (int redirects = 0; redirects <= 5; redirects++) {
++            checkDeadline(deadline);
++            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
++            try {
++                connection.setInstanceFollowRedirects(false);
++                connection.setConnectTimeout(15000);
++                connection.setReadTimeout(15000);
++                connection.setUseCaches(false);
++                connection.setRequestProperty("Accept-Encoding", "identity");
++                int status = connection.getResponseCode();
++                checkDeadline(deadline);
++                if (status == 301 || status == 302 || status == 303
++                        || status == 307 || status == 308) {
++                    String location = connection.getHeaderField("Location");
++                    if (location == null) throw new IOException("Missing redirect location");
++                    URL next = new URL(url, location);
++                    if (!validUrl(next.toString()) || ("https".equalsIgnoreCase(url.getProtocol())
++                            && !"https".equalsIgnoreCase(next.getProtocol()))) {
++                        throw new IOException("Unsupported redirect");
++                    }
++                    url = next;
++                    continue;
++                }
++                if (status != HttpURLConnection.HTTP_OK
++                        || connection.getContentLengthLong() > MAX_BYTES) {
++                    throw new IOException("Unexpected HTTP response");
++                }
++                try (InputStream in = connection.getInputStream()) {
++                    return readLimited(in, deadline);
++                }
++            } finally {
++                connection.disconnect();
++            }
++        }
++        throw new IOException("Too many redirects");
++    }
++
++    private static byte[] readLimited(InputStream in, long deadline) throws IOException {
++        ByteArrayOutputStream out = new ByteArrayOutputStream();
++        byte[] buffer = new byte[8192];
++        int count;
++        while ((count = in.read(buffer)) != -1) {
++            if (deadline != 0) checkDeadline(deadline);
++            if (out.size() + count > MAX_BYTES) throw new IOException("Response is too large");
++            out.write(buffer, 0, count);
++        }
++        if (deadline != 0) checkDeadline(deadline);
++        return out.toByteArray();
++    }
++
++    private static void checkDeadline(long deadline) throws IOException {
++        if (SystemClock.elapsedRealtime() >= deadline) throw new IOException("Download timed out");
++    }
++
++    private static void install(byte[] data, boolean network) throws IOException {
++        synchronized (TeeSoftDebugConfig.class) {
++            // Read first so an unreadable config cannot be replaced with defaults.
++            TeeSoftDebugConfig.read();
++            TeeSoftDebugConfig.prepareDirectory();
++            File target = TeeSoftDebugConfig.KEYBOX;
++            File backup = null;
++            boolean replaced = false;
++            try {
++                if (target.exists()) {
++                    backup = File.createTempFile(".keybox-backup-", ".tmp",
++                            TeeSoftDebugConfig.DIRECTORY);
++                    try (FileInputStream in = new FileInputStream(target);
++                            FileOutputStream out = new FileOutputStream(backup)) {
++                        in.transferTo(out);
++                        Os.fchmod(out.getFD(), 0644);
++                        out.getFD().sync();
++                    }
++                }
++                TeeSoftDebugConfig.replace(target, data);
++                replaced = true;
++                Map<String, String> changes = new HashMap<>();
++                changes.put("keybox_path", target.getAbsolutePath());
++                if (network) {
++                    changes.put(RESULT_KEY, "success");
++                    changes.put(TIME_KEY, Long.toString(System.currentTimeMillis()));
++                }
++                TeeSoftDebugConfig.update(changes);
++            } catch (IOException | ErrnoException | SecurityException e) {
++                IOException failure = new IOException("Cannot install Keybox", e);
++                if (replaced) {
++                    try {
++                        if (backup != null) Os.rename(backup.getAbsolutePath(), target.getAbsolutePath());
++                        else Os.unlink(target.getAbsolutePath());
++                    } catch (ErrnoException restoreError) {
++                        failure.addSuppressed(restoreError);
++                        // Preserve the backup for recovery if restoring the old file failed.
++                        backup = null;
++                    }
++                }
++                throw failure;
++            } finally {
++                if (backup != null) backup.delete();
++            }
++        }
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/KeyboxXmlValidator.java b/src/org/lineageos/lineageparts/teedebug/KeyboxXmlValidator.java
+new file mode 100644
+index 0000000..4517098
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/KeyboxXmlValidator.java
+@@ -0,0 +1,107 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package org.lineageos.lineageparts.teedebug;
++
++import android.util.Xml;
++
++import org.xmlpull.v1.XmlPullParser;
++import org.xmlpull.v1.XmlPullParserException;
++
++import java.io.IOException;
++import java.io.StringReader;
++import java.nio.ByteBuffer;
++import java.nio.charset.CharacterCodingException;
++import java.nio.charset.CodingErrorAction;
++import java.nio.charset.StandardCharsets;
++
++/** Installation-time structure check only; Keystore2 still validates actual signing material. */
++final class KeyboxXmlValidator {
++    private static final int MAX_DEPTH = 64;
++    private static final int MAX_TOKENS = 100000;
++
++    private KeyboxXmlValidator() {}
++
++    static void validate(byte[] data) throws IOException {
++        final String xml;
++        try {
++            // Keystore2 reads this file as UTF-8, regardless of an XML encoding declaration.
++            xml = StandardCharsets.UTF_8.newDecoder()
++                    .onMalformedInput(CodingErrorAction.REPORT)
++                    .onUnmappableCharacter(CodingErrorAction.REPORT)
++                    .decode(ByteBuffer.wrap(data)).toString();
++        } catch (CharacterCodingException e) {
++            throw new IOException("Keybox must be UTF-8", e);
++        }
++        XmlPullParser parser = Xml.newPullParser();
++        try {
++            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false);
++            parser.setFeature(XmlPullParser.FEATURE_PROCESS_DOCDECL, false);
++            parser.setInput(new StringReader(xml));
++            int roots = 0;
++            int tokens = 0;
++            int keyDepth = 0;
++            boolean hasKeys = false;
++            boolean validKey = false;
++            boolean privateKey = false;
++            boolean certificate = false;
++            boolean legacyPrivateKey = false;
++            boolean legacyCertificate = false;
++            String field = null;
++            int fieldDepth = 0;
++            boolean fieldHasText = false;
++            int event;
++            while ((event = parser.nextToken()) != XmlPullParser.END_DOCUMENT) {
++                if (++tokens > MAX_TOKENS || parser.getDepth() > MAX_DEPTH) {
++                    throw new IOException("Keybox XML exceeds structural limits");
++                }
++                if (event == XmlPullParser.DOCDECL) {
++                    throw new IOException("Keybox XML must not contain a DTD");
++                }
++                if (event == XmlPullParser.START_TAG) {
++                    if (parser.getDepth() == 1) roots++;
++                    if (field != null) throw new IOException("Nested Keybox field");
++                    String name = parser.getName();
++                    if ("Key".equals(name)) {
++                        if (keyDepth != 0) throw new IOException("Nested Key entry");
++                        hasKeys = true;
++                        keyDepth = parser.getDepth();
++                        privateKey = false;
++                        certificate = false;
++                    } else if ("PrivateKey".equals(name) || "Certificate".equals(name)) {
++                        field = name;
++                        fieldDepth = parser.getDepth();
++                        fieldHasText = false;
++                    }
++                } else if (event == XmlPullParser.TEXT && field != null) {
++                    fieldHasText |= !parser.getText().trim().isEmpty();
++                } else if (field != null && (event == XmlPullParser.CDSECT
++                        || event == XmlPullParser.ENTITY_REF)) {
++                    // The consumer extracts literal tag contents; it does not expand these.
++                    throw new IOException("Unsupported encoded Keybox field");
++                } else if (event == XmlPullParser.END_TAG) {
++                    if (field != null && parser.getDepth() == fieldDepth) {
++                        if (keyDepth != 0) {
++                            if ("PrivateKey".equals(field)) privateKey |= fieldHasText;
++                            else certificate |= fieldHasText;
++                        } else {
++                            if ("PrivateKey".equals(field)) legacyPrivateKey |= fieldHasText;
++                            else legacyCertificate |= fieldHasText;
++                        }
++                        field = null;
++                    }
++                    if ("Key".equals(parser.getName()) && parser.getDepth() == keyDepth) {
++                        validKey |= privateKey && certificate;
++                        keyDepth = 0;
++                    }
++                }
++            }
++            if (roots != 1 || !(hasKeys ? validKey : legacyPrivateKey && legacyCertificate)) {
++                throw new IOException("Keybox needs a private key and certificate in one entry");
++            }
++        } catch (XmlPullParserException e) {
++            throw new IOException("Malformed Keybox XML", e);
++        }
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java
+new file mode 100644
+index 0000000..b1163ad
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java
+@@ -0,0 +1,161 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package org.lineageos.lineageparts.teedebug;
++
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.text.InputType;
++import android.text.format.DateFormat;
++import android.widget.Toast;
++
++import androidx.preference.EditTextPreference;
++import androidx.preference.ListPreference;
++import androidx.preference.Preference;
++
++import org.lineageos.lineageparts.R;
++import org.lineageos.lineageparts.SettingsPreferenceFragment;
++
++import java.io.IOException;
++import java.util.Date;
++import java.util.Map;
++
++public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
++    private final Handler mHandler = new Handler(Looper.getMainLooper());
++    private EditTextPreference mUrl;
++    private ListPreference mFormat;
++    private Preference mUpdate;
++    private Preference mResult;
++    private String mSource = "";
++    private String mEncoding = KeyboxUpdater.RAW;
++    private final Runnable mRefresh = new Runnable() {
++        @Override
++        public void run() {
++            if (!isResumed()) return;
++            boolean wasBusy = KeyboxUpdater.busy();
++            refresh();
++            // One final refresh also covers completion between reading config and busy state.
++            if (wasBusy || KeyboxUpdater.busy()) mHandler.postDelayed(this, 500);
++        }
++    };
++
++    @Override
++    public void onActivityCreated(Bundle state) {
++        super.onActivityCreated(state);
++        addPreferencesFromResource(R.xml.tee_soft_advanced_settings);
++        if (requireActivity().getActionBar() != null) {
++            requireActivity().getActionBar().setTitle(R.string.tee_soft_advanced_title);
++        }
++        mUrl = findPreference("tee_soft_update_url");
++        mFormat = findPreference("tee_soft_update_format");
++        mUpdate = findPreference("tee_soft_update_now");
++        mResult = findPreference("tee_soft_update_result");
++        mUrl.setOnBindEditTextListener(edit -> {
++            edit.setSingleLine(true);
++            edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
++        });
++        mUrl.setOnPreferenceChangeListener((preference, value) -> {
++            String source = value.toString().trim();
++            if (!source.isEmpty() && !KeyboxUpdater.validUrl(source)) {
++                Toast.makeText(requireContext(), R.string.tee_soft_update_invalid_url,
++                        Toast.LENGTH_LONG).show();
++                return false;
++            }
++            return save(KeyboxUpdater.URL_KEY, source);
++        });
++        mFormat.setOnPreferenceChangeListener((preference, value) -> {
++            String encoding = value.toString();
++            if (!(KeyboxUpdater.RAW.equals(encoding) || KeyboxUpdater.BASE64.equals(encoding))) {
++                return false;
++            }
++            return save(KeyboxUpdater.FORMAT_KEY, encoding);
++        });
++        mUpdate.setOnPreferenceClickListener(preference -> {
++            // Capture the source and format for this job; later page edits cannot change it.
++            boolean started = KeyboxUpdater.startUpdate(mSource, mEncoding, error -> {
++                if (!isResumed()) return;
++                refresh();
++                Toast.makeText(requireContext(), error == 0
++                        ? R.string.tee_soft_update_success : error, Toast.LENGTH_LONG).show();
++            });
++            if (started) {
++                mHandler.removeCallbacks(mRefresh);
++                mRefresh.run();
++            }
++            return true;
++        });
++    }
++
++    @Override
++    public void onResume() {
++        super.onResume();
++        mHandler.removeCallbacks(mRefresh);
++        mRefresh.run();
++    }
++
++    @Override
++    public void onPause() {
++        mHandler.removeCallbacks(mRefresh);
++        super.onPause();
++    }
++
++    private boolean save(String key, String value) {
++        try {
++            TeeSoftDebugConfig.update(Map.of(key, value));
++            refresh();
++            return true;
++        } catch (IOException e) {
++            Toast.makeText(requireContext(), R.string.tee_soft_update_error_save,
++                    Toast.LENGTH_LONG).show();
++            return false;
++        }
++    }
++
++    private void refresh() {
++        final Map<String, String> config;
++        try {
++            config = TeeSoftDebugConfig.read();
++        } catch (IOException e) {
++            mUrl.setEnabled(false);
++            mFormat.setEnabled(false);
++            mUpdate.setEnabled(false);
++            mResult.setVisible(true);
++            mResult.setSummary(R.string.tee_soft_update_error_config);
++            return;
++        }
++        boolean busy = KeyboxUpdater.busy();
++        mSource = config.getOrDefault(KeyboxUpdater.URL_KEY, "");
++        mEncoding = KeyboxUpdater.BASE64.equals(config.get(KeyboxUpdater.FORMAT_KEY))
++                ? KeyboxUpdater.BASE64 : KeyboxUpdater.RAW;
++        mUrl.setText(mSource);
++        if (mSource.isEmpty()) mUrl.setSummary(R.string.tee_soft_update_url_unset);
++        else mUrl.setSummary(mSource);
++        mFormat.setValue(mEncoding);
++        mFormat.setSummary(mFormat.getEntry());
++        mUrl.setEnabled(!busy);
++        mFormat.setEnabled(!busy);
++        mUpdate.setEnabled(!busy && KeyboxUpdater.validUrl(mSource));
++        mUpdate.setSummary(busy ? getString(R.string.tee_soft_update_busy) : null);
++        String result = KeyboxUpdater.lastResult();
++        if (result == null) result = config.getOrDefault(KeyboxUpdater.RESULT_KEY, "");
++        mResult.setVisible(!result.isEmpty());
++        if ("success".equals(result)) {
++            try {
++                long timestamp = Long.parseLong(config.getOrDefault(KeyboxUpdater.TIME_KEY, "0"));
++                if (timestamp <= 0) {
++                    mResult.setSummary(R.string.tee_soft_update_success);
++                    return;
++                }
++                String time = DateFormat.getMediumDateFormat(requireContext()).format(new Date(timestamp))
++                        + " " + DateFormat.getTimeFormat(requireContext()).format(new Date(timestamp));
++                mResult.setSummary(getString(R.string.tee_soft_update_success_at, time));
++            } catch (NumberFormatException e) {
++                mResult.setSummary(R.string.tee_soft_update_success);
++            }
++        } else if (!result.isEmpty()) {
++            mResult.setSummary(KeyboxUpdater.errorResource(result));
++        }
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugConfig.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugConfig.java
+new file mode 100644
+index 0000000..e2cfcdb
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugConfig.java
+@@ -0,0 +1,91 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package org.lineageos.lineageparts.teedebug;
++
++import android.system.ErrnoException;
++import android.system.Os;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.LinkedHashMap;
++import java.util.Map;
++
++/** Shared read/merge/write lock for both settings pages and Keybox installation. */
++final class TeeSoftDebugConfig {
++    static final File DIRECTORY = new File("/data/adbroot/tee_soft_debug");
++    static final File KEYBOX = new File(DIRECTORY, "keybox.xml");
++    private static final File CONFIG = new File(DIRECTORY, "config.conf");
++
++    private TeeSoftDebugConfig() {}
++
++    static synchronized Map<String, String> read() throws IOException {
++        Map<String, String> values = new LinkedHashMap<>();
++        if (!CONFIG.exists()) return values;
++        try (FileInputStream in = new FileInputStream(CONFIG)) {
++            if (in.getChannel().size() > 1024 * 1024) {
++                throw new IOException("Configuration is too large");
++            }
++            String content = new String(in.readAllBytes(), StandardCharsets.UTF_8);
++            for (String line : content.split("\\R")) {
++                int separator = line.indexOf('=');
++                if (separator <= 0) continue;
++                values.put(line.substring(0, separator).trim(),
++                        line.substring(separator + 1).trim());
++            }
++        }
++        return values;
++    }
++
++    static synchronized void update(Map<String, String> changes) throws IOException {
++        // Re-read under the lock: a page must not overwrite another page's newer fields.
++        Map<String, String> values = read();
++        values.putAll(changes);
++        StringBuilder content = new StringBuilder();
++        for (Map.Entry<String, String> entry : values.entrySet()) {
++            if (entry.getKey().contains("=") || entry.getKey().contains("\n")
++                    || entry.getKey().contains("\r") || entry.getValue().contains("\n")
++                    || entry.getValue().contains("\r")) {
++                throw new IOException("Invalid configuration field");
++            }
++            content.append(entry.getKey()).append('=').append(entry.getValue()).append('\n');
++        }
++        replace(CONFIG, content.toString().getBytes(StandardCharsets.UTF_8));
++    }
++
++    static boolean enabled(Map<String, String> values, String key) {
++        return "1".equals(values.get(key)) || "true".equalsIgnoreCase(values.get(key));
++    }
++
++    static void prepareDirectory() throws IOException {
++        try {
++            if (!DIRECTORY.isDirectory() && !DIRECTORY.mkdirs()) {
++                throw new IOException("Cannot create Keybox directory");
++            }
++            Os.chmod(DIRECTORY.getAbsolutePath(), 0755);
++        } catch (ErrnoException e) {
++            throw new IOException("Cannot prepare Keybox directory", e);
++        }
++    }
++
++    static void replace(File target, byte[] data) throws IOException {
++        prepareDirectory();
++        File temporary = File.createTempFile(".tee-soft-", ".tmp", DIRECTORY);
++        try {
++            try (FileOutputStream out = new FileOutputStream(temporary)) {
++                out.write(data);
++                Os.fchmod(out.getFD(), 0644);
++                out.getFD().sync();
++            }
++            Os.rename(temporary.getAbsolutePath(), target.getAbsolutePath());
++        } catch (ErrnoException e) {
++            throw new IOException("Cannot replace Keybox data", e);
++        } finally {
++            temporary.delete();
++        }
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+index 9072531..61aaaa8 100644
+--- a/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftDebugSettings.java
+@@ -7,15 +7,12 @@ package org.lineageos.lineageparts.teedebug;
+ 
+ import android.app.Activity;
+ import android.app.Dialog;
+-import android.content.ContentResolver;
+ import android.content.Context;
+ import android.content.Intent;
+ import android.content.pm.ApplicationInfo;
+ import android.content.pm.PackageManager;
+ import android.net.Uri;
+ import android.os.SystemProperties;
+-import android.system.ErrnoException;
+-import android.system.Os;
+ import android.text.TextUtils;
+ import android.util.ArraySet;
+ import android.util.Log;
+@@ -38,15 +35,12 @@ import org.lineageos.lineageparts.search.Searchable;
+ import org.lineageos.lineageparts.widget.PackageListAdapter;
+ import org.lineageos.lineageparts.widget.PackageListAdapter.PackageItem;
+ 
+-import java.io.File;
+-import java.io.FileInputStream;
+-import java.io.FileOutputStream;
+ import java.io.IOException;
+-import java.io.InputStream;
+-import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
++import java.util.Map;
+ import java.util.Set;
+ 
+ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+@@ -66,12 +60,7 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+     private static final String MODE_GENERATE = "generate";
+ 
+     private static final int DIALOG_ADD_APPS = 0;
+-    private static final String KEYBOX_STORE_DIR = "/data/adbroot/tee_soft_debug";
+-    private static final String KEYBOX_STORE_FILE = "keybox.xml";
+-    private static final String RUNTIME_CONFIG_FILE = "config.conf";
+     private static final String PROP_NH_OVERRIDE = "persist.sys.nhoverride";
+-    private static final int MODE_DIR_WORLD_RX_OWNER_W = 0755;
+-    private static final int MODE_FILE_WORLD_R_OWNER_W = 0644;
+ 
+     private SwitchPreferenceCompat mEnabledPref;
+     private ListPreference mModePref;
+@@ -89,6 +78,7 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+     private final Runnable mPolicyRefresh = new Runnable() {
+         @Override public void run() {
+             if (!isAdded()) return;
++            mKeyboxPathPref.setEnabled(mEnabled && !KeyboxUpdater.busy());
+             if (!mPolicyLoading) {
+                 mPolicyLoading = true;
+                 mPolicyWorker.execute(() -> {
+@@ -201,28 +191,26 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+             if ((Boolean) newValue && !android.os.PlatformIntegrity.allowed(
+                     android.os.PlatformIntegrity.TEE)) return false;
+             mEnabled = (Boolean) newValue;
+-            persistRuntimeConfig();
++            if (!persistRuntimeConfig()) return false;
+             refreshKeyboxPathSummary();
+             return true;
+         }
+         if (preference == mModePref) {
+             mMode = normalizeMode(String.valueOf(newValue));
+             mModePref.setValue(mMode);
+-            persistRuntimeConfig();
++            if (!persistRuntimeConfig()) return false;
+             refreshModeSummary();
+             return true;
+         }
+         if (preference == mShowSystemAppsPref) {
+             mShowSystemApps = (Boolean) newValue;
+             mPackageAdapter.setIncludeSystemApps(mShowSystemApps);
+-            persistRuntimeConfig();
+-            return true;
++            return persistRuntimeConfig();
+         }
+         if (preference == mShowNonLauncherAppsPref) {
+             mShowNonLauncherApps = (Boolean) newValue;
+             mPackageAdapter.setIncludeNonLauncherApps(mShowNonLauncherApps);
+-            persistRuntimeConfig();
+-            return true;
++            return persistRuntimeConfig();
+         }
+         return false;
+     }
+@@ -369,69 +357,18 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+             Log.w(TAG, "Unable to persist URI permission for " + uri, e);
+         }
+ 
+-        try {
+-            final String keyboxXml = readTextFromUri(uri);
+-            if (TextUtils.isEmpty(keyboxXml)) {
+-                Log.e(TAG, "Selected keybox XML is empty.");
+-                Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
+-                        Toast.LENGTH_LONG).show();
+-                return;
+-            }
+-
+-            final String copiedPath = copyKeyboxToDataDir(uri);
+-            if (TextUtils.isEmpty(copiedPath)) {
+-                Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
+-                        Toast.LENGTH_LONG).show();
+-                return;
+-            }
+-
+-            mKeyboxPath = copiedPath;
+-            persistRuntimeConfig();
+-            refreshKeyboxPathSummary();
+-            Toast.makeText(requireContext(),
+-                    getString(R.string.tee_soft_debug_keybox_pick_success, copiedPath),
+-                    Toast.LENGTH_LONG).show();
+-        } catch (IOException e) {
+-            Log.e(TAG, "Failed to import keybox XML from URI: " + uri, e);
+-            Toast.makeText(requireContext(), R.string.tee_soft_debug_keybox_pick_failed,
+-                    Toast.LENGTH_LONG).show();
+-        }
+-    }
+-
+-    private String copyKeyboxToDataDir(Uri uri) throws IOException {
+-        final ContentResolver resolver = requireActivity().getContentResolver();
+-        final File targetDir = new File(KEYBOX_STORE_DIR);
+-        if (!targetDir.exists() && !targetDir.mkdirs()) {
+-            Log.w(TAG, "Unable to create keybox dir: " + targetDir);
+-            return null;
+-        }
+-        ensurePathPermissions(targetDir.getAbsolutePath(), MODE_DIR_WORLD_RX_OWNER_W);
+-
+-        final File target = new File(targetDir, KEYBOX_STORE_FILE);
+-        try (InputStream in = resolver.openInputStream(uri);
+-             FileOutputStream out = new FileOutputStream(target, false)) {
+-            if (in == null) {
+-                return null;
+-            }
+-            final byte[] buffer = new byte[8192];
+-            int read;
+-            while ((read = in.read(buffer)) != -1) {
+-                out.write(buffer, 0, read);
+-            }
+-            out.flush();
+-        }
+-        ensurePathPermissions(target.getAbsolutePath(), MODE_FILE_WORLD_R_OWNER_W);
+-        return target.getAbsolutePath();
+-    }
+-
+-    private String readTextFromUri(Uri uri) throws IOException {
+-        final ContentResolver resolver = requireActivity().getContentResolver();
+-        try (InputStream in = resolver.openInputStream(uri)) {
+-            if (in == null) {
+-                return null;
+-            }
+-            final byte[] data = in.readAllBytes();
+-            return new String(data, StandardCharsets.UTF_8);
++        boolean started = KeyboxUpdater.startImport(
++                requireContext().getApplicationContext().getContentResolver(), uri, error -> {
++                    if (!isResumed()) return;
++                    loadRuntimeConfigIntoState();
++                    applyStateToUi();
++                    Toast.makeText(requireContext(), error == 0
++                            ? getString(R.string.tee_soft_debug_keybox_pick_success, mKeyboxPath)
++                            : getString(error), Toast.LENGTH_LONG).show();
++                });
++        if (!started) {
++            Toast.makeText(requireContext(), R.string.tee_soft_update_busy,
++                    Toast.LENGTH_SHORT).show();
+         }
+     }
+ 
+@@ -442,78 +379,40 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+         mShowSystemApps = false;
+         mShowNonLauncherApps = false;
+         mTargetPackages.clear();
+-
+-        final File config = new File(KEYBOX_STORE_DIR, RUNTIME_CONFIG_FILE);
+-        if (!config.exists()) {
+-            return;
+-        }
+-
+-        final String content;
+-        try (InputStream in = new FileInputStream(config)) {
+-            final byte[] data = in.readAllBytes();
+-            content = new String(data, StandardCharsets.UTF_8);
++        try {
++            Map<String, String> values = TeeSoftDebugConfig.read();
++            mEnabled = TeeSoftDebugConfig.enabled(values, "enabled");
++            mMode = normalizeMode(values.get("mode"));
++            mKeyboxPath = values.getOrDefault("keybox_path", "");
++            mShowSystemApps = TeeSoftDebugConfig.enabled(values, "show_system_apps");
++            mShowNonLauncherApps = TeeSoftDebugConfig.enabled(values, "show_non_launcher_apps");
++            parseTargetPackages(values.get("target_packages"), mTargetPackages);
+         } catch (IOException e) {
+-            Log.w(TAG, "Failed to read runtime config: " + config, e);
+-            return;
+-        }
+-
+-        for (String line : content.split("\\R")) {
+-            final int sep = line.indexOf('=');
+-            if (sep <= 0) {
+-                continue;
+-            }
+-            final String key = line.substring(0, sep).trim();
+-            final String value = line.substring(sep + 1).trim();
+-            switch (key) {
+-                case "enabled":
+-                    mEnabled = "1".equals(value) || "true".equalsIgnoreCase(value);
+-                    break;
+-                case "target_packages":
+-                    parseTargetPackages(value, mTargetPackages);
+-                    break;
+-                case "mode":
+-                    mMode = normalizeMode(value);
+-                    break;
+-                case "keybox_path":
+-                    mKeyboxPath = value;
+-                    break;
+-                case "show_non_launcher_apps":
+-                    mShowNonLauncherApps = "1".equals(value) || "true".equalsIgnoreCase(value);
+-                    break;
+-                case "show_system_apps":
+-                    mShowSystemApps = "1".equals(value) || "true".equalsIgnoreCase(value);
+-                    break;
+-                default:
+-                    break;
+-            }
++            Log.w(TAG, "Failed to read runtime config", e);
+         }
+     }
+ 
+-    private void persistRuntimeConfig() {
+-        final File dir = new File(KEYBOX_STORE_DIR);
+-        if (!dir.exists() && !dir.mkdirs()) {
+-            Log.w(TAG, "Unable to create runtime config dir: " + dir);
+-            return;
+-        }
+-        ensurePathPermissions(dir.getAbsolutePath(), MODE_DIR_WORLD_RX_OWNER_W);
+-
+-        final File config = new File(dir, RUNTIME_CONFIG_FILE);
++    private boolean persistRuntimeConfig() {
+         final List<String> sortedPkgs = new ArrayList<>(mTargetPackages);
+         sortedPkgs.sort(String::compareToIgnoreCase);
+-        final String payload =
+-                "enabled=" + (mEnabled ? 1 : 0) + "\n"
+-                        + "mode=" + normalizeMode(mMode) + "\n"
+-                        + "target_packages=" + TextUtils.join("|", sortedPkgs) + "\n"
+-                        + "keybox_path=" + (mKeyboxPath == null ? "" : mKeyboxPath) + "\n"
+-                        + "show_system_apps=" + (mShowSystemApps ? 1 : 0) + "\n"
+-                        + "show_non_launcher_apps=" + (mShowNonLauncherApps ? 1 : 0) + "\n";
+-        try (FileOutputStream out = new FileOutputStream(config, false)) {
+-            out.write(payload.getBytes(StandardCharsets.UTF_8));
+-            out.flush();
+-            ensurePathPermissions(config.getAbsolutePath(), MODE_FILE_WORLD_R_OWNER_W);
++        Map<String, String> changes = new HashMap<>();
++        changes.put("enabled", mEnabled ? "1" : "0");
++        changes.put("mode", normalizeMode(mMode));
++        changes.put("target_packages", TextUtils.join("|", sortedPkgs));
++        changes.put("show_system_apps", mShowSystemApps ? "1" : "0");
++        changes.put("show_non_launcher_apps", mShowNonLauncherApps ? "1" : "0");
++        // keybox_path belongs to installation; never write a stale UI copy over an update.
++        try {
++            TeeSoftDebugConfig.update(changes);
+             syncNhOverrideProperty();
++            return true;
+         } catch (IOException e) {
+-            Log.w(TAG, "Failed to write runtime config: " + config, e);
++            Log.w(TAG, "Failed to write runtime config", e);
++            loadRuntimeConfigIntoState();
++            applyStateToUi();
++            Toast.makeText(requireContext(), R.string.tee_soft_update_error_save,
++                    Toast.LENGTH_LONG).show();
++            return false;
+         }
+     }
+ 
+@@ -525,14 +424,6 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+         }
+     }
+ 
+-    private void ensurePathPermissions(String path, int mode) {
+-        try {
+-            Os.chmod(path, mode);
+-        } catch (ErrnoException e) {
+-            Log.w(TAG, "Failed to chmod " + path + " to " + Integer.toOctalString(mode), e);
+-        }
+-    }
+-
+     private static void parseTargetPackages(String raw, Set<String> out) {
+         out.clear();
+         if (TextUtils.isEmpty(raw)) {
+@@ -562,41 +453,15 @@ public class TeeSoftDebugSettings extends SettingsPreferenceFragment implements
+ 
+     private static RuntimeConfigSnapshot loadRuntimeConfigSnapshot() {
+         final RuntimeConfigSnapshot snapshot = new RuntimeConfigSnapshot();
+-        final File config = new File(KEYBOX_STORE_DIR, RUNTIME_CONFIG_FILE);
+-        if (!config.exists()) {
+-            return snapshot;
+-        }
+-
+-        final String content;
+-        try (InputStream in = new FileInputStream(config)) {
+-            final byte[] data = in.readAllBytes();
+-            content = new String(data, StandardCharsets.UTF_8);
++        String targets;
++        try {
++            Map<String, String> values = TeeSoftDebugConfig.read();
++            snapshot.enabled = TeeSoftDebugConfig.enabled(values, "enabled");
++            snapshot.keyboxPath = values.getOrDefault("keybox_path", "");
++            targets = values.getOrDefault("target_packages", "");
+         } catch (IOException e) {
+             return snapshot;
+         }
+-
+-        String targets = "";
+-        for (String line : content.split("\\R")) {
+-            final int sep = line.indexOf('=');
+-            if (sep <= 0) {
+-                continue;
+-            }
+-            final String key = line.substring(0, sep).trim();
+-            final String value = line.substring(sep + 1).trim();
+-            switch (key) {
+-                case "enabled":
+-                    snapshot.enabled = "1".equals(value) || "true".equalsIgnoreCase(value);
+-                    break;
+-                case "target_packages":
+-                    targets = value;
+-                    break;
+-                case "keybox_path":
+-                    snapshot.keyboxPath = value;
+-                    break;
+-                default:
+-                    break;
+-            }
+-        }
+         snapshot.packageCount = TextUtils.isEmpty(targets) ? 0 : TextUtils.split(targets, "\\|").length;
+         return snapshot;
+     }
+-- 
+2.43.0
+
