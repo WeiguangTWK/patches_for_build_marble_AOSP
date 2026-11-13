@@ -1,0 +1,558 @@
+From 8d1c7e77a524cf5bc588296a10195227c1ad2a93 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 14:50:22 +0800
+Subject: [PATCH] Neko LineageOS: [PERF MODE] Add service-managed performance
+ mode
+
+Introduce a device-wide performance mode independent of charging sessions.
+Run thermal transitions on a dedicated worker and expose separate request
+and application states to Settings and SystemUI.
+
+Default to disabled after a system reboot and restore the current request
+after HAL restarts within the same boot. Bound reconnection attempts and
+retain a warning when the thermal policy cannot be confirmed.
+
+Show an ongoing notification describing the low-temperature burn risk,
+with an action to disable the mode. Request a heads-up notification on
+successful explicit activation and keep recovery updates silent.
+
+Allow devices to opt in through config_performanceModeAvailable and
+prevent the legacy fast-charge controller from competing for the backend.
+
+Change-Id: I7377dce35a74bff6540ac36774a3c8379dffaa5c
+---
+ .../health/HealthInterfaceService.java        |  27 ++-
+ .../health/PerformanceModeController.java     | 190 ++++++++++++++++++
+ .../health/PerformanceModeNotification.java   |  87 ++++++++
+ .../res/res/drawable/ic_performance_mode.xml  |   6 +
+ .../res/values-zh-rCN/performance_mode.xml    |  11 +
+ .../res/values-zh-rTW/performance_mode.xml    |  11 +
+ lineage/res/res/values/config.xml             |   2 +
+ lineage/res/res/values/performance_mode.xml   |  11 +
+ lineage/res/res/values/symbols.xml            |  10 +
+ .../lineageos/health/HealthInterface.java     |  33 +++
+ .../lineageos/health/IHealthInterface.aidl    |   2 +
+ 11 files changed, 385 insertions(+), 5 deletions(-)
+ create mode 100644 lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeController.java
+ create mode 100644 lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeNotification.java
+ create mode 100644 lineage/res/res/drawable/ic_performance_mode.xml
+ create mode 100644 lineage/res/res/values-zh-rCN/performance_mode.xml
+ create mode 100644 lineage/res/res/values-zh-rTW/performance_mode.xml
+ create mode 100644 lineage/res/res/values/performance_mode.xml
+
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java
+index 81506c9..a934bf4 100644
+--- a/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/HealthInterfaceService.java
+@@ -38,6 +38,7 @@ public class HealthInterfaceService extends LineageSystemService {
+     // Health features
+     private ChargingControlController mCCC;
+     private FastChargeController mFCC;
++    private PerformanceModeController mPMC;
+ 
+     public HealthInterfaceService(Context context) {
+         super(context);
+@@ -70,8 +71,12 @@ public class HealthInterfaceService extends LineageSystemService {
+         if (mCCC.isSupported()) {
+             mFeatures.add(mCCC);
+         }
++        mPMC = new PerformanceModeController(mContext);
++        if (mPMC.isSupported()) {
++            mFeatures.add(mPMC);
++        }
+         mFCC = new FastChargeController(mContext, mHandler);
+-        if (mFCC.isSupported()) {
++        if (!mPMC.isSupported() && mFCC.isSupported()) {
+             mFeatures.add(mFCC);
+         }
+ 
+@@ -163,7 +168,7 @@ public class HealthInterfaceService extends LineageSystemService {
+ 
+         @Override
+         public boolean isFastChargeSupported() {
+-            return mFCC.isSupported();
++            return !mPMC.isSupported() && mFCC.isSupported();
+         }
+ 
+         @Override
+@@ -178,7 +183,7 @@ public class HealthInterfaceService extends LineageSystemService {
+ 
+         @Override
+         public boolean setFastChargeMode(int mode) {
+-            return mFCC.setFastChargeMode(mode);
++            return !mPMC.isSupported() && mFCC.setFastChargeMode(mode);
+         }
+ 
+         @Override
+@@ -188,12 +193,24 @@ public class HealthInterfaceService extends LineageSystemService {
+ 
+         @Override
+         public boolean setSessionFastChargeMode(int mode) {
+-            return mFCC.setSessionFastChargeMode(mode);
++            return !mPMC.isSupported() && mFCC.setSessionFastChargeMode(mode);
+         }
+ 
+         @Override
+         public boolean resetSessionFastChargeMode() {
+-            return mFCC.resetSessionFastChargeMode();
++            return !mPMC.isSupported() && mFCC.resetSessionFastChargeMode();
++        }
++
++        @Override
++        public boolean isPerformanceModeSupported() {
++            return mPMC.isSupported();
++        }
++
++        @Override
++        public boolean setPerformanceModeEnabled(boolean enabled) {
++            mContext.enforceCallingOrSelfPermission(
++                    Manifest.permission.WRITE_SECURE_SETTINGS, TAG);
++            return mPMC.requestEnabled(enabled);
+         }
+ 
+         @Override
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeController.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeController.java
+new file mode 100644
+index 0000000..16e48f1
+--- /dev/null
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeController.java
+@@ -0,0 +1,190 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Neko-LineageOS
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package org.lineageos.platform.internal.health;
++
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_APPLYING;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_ERROR;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_OFF;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_ON;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_REQUESTED;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_RESTORING;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_STATE;
++
++import android.content.Context;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.IBinder;
++import android.os.Process;
++import android.os.RemoteException;
++import android.os.ServiceManager;
++import android.provider.Settings;
++import android.util.Log;
++
++import org.lineageos.platform.internal.R;
++
++import vendor.lineage.health.FastChargeMode;
++import vendor.lineage.health.IFastCharge;
++
++import java.io.PrintWriter;
++
++/** Device-wide state. All HAL work and state writes are confined to a dedicated worker. */
++public final class PerformanceModeController extends LineageHealthFeature {
++    private static final String SERVICE = "vendor.system.health.IFastCharge/default";
++    private static final String BOOT = "performance_mode_boot_count";
++    private static final int MAX_RECONNECTS = 6;
++
++    private IFastCharge mHal;
++    private IBinder.DeathRecipient mDeathRecipient;
++    private PerformanceModeNotification mNotification;
++    private boolean mRequested;
++    private boolean mAlertPending;
++    private int mReconnects;
++    private volatile boolean mReady;
++    private volatile int mState = PERFORMANCE_MODE_OFF;
++    private final Runnable mRetry = () -> apply(false);
++
++    public PerformanceModeController(Context context) {
++        super(context, context.getResources().getBoolean(R.bool.config_performanceModeAvailable)
++                ? createWorker() : new Handler(context.getMainLooper()));
++    }
++
++    private static Handler createWorker() {
++        HandlerThread thread = new HandlerThread("PerformanceMode", Process.THREAD_PRIORITY_BACKGROUND);
++        thread.start();
++        return new Handler(thread.getLooper());
++    }
++
++    @Override
++    public boolean isSupported() {
++        return mContext.getResources().getBoolean(R.bool.config_performanceModeAvailable);
++    }
++
++    @Override
++    public void onStart() {
++        mHandler.post(() -> {
++            final int boot = Settings.Global.getInt(mContext.getContentResolver(),
++                    Settings.Global.BOOT_COUNT, -1);
++            final int previousBoot = Settings.Global.getInt(mContext.getContentResolver(), BOOT, -2);
++            final boolean sameBoot = boot >= 0 && previousBoot == boot;
++            mRequested = sameBoot && Settings.Global.getInt(mContext.getContentResolver(),
++                    PERFORMANCE_MODE_REQUESTED, 0) != 0;
++            if (!sameBoot) {
++                // Reset the request before the boot marker, so an interrupted reset is safe.
++                if (put(PERFORMANCE_MODE_REQUESTED, 0)) put(BOOT, boot);
++            }
++            mNotification = new PerformanceModeNotification(mContext, mHandler,
++                    () -> requestEnabled(false));
++            mReady = true;
++            apply(false);
++        });
++    }
++
++    /** Returns acceptance only; clients observe PERFORMANCE_MODE_STATE for the result. */
++    public boolean requestEnabled(boolean enabled) {
++        if (!isSupported() || !mReady) return false;
++        return mHandler.post(() -> {
++            final boolean explicitEnable = enabled && !mRequested;
++            if (!put(PERFORMANCE_MODE_REQUESTED, enabled ? 1 : 0)) {
++                publish(PERFORMANCE_MODE_ERROR, false);
++                return;
++            }
++            mRequested = enabled;
++            mAlertPending |= explicitEnable;
++            if (!enabled) mAlertPending = false;
++            mReconnects = 0;
++            mHandler.removeCallbacks(mRetry);
++            apply(true);
++        });
++    }
++
++    private boolean connect() throws RemoteException {
++        if (mHal != null) return true;
++        IBinder binder = ServiceManager.checkService(SERVICE);
++        if (binder == null) return false;
++        final IBinder.DeathRecipient recipient = () -> mHandler.post(() -> {
++            // Ignore a delayed death callback from a previously replaced connection.
++            if (mHal == null || mHal.asBinder() != binder) return;
++            mHal = null;
++            mDeathRecipient = null;
++            mReconnects = 0;
++            mHandler.removeCallbacks(mRetry);
++            apply(false);
++        });
++        binder.linkToDeath(recipient, 0);
++        mDeathRecipient = recipient;
++        mHal = IFastCharge.Stub.asInterface(binder);
++        return true;
++    }
++
++    private void apply(boolean userRequest) {
++        if (!userRequest) mAlertPending = false;
++        publish(mRequested ? PERFORMANCE_MODE_APPLYING : PERFORMANCE_MODE_RESTORING, false);
++        try {
++            if (!connect()) {
++                reconnectLater();
++                return;
++            }
++            final int expected = mRequested ? FastChargeMode.FAST_CHARGE : FastChargeMode.NONE;
++            if (mHal.setFastChargeMode(expected) != expected) {
++                publish(PERFORMANCE_MODE_ERROR, false);
++                return;
++            }
++            mReconnects = 0;
++            publish(mRequested ? PERFORMANCE_MODE_ON : PERFORMANCE_MODE_OFF, mAlertPending);
++            mAlertPending = false;
++        } catch (RemoteException e) {
++            Log.w(TAG, "Performance HAL unavailable", e);
++            disconnect();
++            reconnectLater();
++        } catch (RuntimeException e) {
++            Log.e(TAG, "Failed to apply performance mode", e);
++            publish(PERFORMANCE_MODE_ERROR, false);
++        }
++    }
++
++    private void disconnect() {
++        if (mHal != null && mDeathRecipient != null) {
++            mHal.asBinder().unlinkToDeath(mDeathRecipient, 0);
++        }
++        mHal = null;
++        mDeathRecipient = null;
++    }
++
++    private void reconnectLater() {
++        publish(PERFORMANCE_MODE_ERROR, false);
++        if (mReconnects < MAX_RECONNECTS) {
++            long delay = Math.min(30_000L, 1_000L << mReconnects++);
++            mHandler.removeCallbacks(mRetry);
++            mHandler.postDelayed(mRetry, delay);
++        }
++    }
++
++    private void publish(int state, boolean alert) {
++        if (!put(PERFORMANCE_MODE_STATE, state)) {
++            Log.e(TAG, "Failed to publish performance mode state " + state);
++            mState = PERFORMANCE_MODE_ERROR;
++            mNotification.update(PERFORMANCE_MODE_ERROR, false);
++            return;
++        }
++        mState = state;
++        mNotification.update(state, alert);
++    }
++
++    private boolean put(String key, int value) {
++        return Settings.Global.putInt(mContext.getContentResolver(), key, value);
++    }
++
++    @Override
++    protected void onSettingsChanged(Uri uri) {
++        // The request is writable only through the permission-checked service API.
++    }
++
++    @Override
++    public void dump(PrintWriter pw) {
++        pw.println("Performance mode state: " + mState + ", ready=" + mReady);
++    }
++}
+diff --git a/lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeNotification.java b/lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeNotification.java
+new file mode 100644
+index 0000000..9ecc52c
+--- /dev/null
++++ b/lineage/lib/main/java/org/lineageos/platform/internal/health/PerformanceModeNotification.java
+@@ -0,0 +1,87 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Neko-LineageOS
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package org.lineageos.platform.internal.health;
++
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_ERROR;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_OFF;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_ON;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_RESTORING;
++
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.app.PendingIntent;
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentFilter;
++import android.os.Handler;
++import android.os.UserHandle;
++
++import org.lineageos.platform.internal.R;
++
++final class PerformanceModeNotification {
++    private static final String CHANNEL = "PerformanceMode";
++    private static final String DISABLE = "org.system.platform.action.DISABLE_PERFORMANCE_MODE";
++    private static final int ID = 1001;
++    private final Context mContext;
++    private final NotificationManager mManager;
++
++    PerformanceModeNotification(Context context, Handler handler, Runnable disable) {
++        mContext = context;
++        mManager = context.getSystemService(NotificationManager.class);
++        NotificationChannel channel = new NotificationChannel(CHANNEL,
++                context.getString(R.string.performance_mode_title),
++                NotificationManager.IMPORTANCE_HIGH);
++        channel.setSound(null, null);
++        channel.enableVibration(false);
++        mManager.createNotificationChannel(channel);
++        context.registerReceiver(new BroadcastReceiver() {
++            @Override
++            public void onReceive(Context receiverContext, Intent intent) {
++                if (DISABLE.equals(intent.getAction())) disable.run();
++            }
++        }, new IntentFilter(DISABLE), null, handler, Context.RECEIVER_NOT_EXPORTED);
++    }
++
++    void update(int state, boolean alert) {
++        if (state == PERFORMANCE_MODE_OFF) {
++            mManager.cancelAsUser(null, ID, UserHandle.ALL);
++            return;
++        }
++        int title = switch (state) {
++            case PERFORMANCE_MODE_ON -> R.string.performance_mode_notification_title;
++            case PERFORMANCE_MODE_ERROR -> R.string.performance_mode_error;
++            case PERFORMANCE_MODE_RESTORING -> R.string.performance_mode_restoring;
++            default -> R.string.performance_mode_applying;
++        };
++        String message = mContext.getString(R.string.performance_mode_notification_content);
++        if (state == PERFORMANCE_MODE_ERROR) {
++            message = mContext.getString(R.string.performance_mode_error_content) + " " + message;
++        }
++        PendingIntent settings = PendingIntent.getActivity(mContext, 0,
++                new Intent(Intent.ACTION_POWER_USAGE_SUMMARY)
++                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), PendingIntent.FLAG_IMMUTABLE);
++        PendingIntent disable = PendingIntent.getBroadcast(mContext, 0,
++                new Intent(DISABLE).setPackage(mContext.getPackageName()),
++                PendingIntent.FLAG_IMMUTABLE);
++        Notification notification = new Notification.Builder(mContext, CHANNEL)
++                .setContentTitle(mContext.getString(title))
++                .setContentText(message)
++                .setStyle(new Notification.BigTextStyle().bigText(message))
++                .setSmallIcon(R.drawable.ic_performance_mode)
++                .setContentIntent(settings)
++                .setOngoing(true)
++                .setOnlyAlertOnce(!alert)
++                .setSilent(!alert)
++                .setVisibility(Notification.VISIBILITY_PUBLIC)
++                .addAction(new Notification.Action.Builder(null,
++                        mContext.getString(R.string.performance_mode_disable), disable).build())
++                .build();
++        notification.flags |= Notification.FLAG_NO_CLEAR;
++        mManager.notifyAsUser(null, ID, notification, UserHandle.ALL);
++    }
++}
+diff --git a/lineage/res/res/drawable/ic_performance_mode.xml b/lineage/res/res/drawable/ic_performance_mode.xml
+new file mode 100644
+index 0000000..1a13e9a
+--- /dev/null
++++ b/lineage/res/res/drawable/ic_performance_mode.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp"
++    android:viewportWidth="1024" android:viewportHeight="1024">
++    <path android:fillColor="#FFFFFFFF" android:pathData="M336 972.8c-60.8-128-28.8-201.6 19.2-268.8 51.2-76.8 64-150.4 64-150.4s41.6 51.2 25.6 134.4c70.4-80 83.2-208 73.6-256 160 112 230.4 358.4 137.6 537.6 492.8-281.6 121.6-700.8 57.6-745.6 22.4 48 25.6 128-19.2 166.4-73.6-281.6-256-336-256-336 22.4 144-76.8 300.8-172.8 419.2-3.2-57.6-6.4-96-38.4-153.6-6.4 105.6-86.4 188.8-108.8 294.4C89.6 758.4 140.8 860.8 336 972.8L336 972.8z" />
++</vector>
+diff --git a/lineage/res/res/values-zh-rCN/performance_mode.xml b/lineage/res/res/values-zh-rCN/performance_mode.xml
+new file mode 100644
+index 0000000..7645f60
+--- /dev/null
++++ b/lineage/res/res/values-zh-rCN/performance_mode.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="performance_mode_title">性能模式</string>
++    <string name="performance_mode_notification_title">性能模式已开启</string>
++    <string name="performance_mode_notification_content">温控限制已放宽，设备可能明显发热。长时间接触皮肤存在低温烫伤风险。</string>
++    <string name="performance_mode_disable">关闭性能模式</string>
++    <string name="performance_mode_applying">正在开启性能模式…</string>
++    <string name="performance_mode_restoring">正在恢复默认温控策略…</string>
++    <string name="performance_mode_error">性能模式状态异常</string>
++    <string name="performance_mode_error_content">无法确认温控策略已成功应用。请尝试再次关闭性能模式。</string>
++</resources>
+diff --git a/lineage/res/res/values-zh-rTW/performance_mode.xml b/lineage/res/res/values-zh-rTW/performance_mode.xml
+new file mode 100644
+index 0000000..02cbc19
+--- /dev/null
++++ b/lineage/res/res/values-zh-rTW/performance_mode.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="performance_mode_title">效能模式</string>
++    <string name="performance_mode_notification_title">效能模式已開啟</string>
++    <string name="performance_mode_notification_content">溫控限制已放寬，裝置可能明顯發熱。長時間接觸皮膚存在低溫燙傷風險。</string>
++    <string name="performance_mode_disable">關閉效能模式</string>
++    <string name="performance_mode_applying">正在開啟效能模式…</string>
++    <string name="performance_mode_restoring">正在恢復預設溫控策略…</string>
++    <string name="performance_mode_error">效能模式狀態異常</string>
++    <string name="performance_mode_error_content">無法確認溫控策略已成功套用。請嘗試再次關閉效能模式。</string>
++</resources>
+diff --git a/lineage/res/res/values/config.xml b/lineage/res/res/values/config.xml
+index d1b2907..86e52ba 100644
+--- a/lineage/res/res/values/config.xml
++++ b/lineage/res/res/values/config.xml
+@@ -348,4 +348,6 @@
+ 
+     <!-- Advanced rotation settings -->
+     <bool name="config_enableAdvancedRotationSettings">true</bool>
++    <!-- Enables the marble thermal performance-mode backend. -->
++    <bool name="config_performanceModeAvailable">false</bool>
+ </resources>
+diff --git a/lineage/res/res/values/performance_mode.xml b/lineage/res/res/values/performance_mode.xml
+new file mode 100644
+index 0000000..9957655
+--- /dev/null
++++ b/lineage/res/res/values/performance_mode.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="performance_mode_title">Performance mode</string>
++    <string name="performance_mode_notification_title">Performance mode is on</string>
++    <string name="performance_mode_notification_content">Thermal limits have been relaxed and the device may become noticeably hot. Prolonged skin contact poses a risk of low-temperature burns.</string>
++    <string name="performance_mode_disable">Turn off performance mode</string>
++    <string name="performance_mode_applying">Turning on performance mode…</string>
++    <string name="performance_mode_restoring">Restoring default thermal policy…</string>
++    <string name="performance_mode_error">Performance mode status uncertain</string>
++    <string name="performance_mode_error_content">The thermal policy could not be confirmed. Try turning off performance mode again.</string>
++</resources>
+diff --git a/lineage/res/res/values/symbols.xml b/lineage/res/res/values/symbols.xml
+index c2d404f..e28af87 100644
+--- a/lineage/res/res/values/symbols.xml
++++ b/lineage/res/res/values/symbols.xml
+@@ -212,4 +212,14 @@
+ 
+     <!-- Advanced rotation settings -->
+     <java-symbol type="bool" name="config_enableAdvancedRotationSettings" />
++    <java-symbol type="bool" name="config_performanceModeAvailable" />
++    <java-symbol type="string" name="performance_mode_title" />
++    <java-symbol type="string" name="performance_mode_notification_title" />
++    <java-symbol type="string" name="performance_mode_notification_content" />
++    <java-symbol type="string" name="performance_mode_disable" />
++    <java-symbol type="string" name="performance_mode_applying" />
++    <java-symbol type="string" name="performance_mode_restoring" />
++    <java-symbol type="string" name="performance_mode_error" />
++    <java-symbol type="string" name="performance_mode_error_content" />
++    <java-symbol type="drawable" name="ic_performance_mode" />
+ </resources>
+diff --git a/sdk/src/java/lineageos/health/HealthInterface.java b/sdk/src/java/lineageos/health/HealthInterface.java
+index 38a6288..f4525e9 100644
+--- a/sdk/src/java/lineageos/health/HealthInterface.java
++++ b/sdk/src/java/lineageos/health/HealthInterface.java
+@@ -34,6 +34,21 @@ public class HealthInterface {
+      */
+     public static final int MODE_LIMIT = 3;
+ 
++    /** @hide Device-wide performance request, owned by the Health service. */
++    public static final String PERFORMANCE_MODE_REQUESTED = "performance_mode_requested";
++    /** @hide Device-wide application state, owned by the Health service. */
++    public static final String PERFORMANCE_MODE_STATE = "performance_mode_state";
++    /** @hide */
++    public static final int PERFORMANCE_MODE_OFF = 0;
++    /** @hide */
++    public static final int PERFORMANCE_MODE_APPLYING = 1;
++    /** @hide */
++    public static final int PERFORMANCE_MODE_ON = 2;
++    /** @hide */
++    public static final int PERFORMANCE_MODE_RESTORING = 3;
++    /** @hide Thermal state is uncertain; retain the risk indication. */
++    public static final int PERFORMANCE_MODE_ERROR = 4;
++
+     private static final String TAG = "HealthInterface";
+     private static IHealthInterface sService;
+     private static HealthInterface sInstance;
+@@ -390,4 +405,22 @@ public class HealthInterface {
+ 
+         return false;
+     }
++
++    /** @hide */
++    public boolean isPerformanceModeSupported() {
++        try {
++            return checkService() && sService.isPerformanceModeSupported();
++        } catch (RemoteException e) {
++            return false;
++        }
++    }
++
++    /** @hide Returns whether the request was queued, not whether it was applied. */
++    public boolean setPerformanceModeEnabled(boolean enabled) {
++        try {
++            return checkService() && sService.setPerformanceModeEnabled(enabled);
++        } catch (RemoteException e) {
++            return false;
++        }
++    }
+ }
+diff --git a/sdk/src/java/lineageos/health/IHealthInterface.aidl b/sdk/src/java/lineageos/health/IHealthInterface.aidl
+index 4ff6df4..f1d8b42 100644
+--- a/sdk/src/java/lineageos/health/IHealthInterface.aidl
++++ b/sdk/src/java/lineageos/health/IHealthInterface.aidl
+@@ -34,4 +34,6 @@ interface IHealthInterface {
+     int getSessionFastChargeMode();
+     boolean setSessionFastChargeMode(int mode);
+     boolean resetSessionFastChargeMode();
++    boolean isPerformanceModeSupported();
++    boolean setPerformanceModeEnabled(boolean enabled);
+ }
+-- 
+2.43.0
+

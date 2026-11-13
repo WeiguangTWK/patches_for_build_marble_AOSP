@@ -1,0 +1,358 @@
+From bb259171ca9ceedbfcb5c59747a1d774dbd9d34f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 15:08:35 +0800
+Subject: [PATCH] Neko LineageOS: [PERF MDOE] Replace emergency limit
+ relaxation with performance mode
+
+Replace the charging-session relaxation switch with a performance mode
+entry backed by the Health service.
+
+Observe application state asynchronously and show progress or failure
+summaries. Keep an uncertain state checked so users can retry disabling
+the mode, and explain that it resets after a system reboot.
+
+Add English, Simplified Chinese and Traditional Chinese strings.
+
+Change-Id: Ieac992d5831778b6b5917c7a3f0dee788ec60eda
+---
+ res/values-zh-rCN/performance_mode.xml        |   9 ++
+ res/values-zh-rCN/strings.xml                 |   2 -
+ res/values-zh-rTW/performance_mode.xml        |   9 ++
+ res/values-zh-rTW/strings.xml                 |   2 -
+ res/values/performance_mode.xml               |   9 ++
+ res/values/strings.xml                        |   2 -
+ res/xml/power_usage_summary.xml               |   8 +-
+ ...ngLimitRelaxationPreferenceController.java |  84 ------------
+ .../PerformanceModePreferenceController.java  | 123 ++++++++++++++++++
+ 9 files changed, 154 insertions(+), 94 deletions(-)
+ create mode 100644 res/values-zh-rCN/performance_mode.xml
+ create mode 100644 res/values-zh-rTW/performance_mode.xml
+ create mode 100644 res/values/performance_mode.xml
+ delete mode 100644 src/com/android/settings/fuelgauge/ChargingLimitRelaxationPreferenceController.java
+ create mode 100644 src/com/android/settings/fuelgauge/PerformanceModePreferenceController.java
+
+diff --git a/res/values-zh-rCN/performance_mode.xml b/res/values-zh-rCN/performance_mode.xml
+new file mode 100644
+index 0000000..b17ce5d
+--- /dev/null
++++ b/res/values-zh-rCN/performance_mode.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="performance_mode_title">性能模式</string>
++    <string name="performance_mode_summary">放宽温控限制以提升性能，可能增加耗电和设备温度。重启后自动关闭。</string>
++    <string name="performance_mode_applying">正在开启性能模式…</string>
++    <string name="performance_mode_restoring">正在恢复默认温控策略…</string>
++    <string name="performance_mode_error">性能模式状态异常</string>
++    <string name="performance_mode_error_content">无法确认温控策略已成功应用。请尝试再次关闭性能模式。</string>
++</resources>
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index df99ceb..b7c5b0e 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -2895,8 +2895,6 @@
+     <string name="printer_info_desc" msgid="1206872325746154206">"此打印机的详细信息"</string>
+     <string name="power_usage_summary_title" msgid="4198312848584882113">"电池"</string>
+     <string name="power_usage_summary" msgid="6857382582534984531">"耗电情况"</string>
+-    <string name="charging_limit_relaxation_title">紧急限制放宽</string>
+-    <string name="charging_limit_relaxation_summary">临时放宽充电限制，仅对当前充电会话生效。</string>
+     <string name="power_usage_level_and_status" msgid="821521456989429593">"<xliff:g id="LEVEL">%1$s</xliff:g> - <xliff:g id="STATUS">%2$s</xliff:g>"</string>
+     <string name="power_discharge_remaining" msgid="6997529817917076536">"还可用：<xliff:g id="REMAIN">%1$s</xliff:g>"</string>
+     <string name="power_charge_remaining" msgid="7046064326172265116">"充电剩余时间：<xliff:g id="UNTIL_CHARGED">%1$s</xliff:g>"</string>
+diff --git a/res/values-zh-rTW/performance_mode.xml b/res/values-zh-rTW/performance_mode.xml
+new file mode 100644
+index 0000000..6f23829
+--- /dev/null
++++ b/res/values-zh-rTW/performance_mode.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="performance_mode_title">效能模式</string>
++    <string name="performance_mode_summary">放寬溫控限制以提升效能，可能增加耗電和裝置溫度。重新啟動後自動關閉。</string>
++    <string name="performance_mode_applying">正在開啟效能模式…</string>
++    <string name="performance_mode_restoring">正在恢復預設溫控策略…</string>
++    <string name="performance_mode_error">效能模式狀態異常</string>
++    <string name="performance_mode_error_content">無法確認溫控策略已成功套用。請嘗試再次關閉效能模式。</string>
++</resources>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index bbfe27f..da5cc47 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -2893,8 +2893,6 @@
+     <string name="printer_info_desc" msgid="1206872325746154206">"查看這台印表機的詳細資訊"</string>
+     <string name="power_usage_summary_title" msgid="4198312848584882113">"電池"</string>
+     <string name="power_usage_summary" msgid="6857382582534984531">"查看正在消耗電力的功能"</string>
+-    <string name="charging_limit_relaxation_title">緊急限制放寬</string>
+-    <string name="charging_limit_relaxation_summary">暫時放寬充電限制，僅對目前充電工作階段生效。</string>
+     <string name="power_usage_level_and_status" msgid="821521456989429593">"<xliff:g id="LEVEL">%1$s</xliff:g> - <xliff:g id="STATUS">%2$s</xliff:g>"</string>
+     <string name="power_discharge_remaining" msgid="6997529817917076536">"還剩 <xliff:g id="REMAIN">%1$s</xliff:g>"</string>
+     <string name="power_charge_remaining" msgid="7046064326172265116">"<xliff:g id="UNTIL_CHARGED">%1$s</xliff:g>後充電完畢"</string>
+diff --git a/res/values/performance_mode.xml b/res/values/performance_mode.xml
+new file mode 100644
+index 0000000..a619c10
+--- /dev/null
++++ b/res/values/performance_mode.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="performance_mode_title">Performance mode</string>
++    <string name="performance_mode_summary">Relaxes thermal limits to improve performance. May increase power consumption and device temperature. Turns off after a restart.</string>
++    <string name="performance_mode_applying">Turning on performance mode…</string>
++    <string name="performance_mode_restoring">Restoring default thermal policy…</string>
++    <string name="performance_mode_error">Performance mode status uncertain</string>
++    <string name="performance_mode_error_content">The thermal policy could not be confirmed. Try turning off performance mode again.</string>
++</resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 32c59ff..55578b4 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -6732,8 +6732,6 @@
+     <string name="power_usage_summary_title">Battery</string>
+     <!-- Activity title summary for App Fuel Gauge summary -->
+     <string name="power_usage_summary">What has been using the battery</string>
+-    <string name="charging_limit_relaxation_title">Emergency limit relaxation</string>
+-    <string name="charging_limit_relaxation_summary">Temporarily relaxes charging limits for the current charge session only.</string>
+     <!-- Display the battery level and status [CHAR_LIMIT=60] -->
+     <string name="power_usage_level_and_status"><xliff:g id="level">%1$s</xliff:g>
+         - <xliff:g id="status">%2$s</xliff:g></string>
+diff --git a/res/xml/power_usage_summary.xml b/res/xml/power_usage_summary.xml
+index f734378..7ccf5c2 100644
+--- a/res/xml/power_usage_summary.xml
++++ b/res/xml/power_usage_summary.xml
+@@ -82,10 +82,10 @@
+             settings:requiresService="healthinterface" />
+ 
+         <SwitchPreferenceCompat
+-            android:key="charging_limit_relaxation"
+-            android:title="@string/charging_limit_relaxation_title"
+-            android:summary="@string/charging_limit_relaxation_summary"
+-            settings:controller="com.android.settings.fuelgauge.ChargingLimitRelaxationPreferenceController"
++            android:key="performance_mode"
++            android:title="@string/performance_mode_title"
++            android:summary="@string/performance_mode_summary"
++            settings:controller="com.android.settings.fuelgauge.PerformanceModePreferenceController"
+             settings:requiresService="healthinterface" />
+ 
+         <!-- Charging speed -->
+diff --git a/src/com/android/settings/fuelgauge/ChargingLimitRelaxationPreferenceController.java b/src/com/android/settings/fuelgauge/ChargingLimitRelaxationPreferenceController.java
+deleted file mode 100644
+index 2ba41e7..0000000
+--- a/src/com/android/settings/fuelgauge/ChargingLimitRelaxationPreferenceController.java
++++ /dev/null
+@@ -1,84 +0,0 @@
+-/*
+- * Copyright (C) 2026 Neko-LineageOS
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package com.android.settings.fuelgauge;
+-
+-import android.content.Context;
+-
+-import androidx.annotation.NonNull;
+-
+-import com.android.settings.R;
+-import com.android.settings.core.TogglePreferenceController;
+-
+-import lineageos.health.HealthInterface;
+-
+-public class ChargingLimitRelaxationPreferenceController extends TogglePreferenceController {
+-    private static final int MODE_NONE = 1;
+-
+-    public ChargingLimitRelaxationPreferenceController(@NonNull Context context,
+-            @NonNull String preferenceKey) {
+-        super(context, preferenceKey);
+-    }
+-
+-    private HealthInterface getHealthInterface() {
+-        try {
+-            return HealthInterface.getInstance(mContext);
+-        } catch (RuntimeException e) {
+-            return null;
+-        }
+-    }
+-
+-    @Override
+-    public int getAvailabilityStatus() {
+-        final HealthInterface healthInterface = getHealthInterface();
+-        return healthInterface != null && healthInterface.isFastChargeSupported()
+-                && healthInterface.getSupportedFastChargeModes().length == 1
+-                ? AVAILABLE : UNSUPPORTED_ON_DEVICE;
+-    }
+-
+-    @Override
+-    public boolean isChecked() {
+-        final HealthInterface healthInterface = getHealthInterface();
+-        return healthInterface != null
+-                && healthInterface.getSessionFastChargeMode() != MODE_NONE;
+-    }
+-
+-    @Override
+-    public boolean setChecked(boolean isChecked) {
+-        final HealthInterface healthInterface = getHealthInterface();
+-        if (healthInterface == null) {
+-            return false;
+-        }
+-
+-        if (!isChecked) {
+-            return healthInterface.resetSessionFastChargeMode();
+-        }
+-
+-        final int[] supportedModes = healthInterface.getSupportedFastChargeModes();
+-        for (int mode : supportedModes) {
+-            if (mode != MODE_NONE) {
+-                return healthInterface.setSessionFastChargeMode(mode);
+-            }
+-        }
+-
+-        return false;
+-    }
+-
+-    @Override
+-    public int getSliceHighlightMenuRes() {
+-        return R.string.menu_key_battery;
+-    }
+-}
+diff --git a/src/com/android/settings/fuelgauge/PerformanceModePreferenceController.java b/src/com/android/settings/fuelgauge/PerformanceModePreferenceController.java
+new file mode 100644
+index 0000000..d68fb46
+--- /dev/null
++++ b/src/com/android/settings/fuelgauge/PerformanceModePreferenceController.java
+@@ -0,0 +1,123 @@
++/*
++ * SPDX-FileCopyrightText: 2026 Neko-LineageOS
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++package com.android.settings.fuelgauge;
++
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_APPLYING;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_ERROR;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_OFF;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_RESTORING;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_STATE;
++
++import android.content.Context;
++import android.database.ContentObserver;
++import android.os.Handler;
++import android.os.Looper;
++import android.provider.Settings;
++import android.widget.Toast;
++
++import androidx.preference.Preference;
++import androidx.preference.PreferenceScreen;
++
++import com.android.settings.R;
++import com.android.settings.core.TogglePreferenceController;
++import com.android.settingslib.core.lifecycle.LifecycleObserver;
++import com.android.settingslib.core.lifecycle.events.OnStart;
++import com.android.settingslib.core.lifecycle.events.OnStop;
++
++import lineageos.health.HealthInterface;
++
++public final class PerformanceModePreferenceController extends TogglePreferenceController
++        implements LifecycleObserver, OnStart, OnStop {
++    private Preference mPreference;
++    private final ContentObserver mObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
++        @Override
++        public void onChange(boolean selfChange) {
++            if (mPreference != null) updateState(mPreference);
++        }
++    };
++
++    public PerformanceModePreferenceController(Context context, String preferenceKey) {
++        super(context, preferenceKey);
++    }
++
++    private HealthInterface health() {
++        try {
++            return HealthInterface.getInstance(mContext);
++        } catch (RuntimeException e) {
++            return null;
++        }
++    }
++
++    private int state() {
++        return Settings.Global.getInt(mContext.getContentResolver(),
++                PERFORMANCE_MODE_STATE, PERFORMANCE_MODE_OFF);
++    }
++
++    @Override
++    public int getAvailabilityStatus() {
++        HealthInterface health = health();
++        return health != null && health.isPerformanceModeSupported()
++                ? AVAILABLE : UNSUPPORTED_ON_DEVICE;
++    }
++
++    @Override
++    public boolean isChecked() {
++        // An uncertain/failed disable must remain visible and allow another off attempt.
++        return state() != PERFORMANCE_MODE_OFF;
++    }
++
++    @Override
++    public boolean setChecked(boolean checked) {
++        HealthInterface health = health();
++        boolean accepted = health != null && health.setPerformanceModeEnabled(checked);
++        if (!accepted) {
++            Toast.makeText(mContext, R.string.performance_mode_error, Toast.LENGTH_LONG).show();
++        }
++        return accepted;
++    }
++
++    @Override
++    public CharSequence getSummary() {
++        return mContext.getText(switch (state()) {
++            case PERFORMANCE_MODE_APPLYING -> R.string.performance_mode_applying;
++            case PERFORMANCE_MODE_RESTORING -> R.string.performance_mode_restoring;
++            case PERFORMANCE_MODE_ERROR -> R.string.performance_mode_error_content;
++            default -> R.string.performance_mode_summary;
++        });
++    }
++
++    @Override
++    public void displayPreference(PreferenceScreen screen) {
++        super.displayPreference(screen);
++        mPreference = screen.findPreference(getPreferenceKey());
++    }
++
++    @Override
++    public void updateState(Preference preference) {
++        super.updateState(preference);
++        preference.setSummary(getSummary());
++        int state = state();
++        preference.setEnabled(state != PERFORMANCE_MODE_APPLYING
++                && state != PERFORMANCE_MODE_RESTORING);
++    }
++
++    @Override
++    public void onStart() {
++        mContext.getContentResolver().registerContentObserver(
++                Settings.Global.getUriFor(PERFORMANCE_MODE_STATE), false, mObserver);
++        if (mPreference != null) updateState(mPreference);
++    }
++
++    @Override
++    public void onStop() {
++        mContext.getContentResolver().unregisterContentObserver(mObserver);
++    }
++
++    @Override
++    public int getSliceHighlightMenuRes() {
++        return R.string.menu_key_battery;
++    }
++}
+-- 
+2.43.0
+

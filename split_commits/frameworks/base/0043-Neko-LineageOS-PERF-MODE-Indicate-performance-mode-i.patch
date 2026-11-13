@@ -1,0 +1,536 @@
+From 335fc6fb6288847be3f21d577ba6b9204c134004 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 15:30:57 +0800
+Subject: [PATCH] Neko LineageOS: [PERF MODE] Indicate performance mode in the
+ battery icon
+
+Observe the Health service's performance mode state and show a red battery
+with a white flame while the mode is active or the thermal state remains
+uncertain.
+
+Give the performance indicator precedence over battery saver and charging
+glyphs while preserving battery level and actual charging information.
+
+Support the legacy battery renderer, unified drawable and Compose battery
+pipeline, and include the performance warning in accessibility descriptions.
+
+Change-Id: Idea07ac09c266f0d37c955b500f7314de2fb2c92
+---
+ .../res/drawable/ic_battery_performance.xml   |  6 ++++
+ .../graph/ThemedBatteryDrawable.kt            | 35 +++++++++++++++++++
+ .../battery_unified_attr_performance.xml      |  6 ++++
+ .../res/values-zh-rCN/performance_mode.xml    |  4 +++
+ .../res/values-zh-rTW/performance_mode.xml    |  4 +++
+ .../SystemUI/res/values/performance_mode.xml  |  4 +++
+ .../battery/AccessorizedBatteryDrawable.kt    |  4 +++
+ .../systemui/battery/BatteryMeterView.java    | 26 ++++++++++++--
+ .../battery/BatteryMeterViewController.java   | 21 ++++++++++-
+ .../battery/unified/BatteryDrawableState.kt   |  2 ++
+ .../battery/unified/BatteryLayersDrawable.kt  |  9 +++++
+ .../data/repository/BatteryRepository.kt      | 26 ++++++++++++++
+ .../domain/interactor/BatteryInteractor.kt    | 10 ++++--
+ .../battery/shared/ui/BatteryColors.kt        | 16 +++++++++
+ .../battery/shared/ui/BatteryGlyph.kt         | 10 ++++++
+ .../battery/ui/viewmodel/BatteryViewModel.kt  | 17 ++++++++-
+ 16 files changed, 194 insertions(+), 6 deletions(-)
+ create mode 100644 packages/SettingsLib/res/drawable/ic_battery_performance.xml
+ create mode 100644 packages/SystemUI/res/drawable/battery_unified_attr_performance.xml
+ create mode 100644 packages/SystemUI/res/values-zh-rCN/performance_mode.xml
+ create mode 100644 packages/SystemUI/res/values-zh-rTW/performance_mode.xml
+ create mode 100644 packages/SystemUI/res/values/performance_mode.xml
+
+diff --git a/packages/SettingsLib/res/drawable/ic_battery_performance.xml b/packages/SettingsLib/res/drawable/ic_battery_performance.xml
+new file mode 100644
+index 000000000..1a13e9a5a
+--- /dev/null
++++ b/packages/SettingsLib/res/drawable/ic_battery_performance.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp"
++    android:viewportWidth="1024" android:viewportHeight="1024">
++    <path android:fillColor="#FFFFFFFF" android:pathData="M336 972.8c-60.8-128-28.8-201.6 19.2-268.8 51.2-76.8 64-150.4 64-150.4s41.6 51.2 25.6 134.4c70.4-80 83.2-208 73.6-256 160 112 230.4 358.4 137.6 537.6 492.8-281.6 121.6-700.8 57.6-745.6 22.4 48 25.6 128-19.2 166.4-73.6-281.6-256-336-256-336 22.4 144-76.8 300.8-172.8 419.2-3.2-57.6-6.4-96-38.4-153.6-6.4 105.6-86.4 188.8-108.8 294.4C89.6 758.4 140.8 860.8 336 972.8L336 972.8z" />
++</vector>
+diff --git a/packages/SettingsLib/src/com/android/settingslib/graph/ThemedBatteryDrawable.kt b/packages/SettingsLib/src/com/android/settingslib/graph/ThemedBatteryDrawable.kt
+index 73f6db6d4..0b84a11eb 100644
+--- a/packages/SettingsLib/src/com/android/settingslib/graph/ThemedBatteryDrawable.kt
++++ b/packages/SettingsLib/src/com/android/settingslib/graph/ThemedBatteryDrawable.kt
+@@ -94,6 +94,19 @@ open class ThemedBatteryDrawable(private val context: Context, frameColor: Int)
+     open var criticalLevel: Int = context.resources.getInteger(
+             com.android.internal.R.integer.config_criticalBatteryWarningLevel)
+ 
++    var performanceModeEnabled = false
++        set(value) {
++            field = value
++            postInvalidate()
++        }
++
++    private val performancePaint = Paint(Paint.ANTI_ALIAS_FLAG)
++    private val performanceFlame by lazy {
++        context.getDrawable(R.drawable.ic_battery_performance)!!.mutate().apply {
++            setTint(Color.WHITE)
++        }
++    }
++
+     var charging = false
+         set(value) {
+             field = value
+@@ -178,6 +191,28 @@ open class ThemedBatteryDrawable(private val context: Context, frameColor: Int)
+     }
+ 
+     override fun draw(c: Canvas) {
++        if (performanceModeEnabled) {
++            // Keep the level visible while fixing both frame and fill to red in all themes.
++            performancePaint.color = Color.rgb(255, 14, 1)
++            c.drawPath(scaledPerimeter, performancePaint)
++            performancePaint.alpha = 80
++            c.drawPath(scaledFill, performancePaint)
++            performancePaint.alpha = 255
++            c.save()
++            c.clipRect(fillRect.left,
++                fillRect.bottom - fillRect.height() * batteryLevel / 100f,
++                fillRect.right, fillRect.bottom)
++            c.drawPath(scaledFill, performancePaint)
++            c.restore()
++            val size = minOf(fillRect.width() * 0.85f, fillRect.height() * 0.65f)
++            performanceFlame.setBounds(
++                (fillRect.centerX() - size / 2).toInt(),
++                (fillRect.centerY() - size / 2).toInt(),
++                (fillRect.centerX() + size / 2).toInt(),
++                (fillRect.centerY() + size / 2).toInt())
++            performanceFlame.draw(c)
++            return
++        }
+         c.saveLayer(null, null)
+         unifiedPath.reset()
+         levelPath.reset()
+diff --git a/packages/SystemUI/res/drawable/battery_unified_attr_performance.xml b/packages/SystemUI/res/drawable/battery_unified_attr_performance.xml
+new file mode 100644
+index 000000000..1a13e9a5a
+--- /dev/null
++++ b/packages/SystemUI/res/drawable/battery_unified_attr_performance.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp" android:height="24dp"
++    android:viewportWidth="1024" android:viewportHeight="1024">
++    <path android:fillColor="#FFFFFFFF" android:pathData="M336 972.8c-60.8-128-28.8-201.6 19.2-268.8 51.2-76.8 64-150.4 64-150.4s41.6 51.2 25.6 134.4c70.4-80 83.2-208 73.6-256 160 112 230.4 358.4 137.6 537.6 492.8-281.6 121.6-700.8 57.6-745.6 22.4 48 25.6 128-19.2 166.4-73.6-281.6-256-336-256-336 22.4 144-76.8 300.8-172.8 419.2-3.2-57.6-6.4-96-38.4-153.6-6.4 105.6-86.4 188.8-108.8 294.4C89.6 758.4 140.8 860.8 336 972.8L336 972.8z" />
++</vector>
+diff --git a/packages/SystemUI/res/values-zh-rCN/performance_mode.xml b/packages/SystemUI/res/values-zh-rCN/performance_mode.xml
+new file mode 100644
+index 000000000..581d68a58
+--- /dev/null
++++ b/packages/SystemUI/res/values-zh-rCN/performance_mode.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="accessibility_performance_mode">性能模式已开启或温控策略状态不确定</string>
++</resources>
+diff --git a/packages/SystemUI/res/values-zh-rTW/performance_mode.xml b/packages/SystemUI/res/values-zh-rTW/performance_mode.xml
+new file mode 100644
+index 000000000..14525135d
+--- /dev/null
++++ b/packages/SystemUI/res/values-zh-rTW/performance_mode.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="accessibility_performance_mode">效能模式已開啟或溫控策略狀態不確定</string>
++</resources>
+diff --git a/packages/SystemUI/res/values/performance_mode.xml b/packages/SystemUI/res/values/performance_mode.xml
+new file mode 100644
+index 000000000..177b86cdf
+--- /dev/null
++++ b/packages/SystemUI/res/values/performance_mode.xml
+@@ -0,0 +1,4 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <string name="accessibility_performance_mode">Performance mode active or thermal policy uncertain</string>
++</resources>
+diff --git a/packages/SystemUI/src/com/android/systemui/battery/AccessorizedBatteryDrawable.kt b/packages/SystemUI/src/com/android/systemui/battery/AccessorizedBatteryDrawable.kt
+index b8de117fc..c3b89d2f2 100644
+--- a/packages/SystemUI/src/com/android/systemui/battery/AccessorizedBatteryDrawable.kt
++++ b/packages/SystemUI/src/com/android/systemui/battery/AccessorizedBatteryDrawable.kt
+@@ -189,6 +189,10 @@ class AccessorizedBatteryDrawable(
+     }
+ 
+     /** Sets whether power save is enabled. */
++    fun setPerformanceModeEnabled(enabled: Boolean) {
++        mainBatteryDrawable.performanceModeEnabled = enabled
++    }
++
+     fun setPowerSaveEnabled(powerSaveEnabled: Boolean) {
+         mainBatteryDrawable.powerSaveEnabled = powerSaveEnabled
+     }
+diff --git a/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterView.java b/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterView.java
+index 1806e4e60..2f55ff47e 100644
+--- a/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterView.java
++++ b/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterView.java
+@@ -86,6 +86,7 @@ public class BatteryMeterView extends LinearLayout implements DarkReceiver {
+     private String mEstimateText = null;
+     private boolean mPluggedIn;
+     private boolean mPowerSaveEnabled;
++    private boolean mPerformanceModeActive;
+     private boolean mIsBatteryDefender;
+     private boolean mIsIncompatibleCharging;
+     // Error state where we know nothing about the current battery state
+@@ -267,7 +268,9 @@ public class BatteryMeterView extends LinearLayout implements DarkReceiver {
+         if (!NewStatusBarIcons.isEnabled()) return null;
+ 
+         int resId = 0;
+-        if (mPowerSaveEnabled) {
++        if (mPerformanceModeActive) {
++            resId = R.drawable.battery_unified_attr_performance;
++        } else if (mPowerSaveEnabled) {
+             resId = R.drawable.battery_unified_attr_powersave;
+         } else if (mIsBatteryDefender) {
+             resId = R.drawable.battery_unified_attr_defend;
+@@ -285,6 +288,7 @@ public class BatteryMeterView extends LinearLayout implements DarkReceiver {
+ 
+     /** Calculate the appropriate color for the current state */
+     private ColorProfile getCurrentColorProfile() {
++        if (mPerformanceModeActive) return ColorProfile.Performance;
+         return getColorProfile(
+                 mPowerSaveEnabled,
+                 mIsBatteryDefender,
+@@ -307,6 +311,21 @@ public class BatteryMeterView extends LinearLayout implements DarkReceiver {
+         return ColorProfile.None;
+     }
+ 
++    void onPerformanceModeChanged(boolean active) {
++        if (mPerformanceModeActive == active) return;
++        mPerformanceModeActive = active;
++        mDrawable.setPerformanceModeEnabled(active);
++        mDrawable.setDisplayShield(mIsBatteryDefender && !active);
++        if (NewStatusBarIcons.isEnabled()) {
++            setBatteryDrawableState(new BatteryDrawableState(
++                    mUnifiedBatteryState.getLevel(), mUnifiedBatteryState.getShowPercent(),
++                    getCurrentColorProfile(), getBatteryAttribution(isCharging())));
++        } else {
++            scaleBatteryMeterViews();
++        }
++        updateContentDescription();
++    }
++
+     void onPowerSaveChanged(boolean isPowerSave) {
+         if (isPowerSave == mPowerSaveEnabled) {
+             return;
+@@ -518,6 +537,9 @@ public class BatteryMeterView extends LinearLayout implements DarkReceiver {
+             contentDescription = context.getString(R.string.accessibility_battery_level, mLevel);
+         }
+ 
++        if (mPerformanceModeActive) {
++            contentDescription += ", " + context.getString(R.string.accessibility_performance_mode);
++        }
+         setContentDescription(contentDescription);
+     }
+ 
+@@ -654,7 +676,7 @@ public class BatteryMeterView extends LinearLayout implements DarkReceiver {
+         float mainBatteryWidth =
+                 res.getDimensionPixelSize(R.dimen.status_bar_battery_icon_width) * iconScaleFactor;
+ 
+-        boolean displayShield = mIsBatteryDefender;
++        boolean displayShield = mIsBatteryDefender && !mPerformanceModeActive;
+         float fullBatteryIconHeight =
+                 BatterySpecs.getFullBatteryHeight(mainBatteryHeight, displayShield);
+         float fullBatteryIconWidth =
+diff --git a/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterViewController.java b/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterViewController.java
+index fcf510519..bc571ea4a 100644
+--- a/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterViewController.java
++++ b/packages/SystemUI/src/com/android/systemui/battery/BatteryMeterViewController.java
+@@ -17,6 +17,9 @@ package com.android.systemui.battery;
+ 
+ import static android.provider.Settings.System.SHOW_BATTERY_PERCENT;
+ 
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_OFF;
++import static lineageos.health.HealthInterface.PERFORMANCE_MODE_STATE;
++
+ import android.content.ContentResolver;
+ import android.content.Context;
+ import android.database.ContentObserver;
+@@ -125,6 +128,10 @@ public class BatteryMeterViewController extends ViewController<BatteryMeterView>
+                 public void onUserChanged(int newUser, @NonNull Context userContext) {
+                     mContentResolver.unregisterContentObserver(mSettingObserver);
+                     registerShowBatteryPercentObserver(newUser);
++                    registerGlobalBatteryUpdateObserver();
++                    mContentResolver.registerContentObserver(
++                            Settings.Global.getUriFor(PERFORMANCE_MODE_STATE), false, mSettingObserver);
++                    updatePerformanceMode();
+                     mView.updateShowPercent();
+                 }
+             };
+@@ -168,6 +175,9 @@ public class BatteryMeterViewController extends ViewController<BatteryMeterView>
+ 
+         registerShowBatteryPercentObserver(mUserTracker.getUserId());
+         registerGlobalBatteryUpdateObserver();
++        mContentResolver.registerContentObserver(Settings.Global.getUriFor(PERFORMANCE_MODE_STATE),
++                false, mSettingObserver);
++        updatePerformanceMode();
+         mUserTracker.addCallback(mUserChangedCallback, new HandlerExecutor(mMainHandler));
+ 
+         mView.updateShowPercent();
+@@ -225,6 +235,11 @@ public class BatteryMeterViewController extends ViewController<BatteryMeterView>
+                 mSettingObserver);
+     }
+ 
++    private void updatePerformanceMode() {
++        mView.onPerformanceModeChanged(Settings.Global.getInt(mContentResolver,
++                PERFORMANCE_MODE_STATE, PERFORMANCE_MODE_OFF) != PERFORMANCE_MODE_OFF);
++    }
++
+     private final class SettingObserver extends ContentObserver {
+         public SettingObserver(Handler handler) {
+             super(handler);
+@@ -233,8 +248,12 @@ public class BatteryMeterViewController extends ViewController<BatteryMeterView>
+         @Override
+         public void onChange(boolean selfChange, Uri uri) {
+             super.onChange(selfChange, uri);
++            if (uri != null && PERFORMANCE_MODE_STATE.equals(uri.getLastPathSegment())) {
++                updatePerformanceMode();
++                return;
++            }
+             mView.updateShowPercent();
+-            if (TextUtils.equals(uri.getLastPathSegment(),
++            if (uri != null && TextUtils.equals(uri.getLastPathSegment(),
+                     Settings.Global.BATTERY_ESTIMATES_LAST_UPDATE_TIME)) {
+                 // update the text for sure if the estimate in the cache was updated
+                 mView.updatePercentText();
+diff --git a/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryDrawableState.kt b/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryDrawableState.kt
+index 9f594feb0..9b4c476c5 100644
+--- a/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryDrawableState.kt
++++ b/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryDrawableState.kt
+@@ -32,6 +32,8 @@ enum class ColorProfile {
+     Warning,
+     // Red for e.g., low battery
+     Error,
++    // Fixed red battery and white flame, independent of icon theme.
++    Performance,
+ }
+ 
+ /**
+diff --git a/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryLayersDrawable.kt b/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryLayersDrawable.kt
+index a179c35e4..a6463aa8d 100644
+--- a/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryLayersDrawable.kt
++++ b/packages/SystemUI/src/com/android/systemui/battery/unified/BatteryLayersDrawable.kt
+@@ -136,6 +136,15 @@ class BatteryLayersDrawable(
+         attribution.setTint(colorInfo.fg)
+ 
+         when (color) {
++            ColorProfile.Performance -> {
++                val red = android.graphics.Color.rgb(255, 14, 1)
++                frame.setTint(red)
++                frameBg.setTint(android.graphics.Color.argb(80, 255, 14, 1))
++                fill.fillColor = red
++                textOnly.setTint(android.graphics.Color.WHITE)
++                spaceSharingText.setTint(android.graphics.Color.WHITE)
++                attribution.setTint(android.graphics.Color.WHITE)
++            }
+             ColorProfile.None -> {
+                 fill.fillColor = if (hasFg) colorInfo.fill else colorInfo.fillOnly
+             }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/data/repository/BatteryRepository.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/data/repository/BatteryRepository.kt
+index 8baaa2983..ff9d5b8a4 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/data/repository/BatteryRepository.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/data/repository/BatteryRepository.kt
+@@ -21,6 +21,8 @@ import android.database.ContentObserver
+ import android.os.Handler
+ import android.os.Looper
+ import android.os.UserHandle
++import android.provider.Settings
++import lineageos.health.HealthInterface
+ import com.android.systemui.Flags
+ import com.android.systemui.dagger.SysUISingleton
+ import com.android.systemui.dagger.qualifiers.Application
+@@ -45,6 +47,7 @@ import kotlinx.coroutines.flow.StateFlow
+ import kotlinx.coroutines.flow.callbackFlow
+ import kotlinx.coroutines.flow.distinctUntilChanged
+ import kotlinx.coroutines.flow.flow
++import kotlinx.coroutines.flow.flowOf
+ import kotlinx.coroutines.flow.flowOn
+ import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.flow.scan
+@@ -59,6 +62,10 @@ interface BatteryRepository {
+      */
+     val isPluggedIn: Flow<Boolean>
+ 
++    /** Service-owned thermal state; default keeps alternate repository implementations compatible. */
++    val performanceModeState: Flow<Int>
++        get() = flowOf(HealthInterface.PERFORMANCE_MODE_OFF)
++
+     /** Is power saver enabled */
+     val isPowerSaveEnabled: Flow<Boolean>
+ 
+@@ -186,6 +193,25 @@ constructor(
+             .flowOn(bgDispatcher)
+             .stateIn(scope, SharingStarted.Lazily, BatteryCallbackState())
+ 
++    override val performanceModeState: StateFlow<Int> =
++        conflatedCallbackFlow {
++            val resolver = context.contentResolver
++            fun sendState() {
++                trySend(Settings.Global.getInt(resolver, HealthInterface.PERFORMANCE_MODE_STATE,
++                    HealthInterface.PERFORMANCE_MODE_OFF))
++            }
++            val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
++                override fun onChange(selfChange: Boolean) { sendState() }
++            }
++            resolver.registerContentObserver(
++                Settings.Global.getUriFor(HealthInterface.PERFORMANCE_MODE_STATE), false, observer)
++            sendState()
++            awaitClose { resolver.unregisterContentObserver(observer) }
++        }
++            .distinctUntilChanged()
++            .flowOn(bgDispatcher)
++            .stateIn(scope, SharingStarted.WhileSubscribed(), HealthInterface.PERFORMANCE_MODE_OFF)
++
+     override val isPluggedIn =
+         batteryState
+             .map { it.isPluggedIn }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/domain/interactor/BatteryInteractor.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/domain/interactor/BatteryInteractor.kt
+index 239124482..8a834530d 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/domain/interactor/BatteryInteractor.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/domain/interactor/BatteryInteractor.kt
+@@ -104,14 +104,19 @@ class BatteryInteractor @Inject constructor(
+      *
+      * This flow can be used to canonically describe the battery state charging state.
+      */
++    val performanceModeState = repo.performanceModeState
++
+     val batteryAttributionType =
+-        combine(isCharging, powerSave, isBatteryDefenderEnabled, isStateUnknown) {
++        combine(isCharging, powerSave, isBatteryDefenderEnabled, isStateUnknown, performanceModeState) {
+             charging,
+             powerSave,
+             defend,
+-            unknown ->
++            unknown,
++            performanceState ->
+             if (unknown) {
+                 BatteryAttributionModel.Unknown
++            } else if (performanceState != lineageos.health.HealthInterface.PERFORMANCE_MODE_OFF) {
++                BatteryAttributionModel.Performance
+             } else if (powerSave) {
+                 BatteryAttributionModel.PowerSave
+             } else if (defend) {
+@@ -136,6 +141,7 @@ class BatteryInteractor @Inject constructor(
+ 
+ /** The charging state, and therefore attribution for the battery */
+ enum class BatteryAttributionModel {
++    Performance,
+     Defend,
+     PowerSave,
+     Charging,
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryColors.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryColors.kt
+index a1675766b..b217d1c3e 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryColors.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryColors.kt
+@@ -71,6 +71,14 @@ sealed interface BatteryColors {
+             override val fill = Color(0xFFFF0E01)
+         }
+ 
++        data object Performance : LightTheme() {
++            override val fill = Color(0xFFFF0E01)
++            override val attribution = Color.White
++            override val glyph = Color.White
++            override val backgroundWithGlyph = Color(0xFFB30900)
++            override val backgroundOnly = Color(0xFFB30900)
++        }
++
+         data object PowerSave : LightTheme() {
+             override val fill = Color(0xFFFFC917)
+         }
+@@ -107,6 +115,14 @@ sealed interface BatteryColors {
+             override val fill = Color(0xFFFF0E01)
+         }
+ 
++        data object Performance : DarkTheme() {
++            override val fill = Color(0xFFFF0E01)
++            override val attribution = Color.White
++            override val glyph = Color.White
++            override val backgroundWithGlyph = Color(0xFFB30900)
++            override val backgroundOnly = Color(0xFFB30900)
++        }
++
+         data object PowerSave : DarkTheme() {
+             override val fill = Color(0xFFFFC917)
+         }
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryGlyph.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryGlyph.kt
+index d103ee863..49751ae9d 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryGlyph.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/shared/ui/BatteryGlyph.kt
+@@ -17,6 +17,7 @@
+ package com.android.systemui.statusbar.pipeline.battery.shared.ui
+ 
+ import androidx.compose.ui.geometry.Size
++import androidx.compose.ui.graphics.Matrix
+ import androidx.compose.ui.graphics.Path
+ import androidx.compose.ui.graphics.addSvg
+ import androidx.compose.ui.graphics.drawscope.DrawScope
+@@ -98,6 +99,15 @@ sealed interface BatteryGlyph : Glyph {
+         return min(xScale, yScale)
+     }
+ 
++    data object Flame : BatteryGlyph {
++        override val path = Path().apply {
++            addSvg("M336 972.8c-60.8-128-28.8-201.6 19.2-268.8 51.2-76.8 64-150.4 64-150.4s41.6 51.2 25.6 134.4c70.4-80 83.2-208 73.6-256 160 112 230.4 358.4 137.6 537.6 492.8-281.6 121.6-700.8 57.6-745.6 22.4 48 25.6 128-19.2 166.4-73.6-281.6-256-336-256-336 22.4 144-76.8 300.8-172.8 419.2-3.2-57.6-6.4-96-38.4-153.6-6.4 105.6-86.4 188.8-108.8 294.4C89.6 758.4 140.8 860.8 336 972.8L336 972.8z")
++            transform(Matrix().apply { scale(10f / 1024f, 10f / 1024f) })
++        }
++        override val width = 10f
++        override val height = 10f
++    }
++
+     data object Bolt : BatteryGlyph {
+         override val path: Path =
+             Path().apply {
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/viewmodel/BatteryViewModel.kt b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/viewmodel/BatteryViewModel.kt
+index f29f08e1c..5088bde57 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/viewmodel/BatteryViewModel.kt
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/pipeline/battery/ui/viewmodel/BatteryViewModel.kt
+@@ -34,6 +34,7 @@ import com.android.systemui.statusbar.core.StatusBarConnectedDisplays
+ import com.android.systemui.statusbar.pipeline.battery.data.repository.BatteryRepository
+ import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryAttributionModel.Charging
+ import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryAttributionModel.Defend
++import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryAttributionModel.Performance
+ import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryAttributionModel.PowerSave
+ import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryAttributionModel.Unknown
+ import com.android.systemui.statusbar.pipeline.battery.domain.interactor.BatteryInteractor
+@@ -121,6 +122,8 @@ sealed class BatteryViewModel(
+     protected val attributionGlyph: Flow<BatteryGlyph?> =
+         interactor.batteryAttributionType.map {
+             when (it) {
++                Performance -> BatteryGlyph.Flame
++
+                 Charging -> BatteryGlyph.Bolt
+ 
+                 PowerSave -> BatteryGlyph.Plus
+@@ -143,6 +146,11 @@ sealed class BatteryViewModel(
+     private val _colorProfile: Flow<ColorProfile> =
+         combine(interactor.batteryAttributionType, interactor.isCritical) { attr, isCritical ->
+             when (attr) {
++                Performance -> ColorProfile(
++                    dark = BatteryColors.DarkTheme.Performance,
++                    light = BatteryColors.LightTheme.Performance,
++                )
++
+                 Charging,
+                 Defend ->
+                     ColorProfile(
+@@ -188,8 +196,15 @@ sealed class BatteryViewModel(
+             traceName = "contentDescription",
+             initialValue = ContentDescription.Loaded(null),
+             source =
+-                combine(interactor.batteryAttributionType, interactor.level) { attr, level ->
++                combine(interactor.batteryAttributionType, interactor.level, interactor.isCharging) { attr, level, charging ->
+                     when (attr) {
++                        Performance -> {
++                            val battery = context.getString(
++                                if (charging) R.string.accessibility_battery_level_charging
++                                else R.string.accessibility_battery_level, level)
++                            ContentDescription.Loaded(battery + ", " + context.getString(
++                                R.string.accessibility_performance_mode))
++                        }
+                         Defend -> {
+                             val descr =
+                                 context.getString(
+-- 
+2.43.0
+

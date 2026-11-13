@@ -1,0 +1,29 @@
+From c6fbe80eb7c4362f4ca04a973cff11cbe6d83294 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 15:36:41 +0800
+Subject: [PATCH] Neko LineageOS: [PERF MODE] Expose mi_thermald service status
+ to the health HAL
+
+Label init.svc.mi_thermald with init_service_status_prop so the health HAL
+can wait for daemon stop/start acknowledgements during thermal transitions.
+
+Change-Id: Ia7ed2fbaedff8eafc13e0137d3282a7188023266
+---
+ private/property_contexts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/private/property_contexts b/private/property_contexts
+index 2a9ac75..b235407 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -1007,6 +1007,7 @@ init.svc.bugreport      u:object_r:init_service_status_prop:s0 exact string
+ init.svc.bugreportd     u:object_r:init_service_status_prop:s0 exact string
+ init.svc.console        u:object_r:init_service_status_prop:s0 exact string
+ init.svc.dumpstatez     u:object_r:init_service_status_prop:s0 exact string
++init.svc.mi_thermald    u:object_r:init_service_status_prop:s0 exact string
+ init.svc.mediadrm       u:object_r:init_service_status_prop:s0 exact string
+ init.svc.statsd         u:object_r:init_service_status_prop:s0 exact string
+ init.svc.surfaceflinger u:object_r:init_service_status_prop:s0 exact string
+-- 
+2.43.0
+

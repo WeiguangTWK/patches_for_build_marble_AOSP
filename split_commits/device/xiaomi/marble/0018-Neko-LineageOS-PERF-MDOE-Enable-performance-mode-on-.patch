@@ -1,0 +1,26 @@
+From b90458554662801fb1a56545b08f8d32dcab0c1a Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 15:34:22 +0800
+Subject: [PATCH] Neko LineageOS: [PERF MDOE] Enable performance mode on marble
+
+Enable config_performanceModeAvailable to expose the service-managed
+thermal performance mode and replace the charging-session relaxation entry.
+
+Change-Id: Ic0d5d3ef11e1315333d534171151936bae9a59fe
+---
+ overlay/Lineage/res/values/config.xml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/overlay/Lineage/res/values/config.xml b/overlay/Lineage/res/values/config.xml
+index fe918d3..4907a18 100644
+--- a/overlay/Lineage/res/values/config.xml
++++ b/overlay/Lineage/res/values/config.xml
+@@ -5,4 +5,5 @@
+ -->
+ <resources>
+     <bool name="config_persistentManualHbmAvailable">true</bool>
++    <bool name="config_performanceModeAvailable">true</bool>
+ </resources>
+-- 
+2.43.0
+
