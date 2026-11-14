@@ -1,0 +1,2659 @@
+From f00d75611b5118fb567e90e531208ccd4711f0af Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 11:33:07 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Add on-device RKP issuance
+ and component updates
+
+Add an on-demand native issuer that generates an exportable software
+P-256 key, requests certificates through the device's legacy V1 RKP
+interface, and assembles an EC-only Keybox.
+
+Expose issuance progress and results in TEE Soft Emu advanced settings.
+Reuse the existing Keybox validation and installation path, serialize
+issuance with imports and network updates, and recover pending jobs
+without automatically issuing another request.
+
+Package the issuer in the independently signed org.system.tee.soft.rkp
+APEX with rebootless update support. Add local component installation,
+active-version reporting, persistent session recovery and update results.
+Restrict installation to the expected package and coordinate updates
+with issuance and result handoff.
+
+P.S. Key in native/rkp_issuer/apex/ is testkey, for debug purpose only,
+     Please use sign_target_files_apks to sign APEXs with your own key in production build
+
+Co-Authored-by: eltavine <me@eltavine.com>
+Change-Id: I9e35625ddf753436b38f463c333dc77f245d23e9
+---
+ Android.bp                                    |   1 +
+ AndroidManifest.xml                           |   5 +
+ docs/tee-soft-rkp-apex.md                     | 186 +++++++
+ docs/tee-soft-rkp-component-update.md         | 122 +++++
+ docs/tee-soft-rkp-issuer.md                   | 162 ++++++
+ native/rkp_issuer/Android.bp                  |  40 ++
+ native/rkp_issuer/NOTICE                      |  42 ++
+ native/rkp_issuer/apex/Android.bp             |  44 ++
+ native/rkp_issuer/apex/apex_manifest.json     |   5 +
+ native/rkp_issuer/apex/file_contexts          |   2 +
+ .../apex/org.system.tee.soft.rkp.avbpubkey    | Bin 0 -> 1032 bytes
+ .../apex/org.system.tee.soft.rkp.pem          |  52 ++
+ .../apex/org.system.tee.soft.rkp.pk8          | Bin 0 -> 2375 bytes
+ .../apex/org.system.tee.soft.rkp.x509.pem     |  32 ++
+ native/rkp_issuer/apex/tee_soft_rkp_issuer.rc |   9 +
+ native/rkp_issuer/issuer.cpp                  | 489 ++++++++++++++++++
+ org.lineageos.lineageparts.xml                |   3 +
+ .../tee_soft_component_strings.xml            |  19 +
+ res/values-zh-rCN/tee_soft_rkp_strings.xml    |  22 +
+ .../tee_soft_component_strings.xml            |  19 +
+ res/values-zh-rTW/tee_soft_rkp_strings.xml    |  22 +
+ res/values/tee_soft_component_strings.xml     |  19 +
+ res/values/tee_soft_rkp_strings.xml           |  22 +
+ res/xml/tee_soft_advanced_settings.xml        |  22 +
+ .../lineageparts/teedebug/KeyboxUpdater.java  | 109 +++-
+ .../teedebug/RkpApexInstallReceiver.java      |  15 +
+ .../lineageparts/teedebug/RkpApexUpdater.java | 411 +++++++++++++++
+ .../teedebug/RkpIssuerClient.java             | 144 ++++++
+ .../teedebug/TeeSoftAdvancedSettings.java     | 134 ++++-
+ .../teedebug/TeeSoftApplication.java          |  13 +
+ 30 files changed, 2160 insertions(+), 5 deletions(-)
+ create mode 100644 docs/tee-soft-rkp-apex.md
+ create mode 100644 docs/tee-soft-rkp-component-update.md
+ create mode 100644 docs/tee-soft-rkp-issuer.md
+ create mode 100644 native/rkp_issuer/Android.bp
+ create mode 100644 native/rkp_issuer/NOTICE
+ create mode 100644 native/rkp_issuer/apex/Android.bp
+ create mode 100644 native/rkp_issuer/apex/apex_manifest.json
+ create mode 100644 native/rkp_issuer/apex/file_contexts
+ create mode 100644 native/rkp_issuer/apex/org.system.tee.soft.rkp.avbpubkey
+ create mode 100644 native/rkp_issuer/apex/org.system.tee.soft.rkp.pem
+ create mode 100644 native/rkp_issuer/apex/org.system.tee.soft.rkp.pk8
+ create mode 100644 native/rkp_issuer/apex/org.system.tee.soft.rkp.x509.pem
+ create mode 100644 native/rkp_issuer/apex/tee_soft_rkp_issuer.rc
+ create mode 100644 native/rkp_issuer/issuer.cpp
+ create mode 100644 res/values-zh-rCN/tee_soft_component_strings.xml
+ create mode 100644 res/values-zh-rCN/tee_soft_rkp_strings.xml
+ create mode 100644 res/values-zh-rTW/tee_soft_component_strings.xml
+ create mode 100644 res/values-zh-rTW/tee_soft_rkp_strings.xml
+ create mode 100644 res/values/tee_soft_component_strings.xml
+ create mode 100644 res/values/tee_soft_rkp_strings.xml
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/RkpApexInstallReceiver.java
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/RkpApexUpdater.java
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/RkpIssuerClient.java
+ create mode 100644 src/org/lineageos/lineageparts/teedebug/TeeSoftApplication.java
+
+diff --git a/Android.bp b/Android.bp
+index b587872..4e83eea 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -19,6 +19,7 @@ android_app {
+     certificate: "platform",
+     system_ext_specific: true,
+     privileged: true,
++    required: ["org.system.tee.soft.rkp"],
+     privapp_allowlist: "org.lineageos.lineageparts.xml",
+ 
+     optimize: {
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index 432c6d6..38d3c55 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -11,6 +11,7 @@
+     android:versionName="1.0">
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
++    <uses-permission android:name="android.permission.INSTALL_PACKAGE_UPDATES" />
+     <uses-permission android:name="android.permission.WRITE_MEDIA_STORAGE" />
+     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+@@ -32,6 +33,7 @@
+     <protected-broadcast android:name="org.system.parts.gestures.UPDATE_SETTINGS" />
+ 
+     <application
++        android:name=".teedebug.TeeSoftApplication"
+         android:defaultToDeviceProtectedStorage="true"
+         android:directBootAware="true"
+         android:hardwareAccelerated="true"
+@@ -41,6 +43,9 @@
+         android:supportsRtl="true"
+         android:theme="@style/Theme.SubSettingsBase.Expressive">
+ 
++        <receiver android:name=".teedebug.RkpApexInstallReceiver"
++            android:exported="false" />
++
+         <activity
+             android:name=".PartsActivity"
+             android:configChanges="orientation|keyboardHidden|screenSize"
+diff --git a/docs/tee-soft-rkp-apex.md b/docs/tee-soft-rkp-apex.md
+new file mode 100644
+index 0000000..cb991b2
+--- /dev/null
++++ b/docs/tee-soft-rkp-apex.md
+@@ -0,0 +1,186 @@
++# TEE Soft RKP APEX
++
++## Scope and current state (2026-11-14)
++
++The on-demand issuer is packaged as the independent, updatable APEX
++`org.system.tee.soft.rkp`. The initial version is 1 and must be preinstalled in
++the ROM. The executable path is
++`/apex/org.system.tee.soft.rkp/bin/tee_soft_rkp_issuer`.
++New package, certificate and Soong module identifiers use neutral names.
++Existing source provenance notices are retained.
++
++This migration changes packaging and dependency availability. The issuance
++algorithm, version-1 socket protocol, Keybox installation path and ASTER gates
++remain as described in [tee-soft-rkp-issuer.md](tee-soft-rkp-issuer.md).
++Local component management is now implemented in the Advanced RKP page; see
++[tee-soft-rkp-component-update.md](tee-soft-rkp-component-update.md).
++It uses the existing privileged system APEX installation channel. No component
++downloader is included.
++
++Static review is complete for this patch; building, policy compilation and
++device validation are outstanding. `supportsRebootlessUpdate` declares the
++intended installation mode, not evidence of successful activation on Marble.
++
++## Package and dependency boundary
++
++- `native/rkp_issuer/apex/Android.bp` defines the APEX, its two signing modules,
++  APEX-only init configuration and the file-contexts source provider.
++- LineageParts requires the APEX rather than the standalone helper. The helper
++  is available only to this APEX, so its platform variant is not installed.
++  There is no second service definition or system_ext executable installation.
++- Only the device's primary ABI is packaged. The minimum SDK is 35, a finalized
++  API level supported by this source tree; this is not a cross-version promise
++  for older ROMs.
++- curl, cppbor, jsoncpp and the frozen RKP V3 NDK interface are linked into the
++  helper. Only the legacy V1 RPC is used. `libcutils_sockets` supplies the init
++  control-socket API without pulling in the full libcutils runtime library.
++- Private dynamic dependencies (including BoringSSL, libbase and libc++) are
++  collected by Soong into the APEX. Stable system interfaces such as
++  libbinder_ndk, liblog and Bionic remain stub-linked external dependencies.
++  The actual ELF dependency closure and generated linker namespace must still
++  be checked after a build. System CA certificates remain an intentional
++  external data dependency at `/system/etc/security/cacerts`.
++- Availability is extended only for this APEX in curl, cppbor, the RKP NDK
++  backend, libcrypto, libssl and BoringSSL's bcm_object. Existing platform
++  availability is retained. No source-library fork is introduced.
++- The APEX has no Java/JNI contents, exported native libraries, persistent
++  daemon or module data directory. Its manifest must continue to have empty
++  provideNativeLibs/jniLibs after Soong processing for non-staged installation.
++
++## Signing and release integration
++
++The payload AVB key and outer APK certificate are independent of each other,
++the platform key and the ASTER keys. The checked-in files under
++`native/rkp_issuer/apex/` are **public development signing material**:
++
++- `org.system.tee.soft.rkp.pem` and `.avbpubkey`: payload development key pair.
++- `org.system.tee.soft.rkp.pk8` and `.x509.pem`: container development key pair.
++
++Their private keys are deliberately public, as with AOSP development keys.
++A ROM released with these trust anchors accepts updates signed with them;
++replace both before releasing a trusted production image. Production private
++keys belong in controlled release infrastructure outside public source trees.
++Keep the signing identity consistent between the preinstalled APEX and updates;
++switching development to production trust requires a corresponding ROM change.
++
++The standard target-files re-signing path supports both replacements:
++
++```sh
++sign_target_files_apks \
++  --extra_apks org.system.tee.soft.rkp.apex=/secure/rkp/container \
++  --extra_apex_payload_key org.system.tee.soft.rkp.apex=/secure/rkp/org.system.tee.soft.rkp.pem \
++  input-target_files.zip signed-target_files.zip
++```
++
++`/secure/rkp/container` denotes the release `.x509.pem`/`.pk8` prefix. This is a
++release-integration example, not an action performed during this migration.
++Audit the resulting `META/apexkeys.txt` and re-signed package. An independently
++distributed update must use those same production identities for BOTH layers.
++Do not distribute a fresh development-signed build as an update to a
++production-signed ROM.
++
++For direct source builds, AOSP's ApexKeyDir lookup can substitute payload
++`org.system.tee.soft.rkp.pem`/`.avbpubkey` from the configured default certificate
++directory. The container uses an explicit certificate module: override it with
++`PRODUCT_CERTIFICATE_OVERRIDES` pointing at a private `android_app_certificate`
++module, or re-sign target-files as above. Setting the default platform
++certificate alone does not replace the explicit container certificate, and
++missing payload override files can fall back to the checked-in development
++pair. Check both actual keys in the final release artifact.
++
++Increase the integer `version` in `apex_manifest.json` for each published update;
++keep versions monotonic across independent releases and subsequent ROM builds.
++Preserve the module name and socket contract. A protocol change that requires
++a different UI must be coordinated with a ROM update.
++
++## Init and SELinux
++
++The rc is installed solely at `/apex/org.system.tee.soft.rkp/etc/init.rc`.
++The existing service name `tee_soft_rkp_issuer`, system UID, system/inet groups,
++disabled/oneshot flags and restricted init-created socket are preserved.
++There is no auto-start action. Init discovers this service from the active APEX
++after normal APEX activation; it is not an early-boot bootstrap component.
++
++There is no platform service to override, so `override` and the init service
++option `updatable` are unnecessary. Init's APEX unload path finds services by
++their defining rc path, terminates them, removes the old definitions, and
++loads the newly active APEX configuration.
++
++The payload file_contexts labels the helper with the existing
++`tee_soft_rkp_issuer_exec` type. Its provider is registered in
++`system/sepolicy/apex/Android.bp` to meet Soong's location requirement.
++The obsolete system_ext binary label is removed; the socket label remains.
++The init domain transition and existing ROM policy continue to assign
++`tee_soft_rkp_issuer` authority. No new HAL, network, control-property or data
++write permission is added. Updated code receives this fixed authority by the
++trusted entry-point label, not by inheriting permissions from a downloaded
++file. New policy authority still requires a ROM update.
++
++## Idle update procedure and limits
++
++The integrated local updater serializes updates with the page's Keybox jobs.
++External privileged installers/operators must also serialize updates with issuance:
++
++1. Wait until the UI has finished issuance AND local Keybox installation/result
++   recording. Do not update with a pending/recoverable job or an active import
++   or network Keybox update. Keep the UI from starting a new operation during
++   installation.
++2. Confirm `getprop init.svc.tee_soft_rkp_issuer` reports `stopped`. A successful
++   signing reply alone is insufficient: the helper retains its result until
++   ACK or expiry. Do not stop it manually to force an update.
++3. Install the higher-version package using the existing privileged non-staged
++   APEX installer. The future authorized ADB validation command is
++   `adb install --apex --non-staged update.apex` (no `--staged` or
++   `--force-non-staged`). Plain `adb install update.apex` defaults to a staged
++   installation in this tree; the explicit `--non-staged` flag is required.
++4. Check the installation result and the active entry in
++   `/apex/apex-info-list.xml`: module name, versionCode, isActive and modulePath.
++   Inspect current state after failure too; do not infer activation from the
++   candidate package or PackageManager's stored/staged version alone.
++5. Reopen the page and start a new explicit issuance only after activation.
++   Verify that the new process's `/proc/<pid>/exe` resolves to the updated APEX,
++   that its label is unchanged, and that exactly one service/socket exists.
++
++External installation is not protected by the integrated updater's lock.
++APEX/init does not refuse installation just because this
++helper is busy: it terminates APEX services. Installing during a job can lose
++the result, including after the server has issued certificates. Existing
++recovery only queries; it must not silently issue another request.
++
++apexd attempts to reload the active configuration on installation failure.
++Validate the actual active version rather than claiming automatic rollback
++always succeeds. RKP server rejection, certificate expiry or firmware changes
++are issuance failures and never trigger an automatic component rollback.
++An update can change protocol handling; it cannot guarantee server acceptance
++or recover hardware behavior removed by a firmware update.
++
++## Verification ledger
++
++Static checks for this migration:
++
++- Parse/format all changed Soong files with bpfmt; parse APEX manifest JSON.
++- Cross-check package identity, required-module wiring, min SDK, APEX-only helper
++  availability, init path/options and file-contexts provider/entry-point label.
++- Review private dependencies and stable external interfaces against their
++  current definitions; review non-staged eligibility and service reload paths
++  in local apexd/init source.
++- Inspect signing files for valid key structure, matching public/private pairs
++  and distinct payload/container identities, without logging private material.
++- Check diffs and whitespace across all affected repositories.
++
++Still required in a separately authorized build/device iteration:
++
++- Soong dependency resolution, min-SDK/link checks, compiled SELinux policy and
++  APEX filesystem labels; inspect `apexkeys.txt`, manifest and ELF DT_NEEDED.
++- Fresh ROM boot: preinstalled APEX active, unique rc/service, no old standalone
++  install, unchanged socket ownership and helper domain/HAL/network access.
++- Higher-version signed update while idle without reboot; next helper process
++  uses the new mount and completes an explicit V1 issuance.
++- Wrong container key, wrong payload key and lower-version package rejected;
++  failed installation leaves a usable active version with visible diagnostics.
++- Busy/result-handoff behavior and no automatic retry after interruption.
++
++No build, device operation, signing request, policy compilation, staging or Git
++commit was performed as part of the static migration check. If device evidence
++requires changing the rebootless-update objective, stop for confirmation before
++changing the accepted design.
+diff --git a/docs/tee-soft-rkp-component-update.md b/docs/tee-soft-rkp-component-update.md
+new file mode 100644
+index 0000000..a1ca86f
+--- /dev/null
++++ b/docs/tee-soft-rkp-component-update.md
+@@ -0,0 +1,122 @@
++# Local RKP component management
++
++## Scope and implementation state (2026-11-14)
++
++The Advanced RKP section now contains the active component version, local APEX
++installation and the last component update result. Only the system user can
++start installation. There is no downloader or update source configuration.
++This patch has received static checks only, not a build or device validation.
++The user reported that the earlier APEX migration builds successfully; that
++does not establish that this new UI/install patch builds or works on-device.
++
++`RkpApexUpdater` owns a single private draft, installation session and result.
++`TeeSoftApplication` initializes persistent exclusion before a fragment can
++start work. A non-exported `RkpApexInstallReceiver` receives the explicit,
++mutable installer PendingIntent and keeps its process alive with goAsync until
++result processing finishes. No private key or RKP material enters this updater.
++
++## Input and install boundary
++
++The document picker accepts any MIME type because APEX types vary between
++providers. The worker copies at most 64 MiB into the application's private
++files directory and synchronizes the file before inspecting it. The URI is not
++retained. A private draft is discarded when confirmation is cancelled, the page
++leaves the foreground, or the process dies; it is never automatically installed.
++
++Checks before confirmation, and again before creating a session:
++
++- The package archive name is exactly `org.system.tee.soft.rkp`, with a version
++  greater than the currently active version.
++- A ZIP entry scan rejects duplicates and more than 1024 entries. The package
++  must have an uncompressed APEX payload image, payload public key and protobuf
++  manifest. Compressed .capex input is not supported.
++- The protobuf manifest is bounded to 64 KiB. Name and version must be present
++  once and must match the container. This is structural validation, not a
++  replacement for platform signature verification.
++- No persisted RKP job is pending and the init helper is stopped. A never-started
++  helper may have no init.svc property: it is accepted only when both state and
++  ro.boottime records are absent and lstat confirms that the control socket does
++  not exist (ENOENT). Other states or inability to inspect are rejected. This
++  relies on the existing app start protocol persisting the job before ctl.start.
++
++The session uses MODE_FULL_INSTALL, INSTALL_APEX, the fixed app package name,
++isStaged=false and USER_ACTION_NOT_REQUIRED. It does not request forced
++non-staged installation, downgrade, signature bypass or allowed-APEX bypass.
++PackageInstaller/apexd verify the actual signed update and activation eligibility.
++Unexpected pending user action is reported and the session is abandoned; this
++updater never forwards an arbitrary installer intent to another activity.
++
++## Permissions and activation query
++
++LineageParts requests INSTALL_PACKAGE_UPDATES, not INSTALL_PACKAGES. Its existing
++system UID satisfies the trusted installer UID check. The permissions XML adds
++the exact allowed-vendor-apex package-to-installer mapping used by
++PackageSessionVerifier for an APEX not listed as a Mainline module. Despite the
++tag name, this check is applied to this custom system APEX too. No global modules
++installer replacement or blanket verification bypass is added.
++
++The originally proposed PackageInfo.isActiveApex query is not used. In this tree,
++that field has a declaration and parcel plumbing but no discovered assignment
++path. The worker reads `/apex/apex-info-list.xml` (bounded to 1 MiB, DTD rejected),
++selects exactly one matching module with isActive=true and caches its version
++for the UI. Missing/duplicate/invalid entries show unavailable. Installation
++completion and every terminal result refresh this authoritative activation list.
++
++SELinux additions are read-only: system_app reads apex_info_file, and exact
++helper status/boot-time properties are mapped to existing readable types.
++The helper's execution domain, HAL grants and socket/control permissions are
++unchanged. No direct apexd Binder access or shell execution is added.
++
++## Exclusion and recovery
++
++Draft preparation and confirmation hold the existing process-wide Keybox job
++lock. Import, URL update and issuance acquisitions also check persistent APEX
++pending state. The component lock covers copy, confirmation, session write,
++commit, system activation and durable result recording. Waiting for user
++confirmation is cancelled on page pause; a submitted session survives it.
++
++Session ID and target version are durably written before session write/commit.
++The startup pending flag blocks all new Keybox work immediately. Recovery only
++queries the recorded session: an unsealed/uncommitted draft is abandoned, while
++a sealed or committed session stays pending and is polled. The same installer's
++unsealed drafts for this exact package are also cleaned on startup to cover the
++createSession-before-persist crash window. Neither recovery nor an uncertain
++commit reply resubmits an installation or requests another issuance.
++
++If a session disappears without its result broadcast, an exact matching active
++version confirms activation. Otherwise the outcome is shown as unconfirmed,
++with the current active version displayed separately. Normal failure broadcasts
++preserve the platform status and bounded diagnostic message. Draft/provider
++errors use local messages rather than persisting a URI-bearing exception.
++If result-state persistence fails, operations remain excluded in this process;
++restart the application to reconcile durable state. An unresolved sealed or
++committed system session remains excluded, without an arbitrary timeout unlock.
++
++This is application coordination, not a system-wide installation lock. An
++external ADB/root/system installer can bypass it and terminate a busy helper.
++All apps sharing UID 1000 remain inside the pre-existing trust boundary.
++There is no automatic rollback following a server-side issuance failure.
++
++## Verification ledger
++
++Passed static checks: Java tree-sitter parsing, XML parsing, all new string
++references and three-locale placeholder parity, manifest-to-class wiring,
++fixed package/session/result wiring, and whitespace/diff checks. Reviewed the
++current PackageInstaller permission and consistency checks, SystemConfig
++allowed-vendor-apex parsing, ApexInfoList schema, protobuf field definitions,
++init service state transitions and SELinux read grants.
++
++No Java compilation, policy compilation, executable tests, device operation or
++Git commit was performed. A future authorized build/device validation must cover:
++
++- Both fresh-boot and previously used helper idle detection; active-version
++  display and all new read permissions under enforcing SELinux.
++- A higher-version update signed with the ROM's two signing identities, no
++  reboot, and the next issuer process using the newly activated mount.
++- Wrong package, inconsistent manifests, invalid signatures, same/lower version,
++  oversized input and malformed package rejected with the old active version
++  still correctly reported.
++- Confirmation cancellation, rotation/backgrounding, process death before/after
++  commit, lost result broadcast and duplicate callback handling.
++- Import, download and signing exclusion through result ACK/helper exit; no
++  automatic installation or issuance retry after interruption.
+diff --git a/docs/tee-soft-rkp-issuer.md b/docs/tee-soft-rkp-issuer.md
+new file mode 100644
+index 0000000..bf8ab9b
+--- /dev/null
++++ b/docs/tee-soft-rkp-issuer.md
+@@ -0,0 +1,162 @@
++# TEE Soft Emu on-device RKP issuer
++
++## Agreed scope
++
++V1 AIDL only. A separately labelled native helper is started on demand by init; it
++creates an exportable software P-256 private key and asks the real device RKP HAL
++for a production CSR, then obtains the certificate chain from the RKP server.
++This is an online acquisition path for EC-only Keybox material, not offline
++certificate issuance, a hardware-key export, or an insertion into the RKPD pool.
++Qualcomm CSR_V2/native V1 commands and fallback/retry issuance are out of scope.
++
++Existing Keystore2, PureSoft and ASTER generation gates are untouched. Receiving
++new material does not enable TEE Soft Emu or rewrite existing keys/certificates.
++
++## Components
++
++- `native/rkp_issuer`: C++17 binary in the `org.system.tee.soft.rkp` APEX,
++  generated RKP V3 NDK interface
++  (calling its legacy V1 method), cppbor, BoringSSL, curl and jsoncpp. Installed
++  through LineageParts' required APEX dependency. No runtime Java bridge.
++  Packaging, signing and update boundaries: [tee-soft-rkp-apex.md](tee-soft-rkp-apex.md).
++- init service `tee_soft_rkp_issuer`: disabled/oneshot, system UID, system/inet
++  groups, separate coredomain, no root or additional capabilities. Starts idle.
++- `/dev/socket/tee_soft_rkp_issuer`: init-created stream socket, mode 0600,
++  system:system; separate pathname label and helper-domain socket object label.
++  Helper calls listen; no extra init listen permission is needed.
++- SELinux in device/lineage/sepolicy/common/private: exact start control property,
++  independently labelled/denied legacy ctl fallback, helper HAL/network grants,
++  system_app socket connection. The standard hal_keymint client group grants
++  both RKP and KeyMint service access to the helper, not to the application.
++- `RkpIssuerClient`: bounded socket protocol and progress queries.
++- `KeyboxUpdater`: shared import/update/issuance exclusion, task recovery and
++  existing XML validation/atomic installation/rollback. The helper never opens
++  current Keybox/config files and has no new policy permitting their access.
++
++## V1 contract
++
++The zero-HBK HKDF-SHA256 MAC uses context `Key to MAC public keys` and a
++COSE_Mac0 for one software P-256 public key. It is firmware-specific behavior,
++not a property guaranteed by the AIDL interface. Marble V1 success was reported
++by the user; this implementation has not been executed against that device.
++
++A fresh fetchEekChain request supplies challenge and complete EEK chains. The
++helper selects the curve reported by getHardwareInfo. It calls
++`generateCertificateRequest(false, keys, eek, challenge, ...)` on /default.
++Opaque DeviceInfo and ProtectedData are checked for structure but inserted into
++the final CSR without decoding/re-encoding. The unverified DeviceInfo map is
++empty, matching Duck's optional-fingerprint behavior; fetchEekChain still sends
++the actual build fingerprint. Encrypted V1 evidence is not locally verified.
++
++The Google HTTPS endpoint follows Duck's protocol. TLS peer/hostname checks use
++/system/etc/security/cacerts. Redirects and proxy environment use are disabled.
++The server reply must yield exactly one certificate path. Its leaf public key
++must equal the generated key; the complete path is ordered, each link and the
++self-signed root are signature-checked with libcrypto. This checks internal
++consistency, not independent root trust, revocation or an integrity verdict.
++
++Private key PEM and certificates are assembled into EC-only XML. No private key,
++CSR, response body or XML is logged or saved by the helper. Result bytes cross
++the restricted socket; Java clears its byte array after installation. General
++allocator/string copies are not claimed to provide secure-memory erasure.
++
++## Protocol and lifecycle
++
++Each socket connection exchanges one big-endian uint32 length followed by UTF-8
++JSON. Version=1, lowercase 32-hex job ID, actions start/query/ack. Requests are
++limited to 1 KiB and replies to 128 KiB. Peer UID must be 1000 in both directions;
++this authorizes the trusted system UID, not a unique application package.
++
++The first accepted start owns the process. Repeating start for that ID only
++returns status; a different ID cannot trigger another issuance. Query never
++starts a job. Replies contain status, stage and numeric code, and XML only after
++success. UI tracks stages rather than claiming installed success before save.
++
++The job ID is persisted before service startup. Page recreation uses the
++process-wide worker; application-process recovery queries the stored ID only.
++If the service/result is gone, recovery fails rather than reissuing. Pending
++recovery is attempted once per job per application process. After installation
++or terminal failure Java records the result, clears the pending ID and sends
++ack. A local save failure never retries issuance. Abrupt death between material
++installation and application metadata/ack remains subject to the existing
++multi-file installation limitations.
++
++Helper has a 15-second initial request window, 30-second final result window,
++and an unconditional 180-second process watchdog covering blocked HAL calls.
++Client waits up to 150 seconds between bounded socket calls (individual calls
++can extend that budget), with a 5-second reconnect window. HTTP has 15-second
++connect/40-second total limits per request. No automatic network retry is used;
++a transport failure after submission may mean the server issued certificates
++whose response was lost. Watchdog exit or result expiry discards in-memory
++material. An already-active helper rejects a new job until it exits.
++
++CBOR responses are capped at 64 KiB and scanned before cppbor parsing (depth 16,
++128 entries/container, definite encodings). CSR limit is 0xa000; returned DER
++chain limit is 16 KiB/16 certificates; XML limit is 64 KiB. No disk handoff cache.
++
++## Evidence and verification (2026-11-13)
++
++Reference: /home/weiguangtwk/Duck-ToolBox db43a2d, V1 request/assembly, issuer
++bridge and certificate artifacts. Its MIT notices and rkp-v1-oracle b28480c
++attribution are included in native/rkp_issuer/NOTICE and Soong licenses.
++
++Static checks passed: tree-sitter parsing of one C++ and six Java source files;
++XML parsing of nine manifest/preference/locale files; resource references and
++RKP locale parity; protocol and init/policy/module name consistency; bpfmt
++parsing/formatting; and git diff --check in LineageParts and device/lineage/sepolicy.
++Relevant cppbor/BoringSSL/NDK/LocalSocket API declarations and HAL call argument
++order were checked against current source. SELinux macros/control-property
++fallback handling were reviewed against current source without compiling policy.
++No compilation, policy compilation, executable tests, network issuance or device
++operation is authorized/performed in this iteration. Static parsing does not
++establish successful linking, policy acceptance or firmware compatibility.
++
++## Runtime checks left for a future authorized build
++
++- Soong dependencies, generated NDK signatures, linking and SELinux neverallows.
++- Exact ctl start allowed; legacy start/stop/restart paths not granted to UI.
++- Socket ownership/labels, peer credentials, DNS/TLS and real HAL access.
++- Marble full V1 issuance, returned-key binding and subsequent Keystore2 use.
++- Local/import/update exclusion, lost start reply, recreation/recovery, same-ID
++  idempotence, wrong-ID rejection, helper timeout and no retry after submission.
++- Installation failure preserves old material; ACK loss/result expiry does not
++  create another issuance. UI must distinguish acquisition from installation.
++
++## Marble vendor declaration repair (2026-11-13)
++
++Observed LineageOS result: hardware/-2 and no registered RKP /default service.
++Stock comparison device 207313b8 (marble, OS3.0.4.0.VMRCNXM) exposes that service
++and declares it in android.hardware.security.keymint-service-qti-rkp.xml.
++Its init service configuration matches the legacy manifest variant in this tree.
++Stock and tree KeyMint binary/libqtikeymint .text and .rodata sections match;
++libkeymasterdeviceutils.so hashes match. Overall ELF hashes differ because of
++extraction adjustments, not evidence of different RKP implementation code.
++
++An initial report of missing RKP DT_NEEDED entries in the tree was incorrect.
++Re-running configured fixups and comparing against Git HEAD proved that both
++ELFs already contain exactly one android.hardware.security.rkp-V1-ndk.so entry
++and are byte-for-byte unchanged. No ELF patch or vendor replacement is required.
++
++Prepared repair:
++- vendor/xiaomi/sm8450-common/proprietary/vendor/etc/vintf/manifest/
++  android.hardware.security.keymint-service-qti.xml: add only the missing
++  android.hardware.security.keymint/IRemotelyProvisionedComponent/default HAL.
++- device/xiaomi/sm8450-common/extract-files.py: add an idempotent manifest fixup
++  for that existing destination/source-list path, retaining the existing ELF
++  dependency fixup. The stock -rkp filename is not substituted into the common
++  proprietary-files list; extracting directly from that stock layout still needs
++  the corresponding source filename mapping as a separate extraction input choice.
++
++Static checks passed: Python AST, XML HAL preservation and single RKP entry,
++configured fixup idempotence for XML and both ELFs, original ELF byte equality,
++DT_NEEDED uniqueness, and git diff --check in both affected repositories.
++No build, device file change, KeyMint restart or certificate issuance performed.
++Service registration and full issuance remain to be validated on a new build.
++
++## RPC URL correction (2026-11-13)
++
++Device reached challenge stage and returned HTTP 404. Source comparison with
++Duck rpc_url and AOSP ServerInterface confirmed an incorrect slash separator.
++Both methods now use /v1:fetchEekChain and /v1:signCertificates, retaining the
++challenge query parameter. C++ syntax and URL construction static checks passed.
++No network request, compilation or deployment performed for this correction.
+diff --git a/native/rkp_issuer/Android.bp b/native/rkp_issuer/Android.bp
+new file mode 100644
+index 0000000..6e0c0b3
+--- /dev/null
++++ b/native/rkp_issuer/Android.bp
+@@ -0,0 +1,40 @@
++// SPDX-FileCopyrightText: 2026 The LineageOS Project
++// SPDX-License-Identifier: Apache-2.0
++license {
++    name: "tee_soft_rkp_issuer_mit_license",
++    license_kinds: ["SPDX-license-identifier-MIT"],
++    license_text: ["NOTICE"],
++}
++
++cc_binary {
++    name: "tee_soft_rkp_issuer",
++    licenses: [
++        "Android-Apache-2.0",
++        "tee_soft_rkp_issuer_mit_license",
++    ],
++    apex_available: ["org.system.tee.soft.rkp"],
++    min_sdk_version: "35",
++    srcs: ["issuer.cpp"],
++    cpp_std: "c++17",
++    cppflags: ["-fexceptions"],
++    cflags: [
++        "-Wall",
++        "-Wextra",
++        "-Werror",
++    ],
++    static_libs: [
++        "android.hardware.security.rkp-V3-ndk",
++        "libcppbor",
++        "libcurl",
++        "libcutils_sockets",
++        "libjsoncpp",
++    ],
++    shared_libs: [
++        "libbase",
++        "libbinder_ndk",
++        "libcrypto",
++        "liblog",
++        "libssl",
++        "libz",
++    ],
++}
+diff --git a/native/rkp_issuer/NOTICE b/native/rkp_issuer/NOTICE
+new file mode 100644
+index 0000000..45cf563
+--- /dev/null
++++ b/native/rkp_issuer/NOTICE
+@@ -0,0 +1,42 @@
++MIT License
++
++Copyright (c) 2026
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
++MIT License
++
++Copyright (c) 2026 Eltavine (尉迟栩澜)
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+\ No newline at end of file
+diff --git a/native/rkp_issuer/apex/Android.bp b/native/rkp_issuer/apex/Android.bp
+new file mode 100644
+index 0000000..510b20c
+--- /dev/null
++++ b/native/rkp_issuer/apex/Android.bp
+@@ -0,0 +1,44 @@
++// SPDX-License-Identifier: Apache-2.0
++apex {
++    name: "org.system.tee.soft.rkp",
++    licenses: ["Android-Apache-2.0"],
++    manifest: "apex_manifest.json",
++    file_contexts: ":org.system.tee.soft.rkp-file_contexts",
++    key: "org.system.tee.soft.rkp.key",
++    certificate: ":org.system.tee.soft.rkp.certificate",
++    updatable: true,
++    min_sdk_version: "35",
++    // Keep the installation artifact as an ordinary .apex for independent updates.
++    compressible: false,
++    compile_multilib: "first",
++    binaries: ["tee_soft_rkp_issuer"],
++    prebuilts: ["org.system.tee.soft.rkp.init.rc"],
++}
++
++prebuilt_etc {
++    name: "org.system.tee.soft.rkp.init.rc",
++    licenses: ["Android-Apache-2.0"],
++    src: "tee_soft_rkp_issuer.rc",
++    filename: "init.rc",
++    installable: false,
++}
++
++// These checked-in keys are development keys, never production trust anchors.
++// A release must replace BOTH signatures; see docs/tee-soft-rkp-apex.md.
++apex_key {
++    name: "org.system.tee.soft.rkp.key",
++    public_key: "org.system.tee.soft.rkp.avbpubkey",
++    private_key: "org.system.tee.soft.rkp.pem",
++}
++
++android_app_certificate {
++    name: "org.system.tee.soft.rkp.certificate",
++    certificate: "org.system.tee.soft.rkp",
++}
++
++// AOSP requires the file_contexts provider to live under system/sepolicy.
++filegroup {
++    name: "tee_soft_rkp_apex_file_contexts_source",
++    srcs: ["file_contexts"],
++    visibility: ["//system/sepolicy/apex:__pkg__"],
++}
+diff --git a/native/rkp_issuer/apex/apex_manifest.json b/native/rkp_issuer/apex/apex_manifest.json
+new file mode 100644
+index 0000000..a94ce8c
+--- /dev/null
++++ b/native/rkp_issuer/apex/apex_manifest.json
+@@ -0,0 +1,5 @@
++{
++    "name": "org.system.tee.soft.rkp",
++    "version": 1,
++    "supportsRebootlessUpdate": true
++}
+diff --git a/native/rkp_issuer/apex/file_contexts b/native/rkp_issuer/apex/file_contexts
+new file mode 100644
+index 0000000..6398413
+--- /dev/null
++++ b/native/rkp_issuer/apex/file_contexts
+@@ -0,0 +1,2 @@
++(/.*)?                         u:object_r:system_file:s0
++/bin/tee_soft_rkp_issuer        u:object_r:tee_soft_rkp_issuer_exec:s0
+diff --git a/native/rkp_issuer/apex/org.system.tee.soft.rkp.avbpubkey b/native/rkp_issuer/apex/org.system.tee.soft.rkp.avbpubkey
+new file mode 100644
+index 0000000000000000000000000000000000000000..20756c7775f05bcc615283a0e0db9029f05af5b5
+GIT binary patch
+literal 1032
+zcmV+j1o!&@01yBsjp)JR872e9EmVAySGI<nO?^-&A`PS#Q_)d+JHWudzLVyre-cT}
+zU(}30lbNn@DH+|PurER9JpM=2B>{CGs-7c1Fn1?$eMDYDdcK?nTFmw7r_e$$R70GW
+zyM5BS;@pal{#2LymK}Fk01q2M2mF!#(e;my;UB2V9_AX5u_b5uVKKKsq57UDpKoXW
+zFF@UU3G*1drX6DXo)RH~DRDJmkLCqI5T2LjQL#p`huDh&;uj(YV2q{x$E+W1V)hqw
+ztVR2YRY-j$c#`I|wpOUi1UH!g;Kp*sIYltt58if4b!GUjm%9-hH3<A?$`Q_7#~8G{
+zxS^)R@771nBAYR^J3>(($vubO(F<RMyD+$9B!_3_{wvRa3Wv95;|x6gO3jpIZ_hS?
+z8LZsq^)W^`V6dig>c&Y+H-zgc01XyPGa^1%GAu7A)de$JkFrGCNkN9MlWKk9qn60)
+z`jKB`=|i1&;U5#g>2#KC$uy)kg<RLNGkjlqDWq$EG$f%6GrhV+h`kZ{t%dc#L3hex
+zfis8Y@;S&XJgi<D)LWbe>*I5{fWw8Y0eFizghut?<hEs&9uXHCD?|qgPIY`12ZsyX
+zi(;63;7{()NgB#8e%G$jWI6p+R;>9<EhhBU1*l0E7IGXH<@xU{GBNnpdk($tChxaa
+z9pboVU0A<}k*x<XUUu@kF}}st0<a;STZpxL^^38Cz=CoKd@b;*ZE)Baias)lC0opY
+z_PDbIvFg-2KZ%taR9BKH@ui5)g>1x)G)_M;g8NjDEB5@qQwlB}02}+Io%ncfFkwJF
+zGmr|Dw97RNOV&IhKC(N|9N9ej;FkEFGMkTe1@DiV^H-Xwr{gk9mnk46`6rwV-iqw1
+z*mewy)yq;Cg!<cdY)2UkS^3eG-azQ&xc>rX??^~eD>HYitZ&_T$LvA?6Ec_)3s+5?
+z0H}2QSMzDm@GzdhH7l%7HF}3H`xpF1Ii-gJVKBY1w>!dZ3W6%JGYg}vMTtt@AAA4)
+zFLW62+4#zU4(ykHyXH?aaT;K!*!Rf81BgU^8Z40M^Me5}+UEg)H3IPq)5`6c;vxGF
+zj^q1Avkb=U_28_Cd>u(j!t~<}x;~VJx_s6n6kgd)vqO=mm|HA=7qk0owB)y}*3?w?
+z&P~GTUQW{UCE_PuV;h$^vG}~5?buN^g2hw3a5)CzBJb&XSb%~qdAYvSUNa#QtI=$k
+za271@zzHEOM2-T-d5vWDtnqIpp0ILxv)cHoW{w_qbyr#$sWk;~lr0z^(Q5lV2d}mg
+zH)%qDjaqeK4fH{HF5GL`T&Ltd5$pJ49bj7567Ct|m0HxNeRo%oKf`9O!YKp55_`!x
+C_xkYw
+
+literal 0
+HcmV?d00001
+
+diff --git a/native/rkp_issuer/apex/org.system.tee.soft.rkp.pem b/native/rkp_issuer/apex/org.system.tee.soft.rkp.pem
+new file mode 100644
+index 0000000..b6870cc
+--- /dev/null
++++ b/native/rkp_issuer/apex/org.system.tee.soft.rkp.pem
+@@ -0,0 +1,52 @@
++-----BEGIN PRIVATE KEY-----
++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
++PKCiFLfuoTXQ8B7Q31yt1MkwP+LOouo=
++-----END PRIVATE KEY-----
+diff --git a/native/rkp_issuer/apex/org.system.tee.soft.rkp.pk8 b/native/rkp_issuer/apex/org.system.tee.soft.rkp.pk8
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5172688f2dc3ed3769bbce5a58f7412e42b099c
+GIT binary patch
+literal 2375
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/native/rkp_issuer/apex/org.system.tee.soft.rkp.x509.pem b/native/rkp_issuer/apex/org.system.tee.soft.rkp.x509.pem
+new file mode 100644
+index 0000000..77891d8
+--- /dev/null
++++ b/native/rkp_issuer/apex/org.system.tee.soft.rkp.x509.pem
+@@ -0,0 +1,32 @@
++-----BEGIN CERTIFICATE-----
++MIIFezCCA2OgAwIBAgIUc7bgxd91n2C3syyeRsjyYM6NOqQwDQYJKoZIhvcNAQEL
++BQAwTDEoMCYGA1UECgwfU3lzdGVtIFRFRSBTb2Z0IFJLUCBEZXZlbG9wbWVudDEg
++MB4GA1UEAwwXb3JnLnN5c3RlbS50ZWUuc29mdC5ya3AwIBcNMjYxMTE0MDEzODAy
++WhgPMjA1NjExMDYwMTM4MDJaMEwxKDAmBgNVBAoMH1N5c3RlbSBURUUgU29mdCBS
++S1AgRGV2ZWxvcG1lbnQxIDAeBgNVBAMMF29yZy5zeXN0ZW0udGVlLnNvZnQucmtw
++MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAp8NkkjHRrbOcVsCEJskw
++5EjlaYTsvC4KOkQtR5KuYRXl4hIvQ5AN9arAGS7joXqeD9wN0XeM+GsbLG4V6SQq
++i3fie+eTDxJHu2V2/RSNFALu4zJxfVh5bYHBzdhE1+c6LulBLX5jbd+SMoMa7Eyk
++aTHaUUbl0OrEnJXnpat7rbu8P4q6RNaCtPJG4kYXh1rTIYa4TK/J1K4VjswRlhi6
++2URnECBbY/v94ouWwwDElR9fxHht1ow1xFMRqnBjCqQhafWqsCWKJkZH69UWSgLV
++uaQYVh/Ev8KXVKH17scZtnTg+TLHHZwawHQX0YGOLcuZBUrzNH8jNrTN1Enl9q/b
++WhEpbVYTFWa17R5QZF/xjI8xzt7Vi3a3C1vzwFyBRMvvJR4VUq13vVooVt711kpO
++Ti8wAzu+zpbjdzQ2D52SEciK+UtuBp0WI1G6YwgyNcA9/jZ3PtC3qiojd32iVY+p
++qXzORVobBfRpTNeFW7sUrP/OMUAtMvkJI/6SZMnuBnnSNlGv/ftCcawRVrltBkeU
++qD/CAwke4Yv8j21z3w60w9nUkEYIYILwShD5tInMf66XSx0wkwiHmPD//Zjm4xGL
++hex+n0FRQUmAdXcnlQHjN8nyR0+uSnkcvSJqbTq9IXQqyX/pEdoIuXCPOmoXox4H
++SyWG6R1Tho3TDKdgTzeYA48CAwEAAaNTMFEwHQYDVR0OBBYEFMLz3bvYNTrG9Sna
++kZxb1AJwdC6IMB8GA1UdIwQYMBaAFMLz3bvYNTrG9SnakZxb1AJwdC6IMA8GA1Ud
++EwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggIBAAsd055LG3O/ZAUqmElWunRf
++ncg1NBHLm1x8HgfX4GvOVa2NYDSUb+mjr1aQ+P0dzAjr/zbTWRr79X2Sysb9wxaO
++jENjjC7Sv6eTPqSBe3+7LkHao1EieEtxIegqNoS0ja5gNKEb9Ao/7OWoB4YPTThb
++Kni22Ehw/ywLNEXoqgZB5+TzkNx2SPAoEqeWtXl+xcViNu69MqguA2fmodhNdyuH
++yv7urXcPeHLhcGrcE5rzdYDU4YAmqniJbZTIALKL9Ut3FCe7i/4a1oKHAfmsnD0O
++MVXc/AZT+XXtrZ4KKufq3iFHzML/UyOj9VixpfUFpsMPRRHf9UBkTvo8VDkLVuFm
++yub/y00wBZ9b8asC7jVwg4dcMYToA0NZV2e4wBabYcaCWLhg/obW91XzGoJHDYAO
++BYq0KNmOE0UogqlWqG3N6KRjqldkxUEnojwwcEdpOaobD8wr00GMrQCHq1IQhD7U
++D7bARCqjB2ZwGOicP64W3Jt2Xkhn2iPpEl/OfZ6fTQ+nIKQ3IXpNE2llrjf7P15Q
+++H+Q7okhwr6/Umkj4INslZ0Ca82GwCwJEzrNI53fUR+/tEn0WJXQ4MnzmP37JAX6
++tOfL+SrXezG/JtqAmHSMKOyCXWHRMYTtOJsqFOz3A6aO/3rc4wsxvcqmvAJ0n0Hb
++tWzbCXzd2h/m8KlmwuS2
++-----END CERTIFICATE-----
+diff --git a/native/rkp_issuer/apex/tee_soft_rkp_issuer.rc b/native/rkp_issuer/apex/tee_soft_rkp_issuer.rc
+new file mode 100644
+index 0000000..da3c8f8
+--- /dev/null
++++ b/native/rkp_issuer/apex/tee_soft_rkp_issuer.rc
+@@ -0,0 +1,9 @@
++# SPDX-FileCopyrightText: 2026 The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++service tee_soft_rkp_issuer /apex/org.system.tee.soft.rkp/bin/tee_soft_rkp_issuer
++    class late_start
++    user system
++    group system inet
++    disabled
++    oneshot
++    socket tee_soft_rkp_issuer stream 0600 system system
+diff --git a/native/rkp_issuer/issuer.cpp b/native/rkp_issuer/issuer.cpp
+new file mode 100644
+index 0000000..58957dd
+--- /dev/null
++++ b/native/rkp_issuer/issuer.cpp
+@@ -0,0 +1,489 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ * V1 zero-HBK request/CSR assembly adapted from Duck-ToolBox db43a2d and
++ * LazyBonesLZY/rkp-v1-oracle b28480c (MIT). See NOTICE for the upstream licenses.
++ */
++#include <aidl/android/hardware/security/keymint/DeviceInfo.h>
++#include <aidl/android/hardware/security/keymint/IRemotelyProvisionedComponent.h>
++#include <aidl/android/hardware/security/keymint/MacedPublicKey.h>
++#include <aidl/android/hardware/security/keymint/ProtectedData.h>
++#include <aidl/android/hardware/security/keymint/RpcHardwareInfo.h>
++#include <android-base/properties.h>
++#include <android-base/unique_fd.h>
++#include <android/binder_manager.h>
++#include <cppbor.h>
++#include <cppbor_parse.h>
++#include <curl/curl.h>
++#include <cutils/sockets.h>
++#include <json/json.h>
++#include <openssl/bio.h>
++#include <openssl/bn.h>
++#include <openssl/crypto.h>
++#include <openssl/ec.h>
++#include <openssl/evp.h>
++#include <openssl/hkdf.h>
++#include <openssl/hmac.h>
++#include <openssl/pem.h>
++#include <openssl/x509.h>
++#include <arpa/inet.h>
++#include <poll.h>
++#include <signal.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cerrno>
++#include <cstring>
++#include <limits>
++#include <memory>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <thread>
++#include <vector>
++
++namespace {
++using Bytes = std::vector<uint8_t>;
++using Clock = std::chrono::steady_clock;
++namespace km = aidl::android::hardware::security::keymint;
++constexpr size_t kMaxFrame = 128 * 1024;
++constexpr size_t kMaxCbor = 64 * 1024;
++constexpr const char* kService =
++        "android.hardware.security.keymint.IRemotelyProvisionedComponent/default";
++constexpr const char* kServer = "https://remoteprovisioning.googleapis.com/v1";
++
++struct Failure : std::exception {
++    explicit Failure(int value) : code(value) {}
++    int code;
++};
++void require(bool ok, int code = -1) { if (!ok) throw Failure(code); }
++
++struct State {
++    std::mutex mutex;
++    std::string job;
++    std::string status = "idle";
++    std::string stage = "waiting";
++    std::string xml;
++    int code = 0;
++    bool acknowledged = false;
++    Clock::time_point finished;
++} state;
++
++void setStage(const char* stage) {
++    std::lock_guard lock(state.mutex);
++    state.stage = stage;
++}
++void clearSecret(std::string& value) {
++    if (!value.empty()) OPENSSL_cleanse(value.data(), value.size());
++    value.clear();
++}
++
++// Bound recursion/container sizes BEFORE handing untrusted CBOR to cppbor.
++void scanCbor(const Bytes& data, size_t& pos, unsigned depth) {
++    require(depth <= 16 && pos < data.size());
++    uint8_t head = data[pos++];
++    unsigned major = head >> 5;
++    unsigned additional = head & 31;
++    require(additional < 28);
++    uint64_t count = additional;
++    if (additional >= 24) {
++        unsigned width = 1u << (additional - 24);
++        require(width <= data.size() - pos);
++        count = 0;
++        for (unsigned i = 0; i < width; ++i) count = (count << 8) | data[pos++];
++    }
++    if (major == 2 || major == 3) {
++        require(count <= data.size() - pos);
++        pos += count;
++    } else if (major == 4 || major == 5) {
++        require(count <= 128);
++        if (major == 5) count *= 2;
++        for (uint64_t i = 0; i < count; ++i) scanCbor(data, pos, depth + 1);
++    } else if (major == 6) {
++        scanCbor(data, pos, depth + 1);
++    }
++}
++std::unique_ptr<cppbor::Item> parse(const Bytes& data) {
++    require(!data.empty() && data.size() <= kMaxCbor);
++    size_t position = 0;
++    scanCbor(data, position, 0);
++    require(position == data.size());
++    auto [item, end, error] = cppbor::parse(data);
++    require(item && end == data.data() + data.size() && error.empty());
++    return std::move(item);
++}
++const cppbor::Array& array(const cppbor::Item& value, size_t minimum) {
++    auto* result = value.asArray();
++    require(result && result->size() >= minimum);
++    return *result;
++}
++Bytes bytes(const cppbor::Item& value) {
++    auto* result = value.asBstr();
++    require(result != nullptr);
++    return result->value();
++}
++
++std::string base64(const uint8_t* data, size_t size, bool url = false) {
++    require(size < kMaxFrame);
++    std::string result(4 * ((size + 2) / 3) + 1, '\0');
++    int length = EVP_EncodeBlock(reinterpret_cast<uint8_t*>(result.data()), data, size);
++    require(length >= 0);
++    result.resize(length);
++    if (url) {
++        std::replace(result.begin(), result.end(), '+', '-');
++        std::replace(result.begin(), result.end(), '/', '_');
++        // Duck uses padded Base64Url for the challenge query parameter.
++    }
++    return result;
++}
++size_t receiveBody(char* data, size_t size, size_t count, void* context) {
++    auto& out = *static_cast<Bytes*>(context);
++    if (size && count > std::numeric_limits<size_t>::max() / size) return 0;
++    size_t length = size * count;
++    if (length > kMaxCbor - out.size()) return 0;
++    out.insert(out.end(), data, data + length);
++    return length;
++}
++Bytes post(const std::string& endpoint, const Bytes& body) {
++    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
++    require(curl != nullptr);
++    curl_slist* rawHeaders = curl_slist_append(nullptr, "Content-Type: application/cbor");
++    require(rawHeaders != nullptr);
++    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(rawHeaders, curl_slist_free_all);
++    // Google RPC methods are colon-suffixed on /v1, not child paths.
++    std::string url = std::string(kServer) + ":" + endpoint;
++    Bytes response;
++    curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
++    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
++    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.data());
++    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(body.size()));
++    curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 15L);
++    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 40L);
++    curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
++    curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
++    curl_easy_setopt(curl.get(), CURLOPT_PROXY, "");
++    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
++    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
++    curl_easy_setopt(curl.get(), CURLOPT_CAPATH, "/system/etc/security/cacerts");
++    curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, receiveBody);
++    curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
++    CURLcode status = curl_easy_perform(curl.get());
++    require(status == CURLE_OK, -1000 - static_cast<int>(status));
++    long http = 0;
++    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http);
++    require(http == 200, static_cast<int>(http));
++    return response;
++}
++
++Bytes macedPublicKey(const Bytes& publicKey) {
++    std::array<uint8_t, 32> hbk{}, key{}, tag{};
++    constexpr char context[] = "Key to MAC public keys";
++    require(HKDF(key.data(), key.size(), EVP_sha256(), hbk.data(), hbk.size(), nullptr, 0,
++                 reinterpret_cast<const uint8_t*>(context), sizeof(context) - 1) == 1);
++    Bytes protectedHeaders = cppbor::Map().add(1, 5).encode();
++    Bytes structure = cppbor::Array().add("MAC0").add(protectedHeaders).add(Bytes{})
++            .add(publicKey).encode();
++    unsigned length = 0;
++    require(HMAC(EVP_sha256(), key.data(), key.size(), structure.data(), structure.size(),
++                 tag.data(), &length) != nullptr && length == tag.size());
++    OPENSSL_cleanse(key.data(), key.size());
++    return cppbor::Array().add(protectedHeaders).add(cppbor::Map()).add(publicKey)
++            .add(Bytes(tag.begin(), tag.end())).encode();
++}
++
++// These two opaque byte sequences must not be decoded/re-encoded for CSR construction.
++Bytes assembleCsr(const Bytes& device, const Bytes& protectedData, const Bytes& challenge,
++                  const cppbor::Map& publicKey, const Bytes& tag) {
++    auto deviceValue = parse(device);
++    auto protectedValue = parse(protectedData);
++    require(deviceValue->asMap() && deviceValue->asMap()->size() != 0 && tag.size() == 32);
++    const auto& encryption = array(*protectedValue, 4);
++    require(encryption.size() == 4);
++    auto headers = parse(bytes(*encryption[0]));
++    require(headers->asMap() != nullptr);
++    const auto& algorithm = headers->asMap()->get(1);
++    require(algorithm && algorithm->asInt() && algorithm->asInt()->value() == 3);
++    require(encryption[1]->asMap() != nullptr);
++    const auto& iv = encryption[1]->asMap()->get(5);
++    require(iv && bytes(*iv).size() == 12 && bytes(*encryption[2]).size() >= 16);
++    const auto& recipients = array(*encryption[3], 1);
++    require(recipients.size() == 1);
++    const auto& recipient = array(*recipients[0], 3);
++    require(recipient.size() == 3 && recipient[1]->asMap() && recipient[2]->asNull());
++    Bytes recipientHeaders = bytes(*recipient[0]);
++    if (!recipientHeaders.empty()) require(parse(recipientHeaders)->asMap() != nullptr);
++    Bytes macedKeys = cppbor::Array().add(cppbor::Map().add(1, 5).encode())
++            .add(cppbor::Map()).add(cppbor::Array().add(publicKey.clone()).encode()).add(tag).encode();
++    return cppbor::Array()
++            .add(cppbor::Array().add(cppbor::EncodedItem(device)).add(cppbor::Map()))
++            .add(challenge).add(cppbor::EncodedItem(protectedData))
++            .add(cppbor::EncodedItem(macedKeys)).encode();
++}
++
++std::string pem(BIO* bio) {
++    char* data = nullptr;
++    long length = BIO_get_mem_data(bio, &data);
++    require(length > 0 && length < static_cast<long>(kMaxFrame));
++    return std::string(data, length);
++}
++std::string makeKeybox(const Bytes& der, EVP_PKEY* privateKey) {
++    require(!der.empty() && der.size() <= 16384);
++    std::vector<bssl::UniquePtr<X509>> certificates;
++    const uint8_t* position = der.data();
++    const uint8_t* end = position + der.size();
++    size_t leaf = 0;
++    size_t matches = 0;
++    while (position < end) {
++        bssl::UniquePtr<X509> certificate(d2i_X509(nullptr, &position, end - position));
++        require(certificate != nullptr && certificates.size() < 16);
++        bssl::UniquePtr<EVP_PKEY> pub(X509_get_pubkey(certificate.get()));
++        require(pub != nullptr);
++        if (EVP_PKEY_cmp(pub.get(), privateKey) == 1) {
++            leaf = certificates.size();
++            matches++;
++        }
++        certificates.push_back(std::move(certificate));
++    }
++    require(matches == 1);
++    std::vector<size_t> order;
++    size_t current = leaf;
++    while (true) {
++        require(std::find(order.begin(), order.end(), current) == order.end());
++        order.push_back(current);
++        X509* child = certificates[current].get();
++        if (X509_NAME_cmp(X509_get_subject_name(child), X509_get_issuer_name(child)) == 0) {
++            bssl::UniquePtr<EVP_PKEY> root(X509_get_pubkey(child));
++            require(root && X509_verify(child, root.get()) == 1);
++            break;
++        }
++        size_t parent = 0, parents = 0;
++        for (size_t i = 0; i < certificates.size(); ++i) {
++            if (X509_NAME_cmp(X509_get_issuer_name(child),
++                              X509_get_subject_name(certificates[i].get())) == 0) {
++                parent = i;
++                parents++;
++            }
++        }
++        require(parents == 1);
++        bssl::UniquePtr<EVP_PKEY> issuer(X509_get_pubkey(certificates[parent].get()));
++        require(issuer && X509_verify(child, issuer.get()) == 1);
++        current = parent;
++    }
++    require(order.size() == certificates.size());
++    bssl::UniquePtr<BIO> privatePem(BIO_new(BIO_s_mem()));
++    require(privatePem && PEM_write_bio_PrivateKey(privatePem.get(), privateKey, nullptr, nullptr,
++                                                  0, nullptr, nullptr) == 1);
++    std::string key = pem(privatePem.get());
++    std::string xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
++            "<AndroidAttestation><NumberOfKeyboxes>1</NumberOfKeyboxes>"
++            "<Keybox DeviceID=\"tee-soft-rkp\"><Key algorithm=\"ecdsa\">"
++            "<PrivateKey format=\"pem\">\n" + key + "</PrivateKey><CertificateChain>"
++            "<NumberOfCertificates>" + std::to_string(order.size()) + "</NumberOfCertificates>";
++    clearSecret(key);
++    char* buffer = nullptr;
++    long privateLength = BIO_get_mem_data(privatePem.get(), &buffer);
++    if (privateLength > 0) OPENSSL_cleanse(buffer, privateLength);
++    for (size_t index : order) {
++        bssl::UniquePtr<BIO> output(BIO_new(BIO_s_mem()));
++        require(output && PEM_write_bio_X509(output.get(), certificates[index].get()) == 1);
++        xml += "<Certificate format=\"pem\">\n" + pem(output.get()) + "</Certificate>";
++    }
++    xml += "</CertificateChain></Key></Keybox></AndroidAttestation>\n";
++    require(xml.size() < kMaxFrame / 2);
++    return xml;
++}
++
++void issue() {
++    try {
++        setStage("generate");
++        bssl::UniquePtr<EC_KEY> ec(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
++        require(ec && EC_KEY_generate_key(ec.get()) == 1);
++        bssl::UniquePtr<EVP_PKEY> key(EVP_PKEY_new());
++        require(key && EVP_PKEY_set1_EC_KEY(key.get(), ec.get()) == 1);
++        std::array<uint8_t, 65> point{};
++        require(EC_POINT_point2oct(EC_KEY_get0_group(ec.get()), EC_KEY_get0_public_key(ec.get()),
++                POINT_CONVERSION_UNCOMPRESSED, point.data(), point.size(), nullptr) == point.size());
++        cppbor::Map publicKey;
++        publicKey.add(1, 2).add(3, -7).add(-1, 1)
++                .add(-2, Bytes(point.begin() + 1, point.begin() + 33))
++                .add(-3, Bytes(point.begin() + 33, point.end()));
++        setStage("hardware");
++        auto binder = ndk::SpAIBinder(AServiceManager_checkService(kService));
++        require(binder.get() != nullptr, -2);
++        auto hal = km::IRemotelyProvisionedComponent::fromBinder(binder);
++        require(hal != nullptr, -2);
++        km::RpcHardwareInfo info;
++        auto status = hal->getHardwareInfo(&info);
++        require(status.isOk(), status.getServiceSpecificError() != 0
++                ? status.getServiceSpecificError() : -2000 + status.getExceptionCode());
++        require(info.supportedEekCurve == 1 || info.supportedEekCurve == 2, -3);
++        setStage("challenge");
++        std::string fingerprint = android::base::GetProperty("ro.build.fingerprint", "");
++        require(!fingerprint.empty() && fingerprint.size() <= 4096, -4);
++        Bytes request = cppbor::Map().add("fingerprint", fingerprint).add("id", 42).encode();
++        auto eekResponse = parse(post("fetchEekChain", request));
++        const auto& eekTop = array(*eekResponse, 2);
++        Bytes challenge = bytes(*eekTop[1]);
++        require(!challenge.empty() && challenge.size() <= 64);
++        Bytes eek;
++        for (const auto& entry : array(*eekTop[0], 1)) {
++            const auto& pair = array(*entry, 2);
++            if (pair[0]->asInt() && pair[0]->asInt()->value() == info.supportedEekCurve) {
++                require(array(*pair[1], 1).size() <= 16);
++                eek = pair[1]->encode();
++                break;
++            }
++        }
++        require(!eek.empty(), -3);
++        setStage("csr");
++        km::MacedPublicKey maced;
++        maced.macedKey = macedPublicKey(publicKey.encode());
++        km::DeviceInfo device;
++        km::ProtectedData protectedData;
++        Bytes tag;
++        status = hal->generateCertificateRequest(false, {maced}, eek, challenge,
++                                                  &device, &protectedData, &tag);
++        require(status.isOk(), status.getServiceSpecificError() != 0
++                ? status.getServiceSpecificError() : -2000 + status.getExceptionCode());
++        Bytes csr = assembleCsr(device.deviceInfo, protectedData.protectedData, challenge, publicKey, tag);
++        require(csr.size() <= 0xa000);
++        setStage("submit");
++        std::string encoded = base64(challenge.data(), challenge.size(), true);
++        // Percent-encode Base64 padding as part of the query value.
++        for (size_t pos = 0; (pos = encoded.find('=', pos)) != std::string::npos; pos += 3) {
++            encoded.replace(pos, 1, "%3D");
++        }
++        auto certificates = parse(post("signCertificates?challenge=" + encoded, csr));
++        const cppbor::Array* chainTop = &array(*certificates, 1);
++        if ((*chainTop)[0]->asArray()) chainTop = (*chainTop)[0]->asArray();
++        require(chainTop->size() >= 2);
++        Bytes chain = bytes(*(*chainTop)[0]);
++        const auto& unique = array(*(*chainTop)[1], 1);
++        require(unique.size() == 1);
++        Bytes tail = bytes(*unique[0]);
++        chain.insert(chain.end(), tail.begin(), tail.end());
++        setStage("verify");
++        std::string xml = makeKeybox(chain, key.get());
++        std::lock_guard lock(state.mutex);
++        state.xml = std::move(xml);
++        state.stage = "ready";
++        state.status = "success";
++        state.finished = Clock::now();
++    } catch (const Failure& failure) {
++        std::lock_guard lock(state.mutex);
++        state.code = failure.code;
++        state.status = "error";
++        state.finished = Clock::now();
++    } catch (...) {
++        std::lock_guard lock(state.mutex);
++        state.code = -1;
++        state.status = "error";
++        state.finished = Clock::now();
++    }
++}
++
++bool transfer(int fd, void* data, size_t size, bool writing) {
++    auto* position = static_cast<uint8_t*>(data);
++    while (size != 0) {
++        ssize_t count = writing ? send(fd, position, size, MSG_NOSIGNAL) : recv(fd, position, size, 0);
++        if (count < 0 && errno == EINTR) continue;
++        if (count <= 0) return false;
++        position += count;
++        size -= count;
++    }
++    return true;
++}
++Json::Value exchange(const Json::Value& request) {
++    require(request.isObject() && request["version"].isInt() && request["version"].asInt() == 1);
++    require(request["job"].isString() && request["action"].isString());
++    std::string job = request["job"].asString();
++    std::string action = request["action"].asString();
++    require(job.size() == 32 && job.find_first_not_of("0123456789abcdef") == std::string::npos);
++    require(action == "start" || action == "query" || action == "ack");
++    std::lock_guard lock(state.mutex);
++    if (state.status == "idle") {
++        require(action == "start");
++        state.job = job;
++        state.status = "running";
++        std::thread(issue).detach();
++    }
++    require(state.job == job, -5);
++    Json::Value reply(Json::objectValue);
++    reply["version"] = 1;
++    reply["job"] = job;
++    reply["status"] = state.status;
++    reply["stage"] = state.stage;
++    reply["code"] = state.code;
++    if (action == "ack") {
++        require(state.status == "success" || state.status == "error");
++        state.acknowledged = true;
++        clearSecret(state.xml);
++    } else if (state.status == "success") {
++        reply["xml"] = state.xml;
++    }
++    return reply;
++}
++void serve(int fd) {
++    ucred peer{};
++    socklen_t size = sizeof(peer);
++    require(getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &size) == 0 && peer.uid == 1000);
++    timeval timeout{2, 0};
++    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
++    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
++    uint32_t length;
++    require(transfer(fd, &length, sizeof(length), false));
++    length = ntohl(length);
++    require(length > 0 && length <= 1024);
++    std::string body(length, '\0');
++    require(transfer(fd, body.data(), body.size(), false));
++    Json::CharReaderBuilder reader;
++    reader["collectComments"] = false;
++    reader["stackLimit"] = 8;
++    reader["rejectDupKeys"] = true;
++    reader["failIfExtra"] = true;
++    std::unique_ptr<Json::CharReader> parser(reader.newCharReader());
++    Json::Value request;
++    std::string error;
++    require(parser->parse(body.data(), body.data() + body.size(), &request, &error));
++    Json::StreamWriterBuilder writer;
++    writer["indentation"] = "";
++    std::string response = Json::writeString(writer, exchange(request));
++    require(response.size() <= kMaxFrame);
++    length = htonl(response.size());
++    transfer(fd, &length, sizeof(length), true);
++    transfer(fd, response.data(), response.size(), true);
++    clearSecret(response);
++}
++}  // namespace
++
++int main() {
++    // Covers blocked HAL calls as well as idle clients; no daemon restart is requested.
++    std::thread([] {
++        std::this_thread::sleep_for(std::chrono::seconds(180));
++        _exit(124);
++    }).detach();
++    if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) return 1;
++    android::base::unique_fd socket(android_get_control_socket("tee_soft_rkp_issuer"));
++    if (socket.get() < 0 || listen(socket.get(), 4) != 0) return 1;
++    auto started = Clock::now();
++    while (true) {
++        {
++            std::lock_guard lock(state.mutex);
++            if (state.acknowledged) break;
++            if (state.status == "idle" && Clock::now() - started > std::chrono::seconds(15)) break;
++            if ((state.status == "success" || state.status == "error")
++                    && Clock::now() - state.finished > std::chrono::seconds(30)) break;
++        }
++        pollfd listener{socket.get(), POLLIN, 0};
++        if (poll(&listener, 1, 500) <= 0) continue;
++        android::base::unique_fd client(accept4(socket.get(), nullptr, nullptr, SOCK_CLOEXEC));
++        if (client.get() < 0) continue;
++        try { serve(client.get()); } catch (...) { /* No request/response material is logged. */ }
++    }
++    std::lock_guard lock(state.mutex);
++    clearSecret(state.xml);
++    return 0;
++}
+diff --git a/org.lineageos.lineageparts.xml b/org.lineageos.lineageparts.xml
+index 23a42a5..ba89f87 100644
+--- a/org.lineageos.lineageparts.xml
++++ b/org.lineageos.lineageparts.xml
+@@ -4,7 +4,10 @@
+      SPDX-License-Identifier: Apache-2.0
+ -->
+ <permissions>
++    <allowed-vendor-apex package="org.system.tee.soft.rkp"
++        installerPackage="org.lineageos.lineageparts" />
+     <privapp-permissions package="org.lineageos.lineageparts">
++        <permission name="android.permission.INSTALL_PACKAGE_UPDATES"/>
+         <permission name="android.permission.CHANGE_CONFIGURATION"/>
+         <permission name="android.permission.READ_SEARCH_INDEXABLES"/>
+         <permission name="android.permission.WRITE_MEDIA_STORAGE"/>
+diff --git a/res/values-zh-rCN/tee_soft_component_strings.xml b/res/values-zh-rCN/tee_soft_component_strings.xml
+new file mode 100644
+index 0000000..b79b120
+--- /dev/null
++++ b/res/values-zh-rCN/tee_soft_component_strings.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<resources>
++    <string name="tee_soft_component_version">组件版本</string>
++    <string name="tee_soft_component_install">安装组件更新</string>
++    <string name="tee_soft_component_result">上次组件更新结果</string>
++    <string name="tee_soft_component_description">选择已签名的 RKP 签发组件 .apex 更新包。</string>
++    <string name="tee_soft_component_version_unknown">无法获取激活版本</string>
++    <string name="tee_soft_component_no_picker">没有可用的文件选择器</string>
++    <string name="tee_soft_component_confirm">将 RKP 组件从版本 %1$s 更新到 %2$s？安装期间无法签发。</string>
++    <string name="tee_soft_component_checking">正在复制并检查更新包</string>
++    <string name="tee_soft_component_awaiting_confirmation">等待确认更新</string>
++    <string name="tee_soft_component_installing">正在安装或恢复组件更新状态</string>
++    <string name="tee_soft_component_state_error">无法保存更新状态，相关操作保持锁定；请重新启动应用以恢复。</string>
++    <string name="tee_soft_component_success">组件更新已激活</string>
++    <string name="tee_soft_component_unconfirmed">无法确认更新结果，请先核对上方激活版本，再决定是否重试。</string>
++    <string name="tee_soft_component_interrupted">未提交的更新已中断，不会自动重试</string>
++    <string name="tee_soft_component_failed">组件更新失败（代码 %1$s）：%2$s</string>
++</resources>
+diff --git a/res/values-zh-rCN/tee_soft_rkp_strings.xml b/res/values-zh-rCN/tee_soft_rkp_strings.xml
+new file mode 100644
+index 0000000..f2a718b
+--- /dev/null
++++ b/res/values-zh-rCN/tee_soft_rkp_strings.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="tee_soft_rkp_title">本机 RKP 签发</string>
++    <string name="tee_soft_rkp_issue">签发 Keybox</string>
++    <string name="tee_soft_rkp_description">通过本机和 RKP 服务器申请 EC Keybox，需要兼容固件及网络连接。</string>
++    <string name="tee_soft_rkp_result_title">最近签发结果</string>
++    <string name="tee_soft_rkp_success">Keybox 已签发并安装</string>
++    <string name="tee_soft_rkp_failed">签发失败，阶段：%1$s（代码 %2$s）</string>
++    <string name="tee_soft_rkp_stage_starting">正在启动签发组件</string>
++    <string name="tee_soft_rkp_stage_generate">正在生成密钥</string>
++    <string name="tee_soft_rkp_stage_hardware">正在连接本机 RKP 服务</string>
++    <string name="tee_soft_rkp_stage_challenge">正在获取服务器挑战值</string>
++    <string name="tee_soft_rkp_stage_csr">正在生成证书请求</string>
++    <string name="tee_soft_rkp_stage_submit">正在申请证书</string>
++    <string name="tee_soft_rkp_stage_verify">正在检查返回证书</string>
++    <string name="tee_soft_rkp_stage_install">正在安装 Keybox</string>
++    <string name="tee_soft_rkp_stage_receive">正在接收签发结果</string>
++</resources>
+diff --git a/res/values-zh-rTW/tee_soft_component_strings.xml b/res/values-zh-rTW/tee_soft_component_strings.xml
+new file mode 100644
+index 0000000..992f674
+--- /dev/null
++++ b/res/values-zh-rTW/tee_soft_component_strings.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<resources>
++    <string name="tee_soft_component_version">元件版本</string>
++    <string name="tee_soft_component_install">安裝元件更新</string>
++    <string name="tee_soft_component_result">上次元件更新結果</string>
++    <string name="tee_soft_component_description">選擇已簽署的 RKP 簽發元件 .apex 更新套件。</string>
++    <string name="tee_soft_component_version_unknown">無法取得啟用版本</string>
++    <string name="tee_soft_component_no_picker">沒有可用的檔案選擇器</string>
++    <string name="tee_soft_component_confirm">將 RKP 元件從版本 %1$s 更新到 %2$s？安裝期間無法簽發。</string>
++    <string name="tee_soft_component_checking">正在複製並檢查更新套件</string>
++    <string name="tee_soft_component_awaiting_confirmation">等待確認更新</string>
++    <string name="tee_soft_component_installing">正在安裝或恢復元件更新狀態</string>
++    <string name="tee_soft_component_state_error">無法儲存更新狀態，相關操作保持鎖定；請重新啟動應用程式以恢復。</string>
++    <string name="tee_soft_component_success">元件更新已啟用</string>
++    <string name="tee_soft_component_unconfirmed">無法確認更新結果，請先核對上方啟用版本，再決定是否重試。</string>
++    <string name="tee_soft_component_interrupted">未提交的更新已中斷，不會自動重試</string>
++    <string name="tee_soft_component_failed">元件更新失敗（代碼 %1$s）：%2$s</string>
++</resources>
+diff --git a/res/values-zh-rTW/tee_soft_rkp_strings.xml b/res/values-zh-rTW/tee_soft_rkp_strings.xml
+new file mode 100644
+index 0000000..3e37009
+--- /dev/null
++++ b/res/values-zh-rTW/tee_soft_rkp_strings.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="tee_soft_rkp_title">本機 RKP 簽發</string>
++    <string name="tee_soft_rkp_issue">簽發 Keybox</string>
++    <string name="tee_soft_rkp_description">透過本機與 RKP 伺服器申請 EC Keybox，需要相容韌體及網路連線。</string>
++    <string name="tee_soft_rkp_result_title">最近簽發結果</string>
++    <string name="tee_soft_rkp_success">Keybox 已簽發並安裝</string>
++    <string name="tee_soft_rkp_failed">簽發失敗，階段：%1$s（代碼 %2$s）</string>
++    <string name="tee_soft_rkp_stage_starting">正在啟動簽發元件</string>
++    <string name="tee_soft_rkp_stage_generate">正在產生金鑰</string>
++    <string name="tee_soft_rkp_stage_hardware">正在連接本機 RKP 服務</string>
++    <string name="tee_soft_rkp_stage_challenge">正在取得伺服器挑戰值</string>
++    <string name="tee_soft_rkp_stage_csr">正在產生憑證請求</string>
++    <string name="tee_soft_rkp_stage_submit">正在申請憑證</string>
++    <string name="tee_soft_rkp_stage_verify">正在檢查傳回憑證</string>
++    <string name="tee_soft_rkp_stage_install">正在安裝 Keybox</string>
++    <string name="tee_soft_rkp_stage_receive">正在接收簽發結果</string>
++</resources>
+diff --git a/res/values/tee_soft_component_strings.xml b/res/values/tee_soft_component_strings.xml
+new file mode 100644
+index 0000000..7f5d7e8
+--- /dev/null
++++ b/res/values/tee_soft_component_strings.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SPDX-License-Identifier: Apache-2.0 -->
++<resources>
++    <string name="tee_soft_component_version">Component version</string>
++    <string name="tee_soft_component_install">Install component update</string>
++    <string name="tee_soft_component_result">Last component update result</string>
++    <string name="tee_soft_component_description">Select a signed .apex update for the RKP issuer.</string>
++    <string name="tee_soft_component_version_unknown">Active version unavailable</string>
++    <string name="tee_soft_component_no_picker">No document picker available</string>
++    <string name="tee_soft_component_confirm">Update the RKP component from version %1$s to %2$s? Issuance will be unavailable during installation.</string>
++    <string name="tee_soft_component_checking">Copying and checking update package</string>
++    <string name="tee_soft_component_awaiting_confirmation">Awaiting update confirmation</string>
++    <string name="tee_soft_component_installing">Installing or recovering component update</string>
++    <string name="tee_soft_component_state_error">Cannot save update state. Operations remain blocked; reopen the app to recover.</string>
++    <string name="tee_soft_component_success">Component update activated</string>
++    <string name="tee_soft_component_unconfirmed">Update outcome could not be confirmed. Check the active version above before trying again.</string>
++    <string name="tee_soft_component_interrupted">Uncommitted update interrupted; no automatic retry</string>
++    <string name="tee_soft_component_failed">Component update failed (code %1$s): %2$s</string>
++</resources>
+diff --git a/res/values/tee_soft_rkp_strings.xml b/res/values/tee_soft_rkp_strings.xml
+new file mode 100644
+index 0000000..c1c6643
+--- /dev/null
++++ b/res/values/tee_soft_rkp_strings.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++     SPDX-FileCopyrightText: 2026 The LineageOS Project
++     SPDX-License-Identifier: Apache-2.0
++-->
++<resources>
++    <string name="tee_soft_rkp_title">On-device RKP issuance</string>
++    <string name="tee_soft_rkp_issue">Issue Keybox</string>
++    <string name="tee_soft_rkp_description">Request an EC Keybox using this device and the RKP server. Requires compatible firmware and a network connection.</string>
++    <string name="tee_soft_rkp_result_title">Last issuance result</string>
++    <string name="tee_soft_rkp_success">Keybox issued and installed</string>
++    <string name="tee_soft_rkp_failed">Issuance failed at %1$s (code %2$s)</string>
++    <string name="tee_soft_rkp_stage_starting">Starting issuer</string>
++    <string name="tee_soft_rkp_stage_generate">Generating key</string>
++    <string name="tee_soft_rkp_stage_hardware">Connecting to device RKP service</string>
++    <string name="tee_soft_rkp_stage_challenge">Obtaining server challenge</string>
++    <string name="tee_soft_rkp_stage_csr">Creating certificate request</string>
++    <string name="tee_soft_rkp_stage_submit">Requesting certificates</string>
++    <string name="tee_soft_rkp_stage_verify">Checking returned certificates</string>
++    <string name="tee_soft_rkp_stage_install">Installing Keybox</string>
++    <string name="tee_soft_rkp_stage_receive">Receiving issuance result</string>
++</resources>
+diff --git a/res/xml/tee_soft_advanced_settings.xml b/res/xml/tee_soft_advanced_settings.xml
+index bb7c0b9..703efff 100644
+--- a/res/xml/tee_soft_advanced_settings.xml
++++ b/res/xml/tee_soft_advanced_settings.xml
+@@ -30,4 +30,26 @@
+             android:title="@string/tee_soft_update_result_title"
+             android:selectable="false" />
+     </PreferenceCategory>
++    <PreferenceCategory android:title="@string/tee_soft_rkp_title">
++        <Preference
++            android:key="tee_soft_rkp_issue"
++            android:title="@string/tee_soft_rkp_issue"
++            android:summary="@string/tee_soft_rkp_description" />
++        <Preference
++            android:key="tee_soft_rkp_result"
++            android:title="@string/tee_soft_rkp_result_title"
++            android:selectable="false" />
++        <Preference
++            android:key="tee_soft_component_version"
++            android:title="@string/tee_soft_component_version"
++            android:selectable="false" />
++        <Preference
++            android:key="tee_soft_component_update"
++            android:title="@string/tee_soft_component_install"
++            android:summary="@string/tee_soft_component_description" />
++        <Preference
++            android:key="tee_soft_component_result"
++            android:title="@string/tee_soft_component_result"
++            android:selectable="false" />
++    </PreferenceCategory>
+ </PreferenceScreen>
+diff --git a/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java b/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java
+index d225058..d1762cf 100644
+--- a/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java
++++ b/src/org/lineageos/lineageparts/teedebug/KeyboxUpdater.java
+@@ -28,12 +28,13 @@ import java.nio.charset.StandardCharsets;
+ import java.util.Base64;
+ import java.util.HashMap;
+ import java.util.Map;
++import java.util.UUID;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.function.Consumer;
+ 
+-/** One process-wide job shared by local imports and network updates, independent of fragments. */
++/** One process-wide job shared by imports, updates and RKP, independent of fragments. */
+ final class KeyboxUpdater {
+     static final String URL_KEY = "update_url";
+     static final String FORMAT_KEY = "update_format";
+@@ -48,11 +49,105 @@ final class KeyboxUpdater {
+     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+     // Resource IDs are never persisted: persisted result codes remain stable across ROM updates.
+     private static volatile String sLastResult;
++    private static volatile String sRkpStage = "starting";
++    private static volatile String sRkpResult;
++    private static volatile int sRkpCode;
++    private static volatile boolean sRkpRunning;
++    private static String sSeenRkpJob;
++    static final String RKP_JOB = "rkp_job";
++    static final String RKP_RESULT = "rkp_result";
++    static final String RKP_STAGE = "rkp_stage";
++    static final String RKP_CODE = "rkp_code";
++    static final String RKP_TIME = "rkp_time";
+ 
+     private KeyboxUpdater() {}
+ 
+-    static boolean busy() { return BUSY.get(); }
++    static boolean busy() { return BUSY.get() || RkpApexUpdater.pending(); }
++
++    static boolean acquireForApex() { return BUSY.compareAndSet(false, true); }
++    static void releaseForApex() { BUSY.set(false); }
++
++    private static boolean acquire() {
++        if (!BUSY.compareAndSet(false, true)) return false;
++        if (RkpApexUpdater.pending()) {
++            BUSY.set(false);
++            return false;
++        }
++        return true;
++    }
++
+     static String lastResult() { return sLastResult; }
++    static boolean rkpRunning() { return sRkpRunning; }
++    static String rkpStage() { return sRkpStage; }
++    static String rkpResult() { return sRkpResult; }
++    static int rkpCode() { return sRkpCode; }
++
++    static boolean startRkp() {
++        return runRkp(UUID.randomUUID().toString().replace("-", ""), false);
++    }
++
++    static void resumeRkpIfNeeded() {
++        if (busy()) return;
++        try {
++            String job = TeeSoftDebugConfig.read().getOrDefault(RKP_JOB, "");
++            if (job.matches("[0-9a-f]{32}") && !job.equals(sSeenRkpJob)) runRkp(job, true);
++        } catch (IOException ignored) {
++            // The settings page displays unreadable configuration; never start a replacement job.
++        }
++    }
++
++    private static boolean runRkp(String job, boolean resume) {
++        if (!acquire()) return false;
++        sSeenRkpJob = job;
++        sRkpRunning = true;
++        sRkpStage = "starting";
++        sRkpResult = null;
++        sRkpCode = 0;
++        WORKER.execute(() -> {
++            String result = "error";
++            String stage = "starting";
++            int code = -1;
++            byte[] data = null;
++            try {
++                if (!resume) TeeSoftDebugConfig.update(Map.of(RKP_JOB, job));
++                data = RkpIssuerClient.issue(job, resume, value -> sRkpStage = value);
++                stage = "verify";
++                sRkpStage = stage;
++                validate(data);
++                stage = "install";
++                sRkpStage = stage;
++                install(data, false, Map.of(RKP_JOB, "", RKP_RESULT, "success",
++                        RKP_STAGE, "complete", RKP_CODE, "0",
++                        RKP_TIME, Long.toString(System.currentTimeMillis())));
++                result = "success";
++                stage = "complete";
++                code = 0;
++            } catch (RkpIssuerClient.Failure e) {
++                stage = e.stage;
++                code = e.code;
++            } catch (IOException | SecurityException e) {
++                // Local validation/installation errors do not cause another issuance request.
++                if (data == null) stage = sRkpStage;
++            } finally {
++                if (data != null) java.util.Arrays.fill(data, (byte) 0);
++                if (!"success".equals(result)) {
++                    try {
++                        TeeSoftDebugConfig.update(Map.of(RKP_JOB, "", RKP_RESULT, result,
++                                RKP_STAGE, stage, RKP_CODE, Integer.toString(code)));
++                    } catch (IOException | SecurityException ignored) {
++                        // Volatile state still exposes this process's outcome.
++                    }
++                }
++                RkpIssuerClient.acknowledge(job);
++                sRkpStage = stage;
++                sRkpCode = code;
++                sRkpResult = result;
++                sRkpRunning = false;
++                BUSY.set(false);
++            }
++        });
++        return true;
++    }
+ 
+     static boolean validUrl(String value) {
+         if (value.isEmpty() || value.length() > 8192) return false;
+@@ -76,7 +171,7 @@ final class KeyboxUpdater {
+ 
+     static boolean startUpdate(String source, String format, Consumer<Integer> callback) {
+         if (!validUrl(source) || !(RAW.equals(format) || BASE64.equals(format))
+-                || !BUSY.compareAndSet(false, true)) return false;
++                || !acquire()) return false;
+         WORKER.execute(() -> {
+             String result = "download";
+             int error = 0;
+@@ -113,7 +208,7 @@ final class KeyboxUpdater {
+     }
+ 
+     static boolean startImport(ContentResolver resolver, Uri uri, Consumer<Integer> callback) {
+-        if (!BUSY.compareAndSet(false, true)) return false;
++        if (!acquire()) return false;
+         WORKER.execute(() -> {
+             int error = 0;
+             try {
+@@ -200,6 +295,11 @@ final class KeyboxUpdater {
+     }
+ 
+     private static void install(byte[] data, boolean network) throws IOException {
++        install(data, network, Map.of());
++    }
++
++    private static void install(byte[] data, boolean network, Map<String, String> metadata)
++            throws IOException {
+         synchronized (TeeSoftDebugConfig.class) {
+             // Read first so an unreadable config cannot be replaced with defaults.
+             TeeSoftDebugConfig.read();
+@@ -226,6 +326,7 @@ final class KeyboxUpdater {
+                     changes.put(RESULT_KEY, "success");
+                     changes.put(TIME_KEY, Long.toString(System.currentTimeMillis()));
+                 }
++                changes.putAll(metadata);
+                 TeeSoftDebugConfig.update(changes);
+             } catch (IOException | ErrnoException | SecurityException e) {
+                 IOException failure = new IOException("Cannot install Keybox", e);
+diff --git a/src/org/lineageos/lineageparts/teedebug/RkpApexInstallReceiver.java b/src/org/lineageos/lineageparts/teedebug/RkpApexInstallReceiver.java
+new file mode 100644
+index 0000000..6ffc75f
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/RkpApexInstallReceiver.java
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.lineageparts.teedebug;
++
++import android.content.BroadcastReceiver;
++import android.content.Context;
++import android.content.Intent;
++
++/** Explicit, non-exported target of the installer result PendingIntent. */
++public final class RkpApexInstallReceiver extends BroadcastReceiver {
++    @Override
++    public void onReceive(Context context, Intent intent) {
++        PendingResult result = goAsync();
++        RkpApexUpdater.receive(intent, result::finish);
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/RkpApexUpdater.java b/src/org/lineageos/lineageparts/teedebug/RkpApexUpdater.java
+new file mode 100644
+index 0000000..7ee620b
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/RkpApexUpdater.java
+@@ -0,0 +1,411 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.lineageparts.teedebug;
++
++import android.app.PendingIntent;
++import android.content.Context;
++import android.content.Intent;
++import android.content.SharedPreferences;
++import android.content.pm.PackageInfo;
++import android.content.pm.PackageInstaller;
++import android.content.pm.PackageManager;
++import android.net.Uri;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.SystemProperties;
++import android.os.UserHandle;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.system.OsConstants;
++import android.util.Xml;
++import android.util.proto.ProtoInputStream;
++import android.util.proto.ProtoStream;
++
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.util.Enumeration;
++import java.util.HashSet;
++import java.util.Set;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.function.Consumer;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipFile;
++
++import org.xmlpull.v1.XmlPullParser;
++import org.xmlpull.v1.XmlPullParserException;
++
++/** One fixed APEX, system-verified signatures, no shell or direct apexd access. */
++final class RkpApexUpdater {
++    static final String PACKAGE = "org.system.tee.soft.rkp";
++    private static final String ACTION = PACKAGE + ".INSTALL_RESULT";
++    private static final String SESSION = "session";
++    private static final String VERSION = "version";
++    private static final long MAX_BYTES = 64L * 1024 * 1024;
++    private static final Handler MAIN = new Handler(Looper.getMainLooper());
++    private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
++    private static Context sContext;
++    private static SharedPreferences sPrefs;
++    private static File sFile;
++    private static volatile String sPhase = "";
++    private static volatile boolean sPending;
++    private static volatile long sCandidate;
++    private static volatile long sActiveVersion = -1;
++    private static volatile boolean sRefreshing;
++    // Only this coordinator's worker changes ownership; never release another job's lock.
++    private static boolean sOwnsLock;
++
++    private static final class UpdateFailure extends IOException {
++        UpdateFailure(String message) { super(message); }
++    }
++
++    private RkpApexUpdater() {}
++
++    static void initialize(Context context) {
++        sContext = context.getApplicationContext();
++        sPrefs = sContext.getSharedPreferences("tee_soft_rkp_component", Context.MODE_PRIVATE);
++        sFile = new File(sContext.getFilesDir(), "rkp-component.apex");
++        sPending = sPrefs.contains(SESSION);
++        if (sPending) {
++            sPhase = "installing";
++            sCandidate = sPrefs.getLong(VERSION, 0);
++        }
++        WORKER.execute(() -> {
++            sActiveVersion = readActiveVersion();
++            if (sPrefs.contains(SESSION)) reconcile();
++            else {
++                // A crash can occur between createSession and persisting its ID.
++                // Clean only this installer's unsealed drafts for this exact package.
++                try {
++                    for (PackageInstaller.SessionInfo info : installer().getMySessions()) {
++                        if (PACKAGE.equals(info.getAppPackageName())
++                                && sContext.getPackageName().equals(info.getInstallerPackageName())
++                                && !info.isCommitted() && !info.isSealed()) {
++                            abandon(info.getSessionId());
++                        }
++                    }
++                } catch (RuntimeException ignored) {
++                    // These drafts were never committed and cannot install by themselves.
++                }
++                sFile.delete(); // Never resume a draft install after process death.
++            }
++        });
++    }
++
++    private static PackageInstaller installer() {
++        return sContext.getPackageManager().getPackageInstaller();
++    }
++
++    static boolean pending() { return sPending; }
++    static String phase() { return sPhase; }
++    static String result() { return sPrefs.getString("result", ""); }
++    static int resultCode() { return sPrefs.getInt("code", 0); }
++    static String resultMessage() { return sPrefs.getString("message", ""); }
++
++    static long activeVersion() { return sActiveVersion; }
++    static boolean refreshing() { return sRefreshing; }
++    static boolean allowedUser() { return UserHandle.myUserId() == UserHandle.USER_SYSTEM; }
++
++    static void refreshVersion() {
++        sRefreshing = true;
++        WORKER.execute(() -> {
++            sActiveVersion = readActiveVersion();
++            sRefreshing = false;
++        });
++    }
++
++    private static long readActiveVersion() {
++        try (InputStream in = new FileInputStream("/apex/apex-info-list.xml")) {
++            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++            copy(in, bytes, 1024 * 1024);
++            XmlPullParser parser = Xml.newPullParser();
++            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false);
++            parser.setInput(new ByteArrayInputStream(bytes.toByteArray()), "UTF-8");
++            long version = -1;
++            int event;
++            while ((event = parser.nextToken()) != XmlPullParser.END_DOCUMENT) {
++                if (event == XmlPullParser.DOCDECL) return -1;
++                if (event != XmlPullParser.START_TAG || !"apex-info".equals(parser.getName())
++                        || !PACKAGE.equals(parser.getAttributeValue(null, "moduleName"))
++                        || !"true".equals(parser.getAttributeValue(null, "isActive"))) continue;
++                if (version != -1) return -1;
++                version = Long.parseLong(parser.getAttributeValue(null, "versionCode"));
++                if (version < 1) return -1;
++            }
++            return version;
++        } catch (IOException | XmlPullParserException | RuntimeException e) {
++            return -1;
++        }
++    }
++
++    static boolean prepare(Uri uri, Consumer<Long> callback) {
++        if (!allowedUser() || sPending || !KeyboxUpdater.acquireForApex()) return false;
++        sPending = true;
++        sPhase = "checking";
++        WORKER.execute(() -> {
++            sOwnsLock = true;
++            long version = -1;
++            try {
++                requireIdle();
++                try (InputStream in = sContext.getContentResolver().openInputStream(uri);
++                        FileOutputStream out = new FileOutputStream(sFile)) {
++                    if (in == null) throw new UpdateFailure("Cannot open selected document");
++                    copy(in, out, MAX_BYTES);
++                    out.getFD().sync();
++                }
++                sCandidate = inspect();
++                sPhase = "confirm";
++                version = sCandidate;
++            } catch (IOException | RuntimeException e) {
++                finish("failed", -1, e instanceof UpdateFailure ? e.getMessage()
++                        : "Cannot read or validate selected update");
++            }
++            final long candidate = version;
++            MAIN.post(() -> callback.accept(candidate));
++        });
++        return true;
++    }
++
++    static void cancelPrepared() {
++        WORKER.execute(() -> {
++            if ("confirm".equals(sPhase)) {
++                sFile.delete();
++                release();
++            }
++        });
++    }
++
++    static void installPrepared() {
++        WORKER.execute(() -> {
++            if (!"confirm".equals(sPhase)) return;
++            int id = -1;
++            boolean commitAttempted = false;
++            try {
++                requireIdle();
++                if (inspect() != sCandidate) throw new UpdateFailure("Candidate changed");
++                PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
++                        PackageInstaller.SessionParams.MODE_FULL_INSTALL);
++                params.setInstallAsApex();
++                params.setAppPackageName(PACKAGE);
++                params.isStaged = false;
++                params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED);
++                params.setSize(sFile.length());
++                id = installer().createSession(params);
++                // Persist before writing/committing so process recovery can find this exact session.
++                if (!sPrefs.edit().putInt(SESSION, id).putLong(VERSION, sCandidate)
++                        .remove("result").remove("message").commit()) {
++                    throw new UpdateFailure("Cannot save installation session");
++                }
++                sPhase = "installing";
++                try (PackageInstaller.Session session = installer().openSession(id);
++                        InputStream in = new FileInputStream(sFile);
++                        OutputStream out = session.openWrite("update.apex", 0, sFile.length())) {
++                    copy(in, out, MAX_BYTES);
++                    session.fsync(out);
++                }
++                Intent result = new Intent(sContext, RkpApexInstallReceiver.class)
++                        .setAction(ACTION);
++                PendingIntent pending = PendingIntent.getBroadcast(sContext, id, result,
++                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE);
++                try (PackageInstaller.Session session = installer().openSession(id)) {
++                    commitAttempted = true;
++                    session.commit(pending.getIntentSender());
++                }
++                sFile.delete();
++                scheduleReconcile();
++            } catch (IOException | RuntimeException e) {
++                if (commitAttempted) {
++                    // A lost commit reply must not trigger a second installation.
++                    scheduleReconcile();
++                } else if (abandon(id)) {
++                    finish("failed", -1, e.getMessage());
++                } else {
++                    // Keep persisted exclusion until the system state can be read again.
++                    scheduleReconcile();
++                }
++            }
++        });
++    }
++
++    static void receive(Intent intent, Runnable completion) {
++        WORKER.execute(() -> {
++            try {
++                int id = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1);
++                if (!ACTION.equals(intent.getAction()) || id < 0
++                        || id != sPrefs.getInt(SESSION, -1)) return;
++                int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS,
++                        PackageInstaller.STATUS_FAILURE);
++                if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
++                    // Privileged update should not request another installer UI.
++                    if (abandon(id)) finish("failed", status, "Unexpected user action request");
++                    else scheduleReconcile();
++                } else if (status == PackageInstaller.STATUS_SUCCESS) {
++                    confirmActivation();
++                } else {
++                    finish("failed", status,
++                            intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE));
++                }
++            } catch (RuntimeException e) {
++                scheduleReconcile();
++            } finally {
++                completion.run();
++            }
++        });
++    }
++
++    private static void scheduleReconcile() {
++        MAIN.removeCallbacks(RECONCILE);
++        MAIN.postDelayed(RECONCILE, 2000);
++    }
++
++    private static final Runnable RECONCILE = () -> WORKER.execute(() -> {
++        if (sPrefs.contains(SESSION)) reconcile();
++    });
++
++    private static void reconcile() {
++        try {
++            if (!sOwnsLock) sOwnsLock = KeyboxUpdater.acquireForApex();
++            if (!sOwnsLock) {
++                scheduleReconcile();
++                return;
++            }
++            int id = sPrefs.getInt(SESSION, -1);
++            PackageInstaller.SessionInfo info = installer().getSessionInfo(id);
++            if (info == null) {
++                // The status broadcast may have been lost; never recommit or reissue.
++                confirmActivation();
++            } else if (!info.isCommitted() && !info.isSealed()) {
++                if (abandon(id)) finish("interrupted", -1, "Uncommitted session interrupted");
++                else scheduleReconcile();
++            } else {
++                scheduleReconcile();
++            }
++        } catch (RuntimeException e) {
++            scheduleReconcile();
++        }
++    }
++
++    private static void confirmActivation() {
++        long active = readActiveVersion();
++        sActiveVersion = active;
++        long expected = sPrefs.getLong(VERSION, -1);
++        if (active > 0 && active == expected) finish("success", 0, "");
++        else finish("unconfirmed", -1, "Active version could not confirm this update");
++    }
++
++    private static boolean abandon(int id) {
++        if (id < 0) return true;
++        try {
++            if (installer().getSessionInfo(id) != null) installer().abandonSession(id);
++            return true;
++        } catch (RuntimeException e) {
++            return false;
++        }
++    }
++
++    private static void finish(String result, int code, String message) {
++        sActiveVersion = readActiveVersion();
++        // System diagnostic only: do not persist the selected URI or package contents.
++        String detail = message == null ? "" : message.replaceAll("[\\p{Cntrl}]", " ");
++        if (detail.length() > 512) detail = detail.substring(0, 512);
++        if (!sPrefs.edit().putString("result", result).putInt("code", code)
++                .putString("message", detail).remove(SESSION).remove(VERSION).commit()) {
++            sPhase = "state_error";
++            return; // Keep exclusion; do not hide a possibly unresolved session.
++        }
++        sFile.delete();
++        release();
++    }
++
++    private static void release() {
++        sPhase = "";
++        sPending = false;
++        if (sOwnsLock) {
++            sOwnsLock = false;
++            KeyboxUpdater.releaseForApex();
++        }
++    }
++
++    private static void requireIdle() throws IOException {
++        if (!TeeSoftDebugConfig.read().getOrDefault(KeyboxUpdater.RKP_JOB, "").isEmpty()) {
++            throw new UpdateFailure("An issuance result is still pending");
++        }
++        String status = SystemProperties.get("init.svc.tee_soft_rkp_issuer", "");
++        if ("stopped".equals(status)) return;
++        if (status.isEmpty()
++                && SystemProperties.get("ro.boottime.tee_soft_rkp_issuer", "").isEmpty()) {
++            try {
++                Os.lstat("/dev/socket/tee_soft_rkp_issuer");
++            } catch (ErrnoException e) {
++                if (e.errno == OsConstants.ENOENT) return; // Never started this boot.
++            }
++        }
++        throw new UpdateFailure("Issuer is running or its state is unavailable");
++    }
++
++    private static void copy(InputStream in, OutputStream out, long limit) throws IOException {
++        byte[] buffer = new byte[32768];
++        long total = 0;
++        int count;
++        while ((count = in.read(buffer)) != -1) {
++            total += count;
++            if (total > limit) throw new UpdateFailure("Package exceeds the size limit");
++            out.write(buffer, 0, count);
++        }
++        if (total == 0) throw new UpdateFailure("Empty package");
++    }
++
++    private static long inspect() throws IOException {
++        long active = readActiveVersion();
++        sActiveVersion = active;
++        if (active < 1) throw new UpdateFailure("Active component version is unavailable");
++        // Inspect the fixed private copy, not the mutable document-provider URI.
++        PackageInfo outer = sContext.getPackageManager().getPackageArchiveInfo(
++                sFile.getAbsolutePath(), PackageManager.PackageInfoFlags.of(0));
++        if (outer == null || !PACKAGE.equals(outer.packageName)
++                || outer.getLongVersionCode() <= active) {
++            throw new UpdateFailure("Wrong package or version is not newer");
++        }
++        try (ZipFile zip = new ZipFile(sFile)) {
++            Set<String> names = new HashSet<>();
++            Enumeration<? extends ZipEntry> entries = zip.entries();
++            while (entries.hasMoreElements()) {
++                if (!names.add(entries.nextElement().getName()) || names.size() > 1024) {
++                    throw new UpdateFailure("Invalid package entries");
++                }
++            }
++            if (!names.contains("apex_payload.img") || !names.contains("apex_pubkey")
++                    || !names.contains("apex_manifest.pb")) {
++                throw new UpdateFailure("An uncompressed APEX is required");
++            }
++            ByteArrayOutputStream manifest = new ByteArrayOutputStream();
++            try (InputStream in = zip.getInputStream(zip.getEntry("apex_manifest.pb"))) {
++                copy(in, manifest, 65536);
++            }
++            ProtoInputStream proto = new ProtoInputStream(
++                    new ByteArrayInputStream(manifest.toByteArray()));
++            String name = null;
++            long version = -1;
++            while (proto.nextField() != ProtoInputStream.NO_MORE_FIELDS) {
++                if (proto.getFieldNumber() == 1) {
++                    if (name != null) throw new UpdateFailure("Duplicate manifest name");
++                    name = proto.readString(ProtoStream.FIELD_COUNT_SINGLE
++                            | ProtoStream.FIELD_TYPE_STRING | 1);
++                } else if (proto.getFieldNumber() == 2) {
++                    if (version != -1) throw new UpdateFailure("Duplicate manifest version");
++                    version = proto.readLong(ProtoStream.FIELD_COUNT_SINGLE
++                            | ProtoStream.FIELD_TYPE_INT64 | 2);
++                }
++            }
++            if (!PACKAGE.equals(name) || version != outer.getLongVersionCode()) {
++                throw new UpdateFailure("Inconsistent APEX identity or version");
++            }
++            return version;
++        }
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/RkpIssuerClient.java b/src/org/lineageos/lineageparts/teedebug/RkpIssuerClient.java
+new file mode 100644
+index 0000000..b53bccc
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/RkpIssuerClient.java
+@@ -0,0 +1,144 @@
++/*
++ * SPDX-FileCopyrightText: 2026 The LineageOS Project
++ * SPDX-License-Identifier: Apache-2.0
++ */
++package org.lineageos.lineageparts.teedebug;
++
++import android.net.LocalSocket;
++import android.net.LocalSocketAddress;
++import android.os.SystemClock;
++import android.os.SystemProperties;
++
++import org.json.JSONException;
++import org.json.JSONObject;
++import org.lineageos.lineageparts.R;
++
++import java.io.DataInputStream;
++import java.io.DataOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.function.Consumer;
++
++/** Fixed, versioned protocol. Never forwards arbitrary HAL commands or logs key material. */
++final class RkpIssuerClient {
++    private static final String SERVICE = "tee_soft_rkp_issuer";
++    private static final int MAX_FRAME = 128 * 1024;
++
++    static final class Failure extends IOException {
++        final String stage;
++        final int code;
++        Failure(String stage, int code) {
++            super("RKP issuance failed");
++            this.stage = stage;
++            this.code = code;
++        }
++    }
++
++    private RkpIssuerClient() {}
++
++    static byte[] issue(String job, boolean resume, Consumer<String> progress) throws IOException {
++        if (!resume) {
++            try {
++                SystemProperties.set("ctl.start", SERVICE);
++            } catch (RuntimeException e) {
++                throw new Failure("starting", -1);
++            }
++        }
++        long deadline = SystemClock.elapsedRealtime() + 150000;
++        long readyDeadline = SystemClock.elapsedRealtime() + 5000;
++        String stage = "starting";
++        boolean received = false;
++        while (SystemClock.elapsedRealtime() < deadline) {
++            JSONObject reply;
++            try {
++                // Repeated start with the same job ID is idempotent. Resume never starts issuance.
++                reply = exchange(job, !resume && !received ? "start" : "query");
++            } catch (IOException e) {
++                if (SystemClock.elapsedRealtime() >= readyDeadline) throw new Failure(stage, -1);
++                pause();
++                continue;
++            }
++            received = true;
++            try {
++                stage = reply.getString("stage");
++                progress.accept(stage);
++                String status = reply.getString("status");
++                if ("error".equals(status)) throw new Failure(stage, reply.getInt("code"));
++                if ("success".equals(status)) {
++                    byte[] xml = reply.getString("xml").getBytes(StandardCharsets.UTF_8);
++                    if (xml.length == 0 || xml.length > MAX_FRAME / 2) throw new Failure("verify", -1);
++                    return xml;
++                }
++                if (!"running".equals(status)) throw new Failure(stage, -1);
++            } catch (JSONException e) {
++                throw new Failure(stage, -1);
++            }
++            // Allow brief transport failures when reconnecting to an existing task.
++            readyDeadline = SystemClock.elapsedRealtime() + 5000;
++            pause();
++        }
++        throw new Failure(stage, -2);
++    }
++
++    static void acknowledge(String job) {
++        try {
++            exchange(job, "ack");
++        } catch (IOException ignored) {
++            // Helper also discards unclaimed results and exits after its idle timeout.
++        }
++    }
++
++    private static JSONObject exchange(String job, String action) throws IOException {
++        try (LocalSocket socket = new LocalSocket()) {
++            socket.connect(new LocalSocketAddress(SERVICE, LocalSocketAddress.Namespace.RESERVED));
++            // connect() creates the underlying FD; setOption() cannot run before that.
++            socket.setSoTimeout(3000);
++            if (socket.getPeerCredentials().getUid() != 1000) throw new IOException("Invalid issuer peer");
++            JSONObject request = new JSONObject();
++            request.put("version", 1);
++            request.put("action", action);
++            request.put("job", job);
++            byte[] data = request.toString().getBytes(StandardCharsets.UTF_8);
++            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
++            out.writeInt(data.length);
++            out.write(data);
++            out.flush();
++            DataInputStream in = new DataInputStream(socket.getInputStream());
++            int length = in.readInt();
++            if (length <= 0 || length > MAX_FRAME) throw new IOException("Invalid issuer frame");
++            byte[] response = new byte[length];
++            in.readFully(response);
++            JSONObject reply = new JSONObject(new String(response, StandardCharsets.UTF_8));
++            if (reply.getInt("version") != 1 || !job.equals(reply.getString("job"))) {
++                throw new IOException("Invalid issuer reply");
++            }
++            return reply;
++        } catch (JSONException e) {
++            throw new IOException("Invalid issuer protocol", e);
++        }
++    }
++
++    private static void pause() throws IOException {
++        try {
++            Thread.sleep(500);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            throw new IOException("Issuer wait interrupted", e);
++        }
++    }
++
++    static int stageResource(String stage) {
++        switch (stage) {
++            case "generate": return R.string.tee_soft_rkp_stage_generate;
++            case "hardware": return R.string.tee_soft_rkp_stage_hardware;
++            case "challenge": return R.string.tee_soft_rkp_stage_challenge;
++            case "csr": return R.string.tee_soft_rkp_stage_csr;
++            case "submit": return R.string.tee_soft_rkp_stage_submit;
++            case "verify": return R.string.tee_soft_rkp_stage_verify;
++            case "ready": return R.string.tee_soft_rkp_stage_receive;
++            case "install": return R.string.tee_soft_rkp_stage_install;
++            case "complete": return R.string.tee_soft_rkp_success;
++            default: return R.string.tee_soft_rkp_stage_starting;
++        }
++    }
++}
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java
+index b1163ad..e36552f 100644
+--- a/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftAdvancedSettings.java
+@@ -4,6 +4,9 @@
+  */
+ package org.lineageos.lineageparts.teedebug;
+ 
++import android.app.Activity;
++import android.content.ActivityNotFoundException;
++import android.content.Intent;
+ import android.os.Bundle;
+ import android.os.Handler;
+ import android.os.Looper;
+@@ -11,6 +14,9 @@ import android.text.InputType;
+ import android.text.format.DateFormat;
+ import android.widget.Toast;
+ 
++import androidx.activity.result.ActivityResultLauncher;
++import androidx.activity.result.contract.ActivityResultContracts;
++import androidx.appcompat.app.AlertDialog;
+ import androidx.preference.EditTextPreference;
+ import androidx.preference.ListPreference;
+ import androidx.preference.Preference;
+@@ -28,6 +34,44 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+     private ListPreference mFormat;
+     private Preference mUpdate;
+     private Preference mResult;
++    private Preference mRkpIssue;
++    private Preference mRkpResult;
++    private Preference mComponentVersion;
++    private Preference mComponentUpdate;
++    private Preference mComponentResult;
++    private AlertDialog mComponentDialog;
++    private final ActivityResultLauncher<Intent> mComponentPicker = registerForActivityResult(
++            new ActivityResultContracts.StartActivityForResult(), result -> {
++                if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null
++                        || result.getData().getData() == null) return;
++                boolean started = RkpApexUpdater.prepare(result.getData().getData(), version -> {
++                    if (!isResumed()) {
++                        RkpApexUpdater.cancelPrepared();
++                        return;
++                    }
++                    if (version > 0) {
++                        mComponentDialog = new AlertDialog.Builder(requireContext())
++                                .setTitle(R.string.tee_soft_component_install)
++                                .setMessage(getString(R.string.tee_soft_component_confirm,
++                                        Long.toString(RkpApexUpdater.activeVersion()),
++                                        Long.toString(version)))
++                                .setPositiveButton(android.R.string.ok,
++                                        (dialog, which) -> RkpApexUpdater.installPrepared())
++                                .setNegativeButton(android.R.string.cancel, null)
++                                .create();
++                        mComponentDialog.setOnDismissListener(dialog -> {
++                            RkpApexUpdater.cancelPrepared();
++                            mComponentDialog = null;
++                        });
++                        mComponentDialog.show();
++                    }
++                    refresh();
++                });
++                if (!started) Toast.makeText(requireContext(), R.string.tee_soft_update_busy,
++                        Toast.LENGTH_SHORT).show();
++                mHandler.removeCallbacks(this.mRefresh);
++                this.mRefresh.run();
++            });
+     private String mSource = "";
+     private String mEncoding = KeyboxUpdater.RAW;
+     private final Runnable mRefresh = new Runnable() {
+@@ -35,9 +79,12 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+         public void run() {
+             if (!isResumed()) return;
+             boolean wasBusy = KeyboxUpdater.busy();
++            boolean wasRefreshing = RkpApexUpdater.refreshing();
+             refresh();
+             // One final refresh also covers completion between reading config and busy state.
+-            if (wasBusy || KeyboxUpdater.busy()) mHandler.postDelayed(this, 500);
++            if (wasBusy || KeyboxUpdater.busy() || wasRefreshing || RkpApexUpdater.refreshing()) {
++                mHandler.postDelayed(this, 500);
++            }
+         }
+     };
+ 
+@@ -52,6 +99,30 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+         mFormat = findPreference("tee_soft_update_format");
+         mUpdate = findPreference("tee_soft_update_now");
+         mResult = findPreference("tee_soft_update_result");
++        mRkpIssue = findPreference("tee_soft_rkp_issue");
++        mRkpResult = findPreference("tee_soft_rkp_result");
++        mComponentVersion = findPreference("tee_soft_component_version");
++        mComponentUpdate = findPreference("tee_soft_component_update");
++        mComponentResult = findPreference("tee_soft_component_result");
++        mComponentUpdate.setOnPreferenceClickListener(preference -> {
++            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT)
++                    .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
++                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
++            try {
++                mComponentPicker.launch(intent);
++            } catch (ActivityNotFoundException e) {
++                Toast.makeText(requireContext(), R.string.tee_soft_component_no_picker,
++                        Toast.LENGTH_LONG).show();
++            }
++            return true;
++        });
++        mRkpIssue.setOnPreferenceClickListener(preference -> {
++            if (KeyboxUpdater.startRkp()) {
++                mHandler.removeCallbacks(mRefresh);
++                mRefresh.run();
++            }
++            return true;
++        });
+         mUrl.setOnBindEditTextListener(edit -> {
+             edit.setSingleLine(true);
+             edit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+@@ -91,12 +162,15 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+     @Override
+     public void onResume() {
+         super.onResume();
++        RkpApexUpdater.refreshVersion();
++        KeyboxUpdater.resumeRkpIfNeeded();
+         mHandler.removeCallbacks(mRefresh);
+         mRefresh.run();
+     }
+ 
+     @Override
+     public void onPause() {
++        if (mComponentDialog != null) mComponentDialog.dismiss();
+         mHandler.removeCallbacks(mRefresh);
+         super.onPause();
+     }
+@@ -114,6 +188,8 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+     }
+ 
+     private void refresh() {
++        refreshComponent();
++        KeyboxUpdater.resumeRkpIfNeeded();
+         final Map<String, String> config;
+         try {
+             config = TeeSoftDebugConfig.read();
+@@ -121,11 +197,13 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+             mUrl.setEnabled(false);
+             mFormat.setEnabled(false);
+             mUpdate.setEnabled(false);
++            mRkpIssue.setEnabled(false);
+             mResult.setVisible(true);
+             mResult.setSummary(R.string.tee_soft_update_error_config);
+             return;
+         }
+         boolean busy = KeyboxUpdater.busy();
++        refreshRkp(config, busy);
+         mSource = config.getOrDefault(KeyboxUpdater.URL_KEY, "");
+         mEncoding = KeyboxUpdater.BASE64.equals(config.get(KeyboxUpdater.FORMAT_KEY))
+                 ? KeyboxUpdater.BASE64 : KeyboxUpdater.RAW;
+@@ -158,4 +236,58 @@ public class TeeSoftAdvancedSettings extends SettingsPreferenceFragment {
+             mResult.setSummary(KeyboxUpdater.errorResource(result));
+         }
+     }
++
++    private void refreshComponent() {
++        long active = RkpApexUpdater.activeVersion();
++        mComponentVersion.setSummary(active > 0 ? Long.toString(active)
++                : getString(R.string.tee_soft_component_version_unknown));
++        mComponentUpdate.setEnabled(RkpApexUpdater.allowedUser()
++                && !KeyboxUpdater.busy() && active > 0);
++        String phase = RkpApexUpdater.phase();
++        if ("checking".equals(phase)) {
++            mComponentUpdate.setSummary(R.string.tee_soft_component_checking);
++        } else if ("confirm".equals(phase)) {
++            mComponentUpdate.setSummary(R.string.tee_soft_component_awaiting_confirmation);
++        } else if ("state_error".equals(phase)) {
++            mComponentUpdate.setSummary(R.string.tee_soft_component_state_error);
++        } else if (RkpApexUpdater.pending()) {
++            mComponentUpdate.setSummary(R.string.tee_soft_component_installing);
++        } else {
++            mComponentUpdate.setSummary(R.string.tee_soft_component_description);
++        }
++        String result = RkpApexUpdater.result();
++        mComponentResult.setVisible(!result.isEmpty());
++        if ("success".equals(result)) {
++            mComponentResult.setSummary(R.string.tee_soft_component_success);
++        } else if ("unconfirmed".equals(result)) {
++            mComponentResult.setSummary(R.string.tee_soft_component_unconfirmed);
++        } else if ("interrupted".equals(result)) {
++            mComponentResult.setSummary(R.string.tee_soft_component_interrupted);
++        } else if (!result.isEmpty()) {
++            mComponentResult.setSummary(getString(R.string.tee_soft_component_failed,
++                    Integer.toString(RkpApexUpdater.resultCode()), RkpApexUpdater.resultMessage()));
++        }
++    }
++
++    private void refreshRkp(Map<String, String> config, boolean busy) {
++        mRkpIssue.setEnabled(!busy);
++        mRkpIssue.setSummary(KeyboxUpdater.rkpRunning()
++                ? RkpIssuerClient.stageResource(KeyboxUpdater.rkpStage())
++                : R.string.tee_soft_rkp_description);
++        String result = KeyboxUpdater.rkpResult();
++        boolean inMemory = result != null;
++        if (result == null) result = config.getOrDefault(KeyboxUpdater.RKP_RESULT, "");
++        mRkpResult.setVisible(!result.isEmpty());
++        if ("success".equals(result)) {
++            mRkpResult.setSummary(R.string.tee_soft_rkp_success);
++        } else if (!result.isEmpty()) {
++            String stage = inMemory ? KeyboxUpdater.rkpStage()
++                    : config.getOrDefault(KeyboxUpdater.RKP_STAGE, "starting");
++            String code = inMemory ? Integer.toString(KeyboxUpdater.rkpCode())
++                    : config.getOrDefault(KeyboxUpdater.RKP_CODE, "-1");
++            mRkpResult.setSummary(getString(R.string.tee_soft_rkp_failed,
++                    getString(RkpIssuerClient.stageResource(stage)), code));
++        }
++    }
++
+ }
+diff --git a/src/org/lineageos/lineageparts/teedebug/TeeSoftApplication.java b/src/org/lineageos/lineageparts/teedebug/TeeSoftApplication.java
+new file mode 100644
+index 0000000..7408ae4
+--- /dev/null
++++ b/src/org/lineageos/lineageparts/teedebug/TeeSoftApplication.java
+@@ -0,0 +1,13 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++package org.lineageos.lineageparts.teedebug;
++
++import android.app.Application;
++
++/** Restore installation exclusion before any settings fragment starts work. */
++public final class TeeSoftApplication extends Application {
++    @Override
++    public void onCreate() {
++        super.onCreate();
++        RkpApexUpdater.initialize(this);
++    }
++}
+-- 
+2.43.0
+

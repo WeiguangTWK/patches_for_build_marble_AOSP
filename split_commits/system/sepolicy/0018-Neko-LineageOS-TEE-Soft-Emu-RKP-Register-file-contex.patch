@@ -1,0 +1,30 @@
+From 10dac2d0b64dc5d8019cdfe90df895681ce8b0af Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 12:07:03 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Register file contexts for
+ the TEE Soft RKP APEX
+
+Change-Id: I6dad9fa39a409f4c20f4ce0dedc3c0fb10624736
+---
+ apex/Android.bp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/apex/Android.bp b/apex/Android.bp
+index efcc860..df58d0a 100644
+--- a/apex/Android.bp
++++ b/apex/Android.bp
+@@ -22,6 +22,11 @@ package {
+ 
+ // TODO(b/236681553): Remove com.android.bluetooth-file_contexts
+ 
++filegroup {
++    name: "org.system.tee.soft.rkp-file_contexts",
++    srcs: [":tee_soft_rkp_apex_file_contexts_source"],
++}
++
+ filegroup {
+     name: "com.android.platform.integrity-file_contexts",
+     srcs: [":aster_apex_file_contexts_source"],
+-- 
+2.43.0
+

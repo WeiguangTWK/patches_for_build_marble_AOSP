@@ -1,0 +1,32 @@
+From ba15e8287bacf1357aba5880073f5e0db0a2600f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 12:05:41 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Enable NDK bindings for
+ the TEE Soft RKP APEX
+
+Change-Id: I336995eecacbf2392db9aedd63e9c21939474696
+---
+ security/rkp/aidl/Android.bp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/security/rkp/aidl/Android.bp b/security/rkp/aidl/Android.bp
+index df8a0ef7..99dce269 100644
+--- a/security/rkp/aidl/Android.bp
++++ b/security/rkp/aidl/Android.bp
+@@ -19,6 +19,13 @@ aidl_interface {
+     ],
+     stability: "vintf",
+     backend: {
++        ndk: {
++            apex_available: [
++                "//apex_available:platform",
++                "org.system.tee.soft.rkp",
++            ],
++            min_sdk_version: "35",
++        },
+         java: {
+             min_sdk_version: "33",
+             apex_available: [
+-- 
+2.43.0
+

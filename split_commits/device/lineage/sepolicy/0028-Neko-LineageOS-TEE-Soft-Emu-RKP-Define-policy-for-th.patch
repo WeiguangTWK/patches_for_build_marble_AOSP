@@ -1,0 +1,91 @@
+From 1b42dd529253da50a0cd46bee35673de647bac26 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 11:42:14 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Define policy for the TEE
+ Soft RKP issuer
+
+Add a dedicated issuer domain with KeyMint HAL, Binder and network access,
+plus a restricted socket connection from system_app.
+
+Allow the exact service start control while separately denying the legacy
+control fallback. Expose helper lifecycle properties and read-only APEX
+activation metadata for component update coordination.
+
+Change-Id: Idc79f9be18ea7b97ed46c2ac2ee7da08abe67d05
+---
+ common/private/file_contexts          |  3 +++
+ common/private/property.te            |  4 ++++
+ common/private/property_contexts      |  6 ++++++
+ common/private/tee_soft_rkp_issuer.te | 23 +++++++++++++++++++++++
+ 4 files changed, 36 insertions(+)
+ create mode 100644 common/private/tee_soft_rkp_issuer.te
+
+diff --git a/common/private/file_contexts b/common/private/file_contexts
+index edab6de..ee28672 100644
+--- a/common/private/file_contexts
++++ b/common/private/file_contexts
+@@ -74,3 +74,6 @@
+ 
+ # Bash
+ /(system_ext|system/system_ext)/bin/bash          u:object_r:shell_exec:s0
++
++# On-demand TEE Soft Emu RKP issuer.
++/dev/socket/tee_soft_rkp_issuer u:object_r:tee_soft_rkp_issuer_socket:s0
+diff --git a/common/private/property.te b/common/private/property.te
+index 79483f6..b1c9ea6 100644
+--- a/common/private/property.te
++++ b/common/private/property.te
+@@ -16,3 +16,7 @@ system_internal_prop(updater_uri_prop)
+ 
+ # nhoverride global state
+ system_public_prop(nhoverride_prop)
++
++# On-demand TEE Soft Emu RKP issuer controls.
++system_internal_prop(ctl_tee_soft_rkp_issuer_start_prop)
++system_internal_prop(ctl_tee_soft_rkp_issuer_legacy_prop)
+diff --git a/common/private/property_contexts b/common/private/property_contexts
+index cb033f0..650a186 100644
+--- a/common/private/property_contexts
++++ b/common/private/property_contexts
+@@ -66,3 +66,9 @@ sys.integrity.fasd_boot u:object_r:platform_integrity_fasd_boot_prop:s0 exact st
+ 
+ 
+ sys.integrity.tee_status u:object_r:platform_integrity_tee_ack_prop:s0 exact string
++
++# Label the legacy fallback separately; UI is allowed only the exact start action.
++ctl.tee_soft_rkp_issuer        u:object_r:ctl_tee_soft_rkp_issuer_legacy_prop:s0 exact string
++ctl.start$tee_soft_rkp_issuer  u:object_r:ctl_tee_soft_rkp_issuer_start_prop:s0 exact string
++init.svc.tee_soft_rkp_issuer   u:object_r:init_service_status_prop:s0 exact string
++ro.boottime.tee_soft_rkp_issuer u:object_r:boottime_public_prop:s0 exact string
+diff --git a/common/private/tee_soft_rkp_issuer.te b/common/private/tee_soft_rkp_issuer.te
+new file mode 100644
+index 0000000..4231175
+--- /dev/null
++++ b/common/private/tee_soft_rkp_issuer.te
+@@ -0,0 +1,23 @@
++# SPDX-FileCopyrightText: 2026 The LineageOS Project
++# SPDX-License-Identifier: Apache-2.0
++# On-demand V1 RKP issuer. No access to current Keybox/config installation files.
++type tee_soft_rkp_issuer, domain;
++typeattribute tee_soft_rkp_issuer coredomain;
++type tee_soft_rkp_issuer_exec, exec_type, system_file_type, file_type;
++type tee_soft_rkp_issuer_socket, file_type;
++
++init_daemon_domain(tee_soft_rkp_issuer)
++binder_use(tee_soft_rkp_issuer)
++hal_client_domain(tee_soft_rkp_issuer, hal_keymint)
++net_domain(tee_soft_rkp_issuer)
++get_prop(tee_soft_rkp_issuer, fingerprint_prop)
++
++# Only the fixed request protocol is exposed, not a general HAL proxy.
++unix_socket_connect(system_app, tee_soft_rkp_issuer, tee_soft_rkp_issuer)
++set_prop(system_app, ctl_tee_soft_rkp_issuer_start_prop)
++# Block the legacy ctl.<service> path, including stop/restart through that path.
++neverallow system_app ctl_tee_soft_rkp_issuer_legacy_prop:property_service set;
++
++# Component management reads apexd's published activation list, without its Binder API.
++allow system_app apex_info_file:file r_file_perms;
++get_prop(system_app, boottime_public_prop)
+-- 
+2.43.0
+

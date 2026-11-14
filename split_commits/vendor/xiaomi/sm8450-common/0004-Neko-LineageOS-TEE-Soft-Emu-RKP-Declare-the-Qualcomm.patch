@@ -1,0 +1,27 @@
+From a1b22953dd0481ac1444701d56adce110d3bb5dc Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 12:10:22 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Declare the Qualcomm RKP
+ HAL instance
+
+Change-Id: I10860fbe3c3aade7e2c8c1f5c5db88a3b93f3475
+---
+ .../android.hardware.security.keymint-service-qti.xml         | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/proprietary/vendor/etc/vintf/manifest/android.hardware.security.keymint-service-qti.xml b/proprietary/vendor/etc/vintf/manifest/android.hardware.security.keymint-service-qti.xml
+index 329eb40..a6d80fd 100644
+--- a/proprietary/vendor/etc/vintf/manifest/android.hardware.security.keymint-service-qti.xml
++++ b/proprietary/vendor/etc/vintf/manifest/android.hardware.security.keymint-service-qti.xml
+@@ -35,4 +35,8 @@ This file is copied from
+         <name>android.hardware.security.secureclock</name>
+         <fqname>ISecureClock/default</fqname>
+     </hal>
++    <hal format="aidl">
++        <name>android.hardware.security.keymint</name>
++        <fqname>IRemotelyProvisionedComponent/default</fqname>
++    </hal>
+ </manifest>
+-- 
+2.43.0
+

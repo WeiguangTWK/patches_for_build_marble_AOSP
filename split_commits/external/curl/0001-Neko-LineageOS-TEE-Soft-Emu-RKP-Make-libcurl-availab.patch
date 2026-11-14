@@ -1,0 +1,30 @@
+From 28c39d6a4c6e74a1c919976ed402055af2dc63ec Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 11:50:48 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Make libcurl available to
+ the TEE Soft RKP APEX
+
+Change-Id: I3d9a4bffe98b2e71e561cbcc957ae478c370969a
+---
+ Android.bp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index 1f953ee..9511dd3 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -87,6 +87,11 @@ cc_defaults {
+ 
+ cc_library {
+     name: "libcurl",
++    apex_available: [
++        "//apex_available:platform",
++        "org.system.tee.soft.rkp",
++    ],
++    min_sdk_version: "35",
+     vendor_available: true,
+     product_available: true,
+     defaults: ["curl_common_defaults"],
+-- 
+2.43.0
+

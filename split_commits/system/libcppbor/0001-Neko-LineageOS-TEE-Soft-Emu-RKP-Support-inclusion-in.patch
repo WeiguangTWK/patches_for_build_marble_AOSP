@@ -1,0 +1,30 @@
+From 321b7df94ea08b0630224d7d3eaebdaa43af47fd Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 11:58:57 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Support inclusion in the
+ TEE Soft RKP APEX
+
+Change-Id: If9591b10ab5ce873f19f7e2ed8aab826c3cb8461
+---
+ Android.bp | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index 3ce158c..d84bae5 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -41,6 +41,11 @@ cc_defaults {
+ 
+ cc_library {
+     name: "libcppbor",
++    apex_available: [
++        "//apex_available:platform",
++        "org.system.tee.soft.rkp",
++    ],
++    min_sdk_version: "35",
+     defaults: [
+         "libcppbor_defaults",
+     ],
+-- 
+2.43.0
+

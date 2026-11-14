@@ -1,0 +1,42 @@
+From 47cb606f1a3a92d64f5847791eb43765b33a35b3 Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 11:43:54 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Allow TEE Soft RKP APEX
+ dependencies
+
+Change-Id: I64a69e0e7ba17f7f8b685f4d2b273b74aa68c5c1
+---
+ Android.bp | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/Android.bp b/Android.bp
+index 1a85058..4eedecf 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -190,6 +190,7 @@ cc_object {
+         "com.android.resolv",
+         "com.android.virt",
+         "com.android.wifi",
++        "org.system.tee.soft.rkp",
+     ],
+ }
+ 
+@@ -295,6 +296,7 @@ cc_library {
+         "com.android.resolv",
+         "com.android.virt",
+         "com.android.wifi",
++        "org.system.tee.soft.rkp",
+     ],
+     min_sdk_version: "29",
+     afdo: true,
+@@ -491,6 +493,7 @@ cc_library {
+         "com.android.resolv",
+         "com.android.virt",
+         "com.android.wifi",
++        "org.system.tee.soft.rkp",
+     ],
+     min_sdk_version: "29",
+ }
+-- 
+2.43.0
+

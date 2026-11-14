@@ -1,0 +1,38 @@
+From 450c9f5bac0798c59aa57ca1515673710e44ee4f Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Sat, 14 Nov 2026 12:08:28 +0800
+Subject: [PATCH] Neko LineageOS: [TEE Soft Emu-RKP] Preserve the RKP HAL
+ declaration during extraction
+
+Add an idempotent fixup for the legacy Qualcomm KeyMint manifest to
+declare IRemotelyProvisionedComponent/default when absent.
+
+Change-Id: I7068644613fcec324339752ecf334a71299a9298
+---
+ extract-files.py | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/extract-files.py b/extract-files.py
+index fb238a8..cc4fc75 100755
+--- a/extract-files.py
++++ b/extract-files.py
+@@ -58,6 +58,16 @@ blob_fixups: blob_fixups_user_type = {
+         .add_needed('libinput_shim.so'),
+     'system_ext/lib64/vendor.qti.hardware.qccsyshal@1.2-halimpl.so': blob_fixup()
+         .replace_needed('libprotobuf-cpp-full.so', 'libprotobuf-cpp-full-21.7.so'),
++    # The vendor implementation already contains the RKP registration path.
++    # Keep its declaration when extracting legacy manifests without the RKP HAL.
++    'vendor/etc/vintf/manifest/android.hardware.security.keymint-service-qti.xml': blob_fixup()
++        .regex_replace(
++            r'(?s)\A(?!.*<fqname>\s*IRemotelyProvisionedComponent/default\s*</fqname>)(.*)</manifest>\s*\Z',
++            r'\1    <hal format="aidl">\n'
++            r'        <name>android.hardware.security.keymint</name>\n'
++            r'        <fqname>IRemotelyProvisionedComponent/default</fqname>\n'
++            r'    </hal>\n</manifest>\n',
++        ),
+     (
+         'vendor/bin/hw/android.hardware.security.keymint-service-qti',
+         'vendor/lib64/libqtikeymint.so',
+-- 
+2.43.0
+
