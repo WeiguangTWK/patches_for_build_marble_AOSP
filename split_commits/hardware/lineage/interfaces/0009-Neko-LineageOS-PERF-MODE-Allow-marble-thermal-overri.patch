@@ -1,0 +1,125 @@
+From fe2598ffe058896dde32e814c56eb5140823b4db Mon Sep 17 00:00:00 2001
+From: WeiguangTWK <weiguangtwk@outlook.com>
+Date: Fri, 13 Nov 2026 15:01:01 +0800
+Subject: [PATCH] Neko LineageOS: [PERF MODE] Allow marble thermal overrides
+ outside charging sessions
+
+Apply marble thermal overrides according to the requested mode regardless
+of charging state. Keep battery events only for the optional charge-current
+kick and preserve the existing node-backed fast-charge behavior.
+
+Report thermal file and daemon restart failures instead of caching them
+as successful transitions. Wait for daemon stop/start acknowledgements and
+reconcile defaults at HAL startup, since file absence alone does not prove
+that the daemon has restored its default policy.
+
+Change-Id: I63fb5340ac5c0ffa9cd56c66d20d99b3636a1bc8
+---
+ health/aidl/default/FastCharge.cpp | 36 +++++++++++++++++++++++++-----
+ 1 file changed, 30 insertions(+), 6 deletions(-)
+
+diff --git a/health/aidl/default/FastCharge.cpp b/health/aidl/default/FastCharge.cpp
+index 8208a0e..382ac1c 100644
+--- a/health/aidl/default/FastCharge.cpp
++++ b/health/aidl/default/FastCharge.cpp
+@@ -182,6 +182,10 @@ FastCharge::FastCharge() : mBackend(detectBackend()) {
+     mAppliedMode = readAppliedMode();
+     if (mBackend == FastChargeBackend::NODE && mAppliedMode) {
+         mRequestedMode = *mAppliedMode;
++    } else if (mBackend == FastChargeBackend::MARBLE_THERMAL) {
++        // Files alone cannot prove what the daemon has loaded. A prior process may
++        // have removed them and failed to restart the daemon while disabling.
++        mAppliedMode.reset();
+     }
+ 
+     {
+@@ -319,6 +323,9 @@ bool FastCharge::applyModeLocked(FastChargeMode mode) {
+ }
+ 
+ bool FastCharge::reconcileLocked() {
++    if (mBackend == FastChargeBackend::MARBLE_THERMAL) {
++        return applyMarbleModeLocked(mRequestedMode);
++    }
+     const auto chargeSessionActive = isChargeSessionActive();
+     if (!chargeSessionActive) {
+         return false;
+@@ -391,15 +398,18 @@ bool FastCharge::applyMarbleModeLocked(FastChargeMode mode) {
+         return false;
+     }
+ 
++    // A partial write or failed daemon restart must never be cached as applied.
++    mAppliedMode.reset();
+     if (!writeMarbleThermalOverrideLocked()) {
+         return false;
+     }
+ 
+     if (!restartMarbleThermalDaemonLocked()) {
+-        LOG(WARNING) << "Marble thermal override applied without daemon restart";
++        LOG(ERROR) << "Marble thermal override could not be activated";
++        return false;
+     }
+ 
+-    if (!kickMarbleChargeCurrentLimitLocked()) {
++    if (isChargeSessionActive().value_or(false) && !kickMarbleChargeCurrentLimitLocked()) {
+         LOG(WARNING) << "Marble thermal override applied without FCC kick";
+     }
+ 
+@@ -408,6 +418,7 @@ bool FastCharge::applyMarbleModeLocked(FastChargeMode mode) {
+ }
+ 
+ bool FastCharge::restoreMarbleDefaultLocked() {
++    mAppliedMode.reset();
+     bool ok = true;
+ 
+     for (const auto& entry : kMarbleSceneOverrides) {
+@@ -423,7 +434,8 @@ bool FastCharge::restoreMarbleDefaultLocked() {
+     }
+ 
+     if (!restartMarbleThermalDaemonLocked()) {
+-        LOG(WARNING) << "Marble thermal override removed without daemon restart";
++        LOG(ERROR) << "Marble default thermal policy could not be restored";
++        return false;
+     }
+ 
+     mAppliedMode = FastChargeMode::NONE;
+@@ -461,14 +473,19 @@ bool FastCharge::restartMarbleThermalDaemonLocked() {
+         return false;
+     }
+ 
+-    std::this_thread::sleep_for(std::chrono::seconds(1));
++    const bool stopped = android::base::WaitForProperty(
++            "init.svc.mi_thermald", "stopped", std::chrono::seconds(3));
+ 
+     if (!android::base::SetProperty("ctl.start", kMarbleThermalDaemonService)) {
+         LOG(WARNING) << "Failed to start " << kMarbleThermalDaemonService;
+         return false;
+     }
+ 
+-    std::this_thread::sleep_for(std::chrono::seconds(1));
++    if (!android::base::WaitForProperty(
++                "init.svc.mi_thermald", "running", std::chrono::seconds(3)) || !stopped) {
++        LOG(ERROR) << "Timed out waiting for mi_thermald restart";
++        return false;
++    }
+     LOG(INFO) << "Restarted " << kMarbleThermalDaemonService;
+     return true;
+ }
+@@ -562,7 +579,14 @@ void FastCharge::monitorUevents() {
+         }
+ 
+         mChargeSessionActive = *chargeSessionActive;
+-        reconcileLocked(*chargeSessionActive);
++        if (mBackend == FastChargeBackend::MARBLE_THERMAL) {
++            // Plug changes only affect the optional charge-current kick.
++            if (*chargeSessionActive && mAppliedMode == FastChargeMode::FAST_CHARGE) {
++                kickMarbleChargeCurrentLimitLocked();
++            }
++        } else {
++            reconcileLocked(*chargeSessionActive);
++        }
+     }
+ 
+     close(epollFd);
+-- 
+2.43.0
+
